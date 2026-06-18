@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- ═══════════════════════════════════════════════════════════════════
+         DEVELOPMENT / NOTARIZED (Developer ID) BUILDS — sandbox OFF
+         We need full Accessibility + Input Monitoring access, so we cannot
+         run inside the App Sandbox in these modes. Sandbox is only enabled
+         by the dedicated `*.appstore.entitlements` override (not yet shipped
+         — App Store distribution requires input method redesign, see
+         docs/SIGNING.md for the roadmap).
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Hardened Runtime: required for Notarization. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <false/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <false/>
+
+    <!-- Apple Events (for Accessibility `x-apple.systempreferences:` URL hand-offs). -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+
+    <!-- Explicit user-facing purpose strings live in Info.plist.
+         These keys document the APIs we call so reviewers know what to expect:
+           • AXIsProcessTrusted / AXIsProcessTrustedWithOptions  — Accessibility
+           • CGPreflightListenEventAccess / CGRequestListenEventAccess — Input Mon
+           • CGEventTapCreate — low-level key event interception
+           • TISCopyCurrentKeyboardInputSource / TISSelectInputSource — layouts
+         All of these are permissioned per-app via TCC (System Settings). -->
+</dict>
+</plist>
