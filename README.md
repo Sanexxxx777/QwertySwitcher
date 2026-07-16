@@ -94,4 +94,4 @@ Python. This project is deliberately different: a systems-level macOS app —
 raw event taps, keyboard layout APIs, a hand-rolled binary cache format for
 the dictionary — with no framework doing the hard part for you.
 
-— [Aleksandr Shulgin](https://github.com/Sanexxxx777)
+— [Aleksandr Shulgin](https://github.com/Sanexxxx777) (@Aleksandr_NFA)
