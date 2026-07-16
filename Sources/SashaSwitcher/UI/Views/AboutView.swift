@@ -57,10 +57,6 @@ struct AboutView: View {
 
                 Rectangle().fill(Gamma.border).frame(height: 1).padding(.horizontal, 40)
 
-                Text("Создано с помощью Claude (Алиса)")
-                    .font(.system(size: 11))
-                    .foregroundColor(Gamma.textSecondary.opacity(0.6))
-
                 Spacer()
             }
         }
