@@ -592,6 +592,8 @@ private struct FooterButton: View {
             Label(title, systemImage: icon)
                 .font(.appText(11, weight: .medium))
                 .foregroundStyle(theme.textSecondary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
                 .background(isHovered ? theme.bgCardHover : Color.clear)
@@ -616,6 +618,8 @@ private struct LicenseBadge: View {
                 Circle().fill(color).frame(width: 6, height: 6)
                 Text(text)
                     .font(.appText(11, weight: .medium))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .foregroundStyle(color)
             .padding(.horizontal, 10)

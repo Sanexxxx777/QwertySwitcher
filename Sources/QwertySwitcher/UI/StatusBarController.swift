@@ -45,16 +45,6 @@ final class StatusBarController {
             self, selector: #selector(refreshMenu),
             name: .licenseStatusChanged, object: nil
         )
-
-        // TEMP screenshot harness (visual-language review, remove before shipping):
-        // opens Main + License windows on launch, no menu-bar click needed — lets a
-        // headless/no-Accessibility environment still capture both windows.
-        if ProcessInfo.processInfo.environment["QSW_SCREENSHOT_MODE"] != nil {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                self?.openSettings()
-                self?.openLicense()
-            }
-        }
     }
 
     private func setupStatusItem() {
