@@ -47,6 +47,13 @@ final class PreferencesService {
         set { defaults.set(newValue, forKey: keyPrefix + "capsLockSwitch") }
     }
 
+    /// Correct a confidently-mistyped word mid-word (before space/punctuation),
+    /// like Caramba Switcher. When off, only the boundary path corrects words.
+    var isInstantCorrectionEnabled: Bool {
+        get { defaults.object(forKey: keyPrefix + "instantCorrection") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: keyPrefix + "instantCorrection") }
+    }
+
     /// Exactly two supported layouts take part in detection and manual switching.
     var activeLayoutIDs: [String] {
         get { defaults.stringArray(forKey: keyPrefix + "activeLayoutIDs") ?? [] }

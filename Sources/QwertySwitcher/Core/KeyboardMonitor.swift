@@ -46,6 +46,8 @@ final class KeyboardMonitor {
     private let yoficatorService: YoficatorService
     private let switchUndoManager: SwitchUndoManager
     private let perAppLayoutService: PerAppLayoutService
+    private let instantCorrectionAnalyzer: InstantCorrectionAnalyzer
+    private var instantCorrectionGate = InstantCorrectionGate()
     private let secureInputDetector = SecureInputDetector()
     private let permissionsService = PermissionsService()
     var hotkeyManager: HotkeyManager?
@@ -76,7 +78,8 @@ final class KeyboardMonitor {
     init(languageDetector: LanguageDetector, textReplacer: TextReplacer,
          statsService: StatisticsService, prefsService: PreferencesService,
          exceptionsService: ExceptionsService, yoficatorService: YoficatorService,
-         switchUndoManager: SwitchUndoManager, perAppLayoutService: PerAppLayoutService) {
+         switchUndoManager: SwitchUndoManager, perAppLayoutService: PerAppLayoutService,
+         instantCorrectionAnalyzer: InstantCorrectionAnalyzer) {
         self.languageDetector = languageDetector
         self.textReplacer = textReplacer
         self.statsService = statsService
@@ -85,6 +88,7 @@ final class KeyboardMonitor {
         self.yoficatorService = yoficatorService
         self.switchUndoManager = switchUndoManager
         self.perAppLayoutService = perAppLayoutService
+        self.instantCorrectionAnalyzer = instantCorrectionAnalyzer
 
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(appDidActivate),
@@ -347,8 +351,14 @@ final class KeyboardMonitor {
         if InputBuffer.isLetterKey(keycode) {
             switchUndoManager.invalidate()
             autoLearnTracker.registerNonDeletion()
-            if buffer.isEmpty { lastCompletedWord = nil }
+            if buffer.isEmpty {
+                lastCompletedWord = nil
+                instantCorrectionGate.startNewWord()
+            }
             buffer.append(keycode, flags: flags)
+            if canAutoCorrect && prefsService.isInstantCorrectionEnabled && !instantCorrectionGate.wasCorrected {
+                tryInstantCorrection()
+            }
         } else if InputBuffer.isNumberOrSpecial(keycode) {
             switchUndoManager.invalidate()
             let digit = languageDetector.inputSourceManager.trailingCharacter(
@@ -397,6 +407,89 @@ final class KeyboardMonitor {
         buffer.clear()
     }
 
+    /// Evaluate the word buffered so far for an instant (mid-word) correction.
+    /// Unlike `processCurrentWord`, this runs on every buffered letter once the
+    /// buffer reaches `InstantCorrectionAnalyzer.minLength` — no word boundary
+    /// (space/punctuation) is required. On success the active input source is
+    /// switched immediately so the rest of the word types correctly, and
+    /// `InstantCorrectionGate` is marked so the eventual boundary handler does
+    /// not attempt a second correction on the same word.
+    private func tryInstantCorrection() {
+        guard !isPaused else { return }
+        let keystrokes = buffer.currentWord()
+        guard keystrokes.count >= InstantCorrectionAnalyzer.minLength else { return }
+        guard let currentLayout = languageDetector.inputSourceManager.currentLayout else { return }
+        let layouts = languageDetector.activeLayouts
+        guard layouts.count >= 2, layouts.contains(where: { $0.id == currentLayout.id }) else { return }
+        let otherLayouts = layouts.filter { $0.id != currentLayout.id }
+
+        guard let result = instantCorrectionAnalyzer.evaluate(
+            keystrokes: keystrokes,
+            currentLayout: currentLayout,
+            otherLayouts: otherLayouts,
+            convert: { [languageDetector] layout in
+                languageDetector.inputSourceManager.convertKeystrokes(keystrokes, toLayout: layout)
+            }
+        ) else { return }
+
+        if exceptionsService.isWordExcepted(result.correctedWord) {
+            DebugLog.shared.log("KM", "instant skip: word exception match")
+            return
+        }
+        let originalWord = languageDetector.lastConvertedWord(keystrokes: keystrokes)
+        if let orig = originalWord, exceptionsService.isAutoLearned(orig) {
+            DebugLog.shared.log("KM", "instant skip: auto-learned exception")
+            return
+        }
+
+        var correctedWord = result.correctedWord
+        if prefsService.isYoficatorEnabled && result.layout.isRussian {
+            if let yo = yoficatorService.yoficate(correctedWord) { correctedWord = yo }
+        }
+
+        isPaused = true
+        instantCorrectionGate.markCorrected()
+        let length = keystrokes.count
+        textReplacer.replaceCurrentWord(
+            length: length,
+            replacement: correctedWord,
+            targetLayout: result.layout,
+            trailing: nil
+        ) { [weak self] outcome in
+            guard let self else { return }
+            switch outcome {
+            case .success:
+                let original = originalWord ?? ""
+                self.switchUndoManager.record(
+                    originalKeycodes: keystrokes.map(\.keycode),
+                    originalWord: original,
+                    correctedWord: correctedWord,
+                    trailing: nil,
+                    originalLayoutID: currentLayout.id,
+                    targetLayoutID: result.layout.id
+                )
+                if !original.isEmpty {
+                    self.autoLearnTracker.recordCorrection(
+                        original: original, corrected: correctedWord, trailing: nil
+                    )
+                }
+                self.statsService.recordAutoSwitch()
+                SoundService.shared.playSwitch(prefsService: self.prefsService)
+                NotificationCenter.default.post(name: .statsUpdated, object: nil)
+                DebugLog.shared.log(
+                    "KM",
+                    "instant correction: \(currentLayout.languageCode)→\(result.layout.languageCode) len=\(length)"
+                )
+            case .layoutSwitchFailed:
+                self.instantCorrectionGate.reset()
+                DebugLog.shared.log("KM", "instant correction aborted: layout switch verification failed")
+            case .cancelled:
+                DebugLog.shared.log("KM", "instant correction cancelled: editing context changed")
+            }
+            self.finishReplacement()
+        }
+    }
+
     private func invalidateEditingContext() {
         if isPaused {
             invalidateAfterReplacement = true
@@ -407,6 +500,7 @@ final class KeyboardMonitor {
         lastCompletedWord = nil
         autoLearnTracker.cancel()
         switchUndoManager.invalidate()
+        instantCorrectionGate.reset()
         languageDetector.resetContext()
     }
 
@@ -504,6 +598,10 @@ final class KeyboardMonitor {
     @discardableResult
     private func processCurrentWord(trigger: String?) -> Bool {
         guard !isPaused else { return false }
+        if instantCorrectionGate.consumeIfCorrected() {
+            DebugLog.shared.log("KM", "skip boundary correction: already instant-corrected")
+            return false
+        }
         let keystrokes = buffer.currentWord()
         // Require 3+ letters: 2-letter "words" (it/аа/oo) give too many false positives.
         guard keystrokes.count >= 3 else {
