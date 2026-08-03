@@ -15,6 +15,7 @@ final class StatusBarController {
     private var mainWindow: NSWindow?
     private var exceptionsWindow: NSWindow?
     private var aboutWindow: NSWindow?
+    private var licenseWindow: NSWindow?
 
     init(statsService: StatisticsService, prefsService: PreferencesService,
          exceptionsService: ExceptionsService, keyboardMonitor: KeyboardMonitor,
@@ -40,6 +41,10 @@ final class StatusBarController {
             self, selector: #selector(refreshMenu),
             name: .activeLayoutsChanged, object: nil
         )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(refreshMenu),
+            name: .licenseStatusChanged, object: nil
+        )
     }
 
     private func setupStatusItem() {
@@ -62,13 +67,16 @@ final class StatusBarController {
     private func updateStatusIcon() {
         guard let button = statusItem.button else { return }
         let languageCode = (inputSourceManager.currentLayout?.languageCode ?? "?").uppercased()
+        let licensed = LicenseService.shared.isEntitled
         let code = keyboardMonitor.health == .running ? languageCode : "!"
-        let paused = !prefsService.isAutoSwitchEnabled || keyboardMonitor.health != .running
+        let paused = !prefsService.isAutoSwitchEnabled || keyboardMonitor.health != .running || !licensed
         button.image = Self.makeStatusImage(label: code, paused: paused)
         button.imagePosition = .imageOnly
         button.title = ""
         if keyboardMonitor.health != .running {
             button.toolTip = "\(AppIdentity.displayName) · \(keyboardMonitor.health.title)"
+        } else if !licensed {
+            button.toolTip = "\(AppIdentity.displayName) · подписка истекла — активируйте ключ"
         } else {
             button.toolTip = paused
                 ? "\(AppIdentity.displayName) · автопереключение отключено"
@@ -186,6 +194,13 @@ final class StatusBarController {
         settingsItem.target = self
         menu.addItem(settingsItem)
 
+        let licenseTitle = LicenseService.shared.isEntitled
+            ? "Лицензия…"
+            : "⚠ Подписка истекла — Активировать…"
+        let licenseItem = NSMenuItem(title: licenseTitle, action: #selector(openLicense), keyEquivalent: "")
+        licenseItem.target = self
+        menu.addItem(licenseItem)
+
         let exceptionsItem = NSMenuItem(title: "Исключения", action: #selector(openExceptions), keyEquivalent: "")
         exceptionsItem.target = self
         menu.addItem(exceptionsItem)
@@ -243,6 +258,7 @@ final class StatusBarController {
         )
         vm.onOpenAbout = { [weak self] in self?.openAbout() }
         vm.onOpenExceptions = { [weak self] in self?.openExceptions() }
+        vm.onOpenLicense = { [weak self] in self?.openLicense() }
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 660, height: 720),
@@ -304,10 +320,31 @@ final class StatusBarController {
         aboutWindow = window
     }
 
+    @objc private func openLicense() {
+        if let w = licenseWindow, w.isVisible {
+            w.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 480),
+            styleMask: [.titled, .closable],
+            backing: .buffered, defer: false
+        )
+        window.title = "Лицензия"
+        window.contentView = NSHostingView(rootView: LicenseView())
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        licenseWindow = window
+    }
+
     private func confirmDeleteLocalData() {
         let alert = NSAlert()
         alert.alertStyle = .critical
-        alert.messageText = "Удалить все локальные данные Qwerty Switch?"
+        alert.messageText = "Удалить все локальные данные Qwerty Switcher?"
         alert.informativeText = "Будут удалены настройки, статистика, исключения, обученные слова, кэш и логи. Отменить это действие нельзя."
         alert.addButton(withTitle: "Удалить")
         alert.addButton(withTitle: "Отмена")

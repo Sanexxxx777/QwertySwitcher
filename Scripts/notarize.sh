@@ -19,11 +19,11 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_BUNDLE="$PROJECT_DIR/build/Qwerty Switch.app"
-ZIP_PATH="$PROJECT_DIR/build/QwertySwitch.zip"
+APP_BUNDLE="$PROJECT_DIR/build/Qwerty Switcher.app"
+ZIP_PATH="$PROJECT_DIR/build/QwertySwitcher.zip"
 KEYCHAIN_PROFILE="${NOTARY_PROFILE:-notarize-sasha}"
 VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$PROJECT_DIR/Resources/Info.plist")
-DMG_PATH="$PROJECT_DIR/build/QwertySwitch-$VERSION.dmg"
+DMG_PATH="$PROJECT_DIR/build/QwertySwitcher-$VERSION.dmg"
 TARGET="${1:-app}"
 
 case "$TARGET" in

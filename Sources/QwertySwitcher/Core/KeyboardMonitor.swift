@@ -301,6 +301,7 @@ final class KeyboardMonitor {
             return
         }
         let canAutoCorrect = prefsService.isAutoSwitchEnabled
+            && LicenseService.shared.isEntitled
             && !exceptionsService.isCurrentAppExcepted()
             && !isSpotlight
 
@@ -413,7 +414,7 @@ final class KeyboardMonitor {
     /// Returns true if a correction was applied. Called from Double Shift hotkey.
     @discardableResult
     func swapLastWordInBuffer() -> Bool {
-        guard !isPaused else { return false }
+        guard !isPaused, LicenseService.shared.isEntitled else { return false }
         var keystrokes = buffer.currentWord()
         var trailing: String? = nil
         var source = "buffer"

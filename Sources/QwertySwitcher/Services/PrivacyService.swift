@@ -4,11 +4,13 @@ import Foundation
 final class PrivacyService {
     /// Privacy policy summary (shown in About view)
     static let policyText = """
-    Qwerty Switch — кратко о приватности:
+    Qwerty Switcher — кратко о приватности:
 
-    1. Обработка выполняется локально — данные не покидают Mac.
+    1. Весь ввод обрабатывается локально и никогда не покидает Mac.
     2. Приложение не хранит историю набора и сырые нажатия клавиш.
-    3. В приложении нет аналитики, телеметрии и сетевой отправки.
+    3. Аналитики и телеметрии нет. Лицензионная проверка отправляет на сервер
+       только анонимный идентификатор устройства (hwid) и версию приложения —
+       никогда набираемый текст.
     4. Для определения раскладки анализируется только текущее слово в памяти.
     5. Защищённые поля автоматически пропускаются и не буферизуются.
 
@@ -21,7 +23,7 @@ final class PrivacyService {
 
     Буфер обмена читается только при включённой команде «Вставить без форматирования»,
     временно заменяется plain-text представлением и затем восстанавливается. Его
-    содержимое не записывается в хранилище Qwerty Switch.
+    содержимое не записывается в хранилище Qwerty Switcher.
 
     Удаление локальных данных:
     - обученные пары: «Исключения» → «Авто-обучение» → «Очистить»;
@@ -64,9 +66,9 @@ final class PrivacyService {
             return
         }
         let directories = [
-            library.appendingPathComponent("Application Support/QwertySwitch", isDirectory: true),
+            library.appendingPathComponent("Application Support/QwertySwitcher", isDirectory: true),
             library.appendingPathComponent("Application Support/SashaSwitcher", isDirectory: true),
-            library.appendingPathComponent("Logs/QwertySwitch", isDirectory: true),
+            library.appendingPathComponent("Logs/QwertySwitcher", isDirectory: true),
             library.appendingPathComponent("Logs/SashaSwitcher", isDirectory: true),
         ]
         for directory in directories where fm.fileExists(atPath: directory.path) {

@@ -12,7 +12,7 @@ struct ExceptionsView: View {
                     Text("Исключения")
                         .font(.nfaSans(19, weight: .semibold))
                         .foregroundColor(Gamma.textPrimary)
-                    Text("Что Qwerty Switch не должен исправлять")
+                    Text("Что Qwerty Switcher не должен исправлять")
                         .font(.nfaSans(11))
                         .foregroundColor(Gamma.textSecondary)
                 }

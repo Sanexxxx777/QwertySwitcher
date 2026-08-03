@@ -41,15 +41,16 @@ struct AboutView: View {
                     infoRow("Горячие клавиши", "Shift / Double Shift / L+R Shift")
                     infoRow("Аналитика", "Нет (privacy-first)")
                     infoRow("Статус", "Локальная beta")
-                    infoRow("Приватность", "100% локально, 0 телеметрии")
+                    infoRow("Приватность", "Ввод — локально, 0 телеметрии")
                 }
                 .padding(.horizontal, 24)
 
                 Rectangle().fill(Gamma.border).frame(height: 1).padding(.horizontal, 40)
 
-                    Text("История набора не хранится · текст не покидает Mac")
+                    Text("Весь ввод обрабатывается локально и никогда не покидает Mac.\nЛицензионная проверка отправляет только анонимный идентификатор устройства.")
                     .font(.nfaSans(11))
                     .foregroundColor(Gamma.textMuted)
+                    .multilineTextAlignment(.center)
 
                     Text(PrivacyService.policyText)
                         .font(.nfaSans(10))

@@ -4,5 +4,9 @@
 <dict>
     <key>com.apple.security.app-sandbox</key>
     <true/>
+    <!-- App Sandbox blocks all outbound network by default; the license
+         check needs this to reach the license server. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
 </dict>
 </plist>

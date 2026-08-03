@@ -21,7 +21,7 @@ struct OnboardingView: View {
                     .frame(width: 40, height: 40)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Настройка Qwerty Switch")
+                        Text("Настройка Qwerty Switcher")
                             .font(.nfaSans(19, weight: .semibold))
                             .foregroundStyle(Gamma.textPrimary)
                         Text("Два системных разрешения — текст остаётся на Mac")

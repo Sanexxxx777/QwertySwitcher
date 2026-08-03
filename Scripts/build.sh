@@ -1,5 +1,5 @@
 #!/bin/bash
-# Qwerty Switch build script — supports three signing modes.
+# Qwerty Switcher build script — supports three signing modes.
 #
 #   dev       (default) — persistent self-signed identity. TCC permissions
 #                         survive rebuilds. No Apple Developer Program needed.
@@ -17,8 +17,8 @@ set -euo pipefail
 MODE="${1:-dev}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$PROJECT_DIR/build"
-PRODUCT_NAME="Qwerty Switch"
-BINARY_NAME="SashaSwitcher"
+PRODUCT_NAME="Qwerty Switcher"
+BINARY_NAME="QwertySwitcher"
 APP_BUNDLE="$BUILD_DIR/$PRODUCT_NAME.app"
 
 SWIFT_SDK_ARGS=()
@@ -29,13 +29,13 @@ if [[ "$DEVELOPER_PATH" != *"Xcode.app/Contents/Developer"* ]] && [ -d "$COMPATI
     echo "Using compatible CLT SDK: $COMPATIBLE_CLT_SDK"
 fi
 
-ENTITLEMENTS="$PROJECT_DIR/Resources/SashaSwitcher.entitlements"
+ENTITLEMENTS="$PROJECT_DIR/Resources/QwertySwitcher.entitlements"
 case "$MODE" in
     dev)          SIGN_IDENTITY="SashaSwitcher Developer" ;;
     developerid)  SIGN_IDENTITY="${DEVELOPER_ID_APP:-Developer ID Application}" ;;
     appstore)     SIGN_IDENTITY="${APPLE_DISTRIBUTION:-Apple Distribution}"
                   # App Store build uses a dedicated entitlements file
-                  ENTITLEMENTS="$PROJECT_DIR/Resources/QwertySwitch.appstore.entitlements" ;;
+                  ENTITLEMENTS="$PROJECT_DIR/Resources/QwertySwitcher.appstore.entitlements" ;;
     *)            echo "Unknown mode: $MODE. Use dev | developerid | appstore"; exit 2 ;;
 esac
 

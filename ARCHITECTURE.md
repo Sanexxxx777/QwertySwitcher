@@ -1,10 +1,11 @@
-# Qwerty Switch — архитектура (v0.3.0)
+# Qwerty Switcher — архитектура (v0.3.0)
 
 Нативное menu-bar приложение для macOS 13+, которое локально определяет неверную
 раскладку набираемого слова, переключает источник ввода и исправляет текст.
-Публичное имя и bundle ID: `Qwerty Switch`, `tech.sasha.qwertyswitch`.
-Внутреннее имя SwiftPM-target/executable `SashaSwitcher` сохранено, чтобы не делать
-рискованное механическое переименование исходного дерева.
+Публичное имя и bundle ID: `Qwerty Switcher`, `tech.sasha.qwertyswitch`.
+Внутреннее имя SwiftPM-target/executable переименовано из `SashaSwitcher` в
+`QwertySwitcher` 03.08.2026; signing identity осталась "SashaSwitcher Developer"
+(смена сбросит TCC-разрешения).
 
 ## Стек
 
@@ -24,7 +25,7 @@
 ## Основные компоненты
 
 ```text
-Sources/SashaSwitcher/
+Sources/QwertySwitcher/
 ├── AppIdentity.swift               публичные и legacy-идентификаторы
 ├── AppDelegate.swift               создание сервисов, onboarding, health polling
 ├── Core/
@@ -46,8 +47,8 @@ Sources/SashaSwitcher/
 ```
 
 Legacy-настройки `tech.sasha.switcher.*` мигрируются один раз в новый namespace.
-Новые данные находятся в `~/Library/Application Support/QwertySwitch`, журнал —
-в `~/Library/Logs/QwertySwitch/debug.log`.
+Новые данные находятся в `~/Library/Application Support/QwertySwitcher`, журнал —
+в `~/Library/Logs/QwertySwitcher/debug.log`.
 
 ## Поток обработки
 

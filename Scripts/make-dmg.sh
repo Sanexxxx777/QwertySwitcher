@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build Qwerty Switch as a universal binary (arm64 + x86_64), sign it in
+# Build Qwerty Switcher as a universal binary (arm64 + x86_64), sign it in
 # either local-development or Developer ID mode, and package the result as DMG.
 #
 # NOTE: In Stage 1 (self-signed) the first launch on another Mac will be
@@ -15,10 +15,10 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$PROJECT_DIR/build"
-PRODUCT_NAME="Qwerty Switch"
-BINARY_NAME="SashaSwitcher"
+PRODUCT_NAME="Qwerty Switcher"
+BINARY_NAME="QwertySwitcher"
 APP_BUNDLE="$BUILD_DIR/$PRODUCT_NAME.app"
-ENTITLEMENTS="$PROJECT_DIR/Resources/SashaSwitcher.entitlements"
+ENTITLEMENTS="$PROJECT_DIR/Resources/QwertySwitcher.entitlements"
 ARM64_SCRATCH="$PROJECT_DIR/.build/universal-arm64"
 X86_64_SCRATCH="$PROJECT_DIR/.build/universal-x86_64"
 
@@ -57,7 +57,7 @@ if [ -z "$VERSION" ]; then
 fi
 
 DMG_STAGE=$(mktemp -d /private/tmp/qwerty-switch-dmg.XXXXXX)
-DMG_OUT="$BUILD_DIR/QwertySwitch-$VERSION.dmg"
+DMG_OUT="$BUILD_DIR/QwertySwitcher-$VERSION.dmg"
 DMG_IDENTIFIER="tech.sasha.qwertyswitch.dmg"
 
 echo "=== Building universal $PRODUCT_NAME (v$VERSION, mode: $MODE) ==="
@@ -137,9 +137,9 @@ ln -s /Applications "$DMG_STAGE/Applications"
 
 # README for the recipient (Cyrillic)
 cat > "$DMG_STAGE/ПРОЧТИ_МЕНЯ.txt" <<'README_EOF'
-Qwerty Switch — установка
+Qwerty Switcher — установка
 
-1. Перетащи Qwerty Switch.app в папку "Applications" (иконка справа).
+1. Перетащи Qwerty Switcher.app в папку "Applications" (иконка справа).
 
 2. ПЕРВЫЙ ЗАПУСК:
    Публичная версия с Developer ID и notarization открывается обычным двойным
@@ -148,7 +148,7 @@ Qwerty Switch — установка
 
    В self-signed beta разрешить запуск можно так:
      — открой папку Applications в Finder
-     — правый клик (или Ctrl+клик) по Qwerty Switch
+     — правый клик (или Ctrl+клик) по Qwerty Switcher
      — выбери "Открыть" (Open)
      — в появившемся окне ещё раз нажми "Открыть"
 
@@ -188,12 +188,12 @@ if [ -e "$DMG_OUT" ]; then
 fi
 if ! diskutil image create from \
     --format UDZO \
-    --volumeName "Qwerty Switch $VERSION" \
+    --volumeName "Qwerty Switcher $VERSION" \
     "$DMG_STAGE" \
     "$DMG_OUT" >/dev/null; then
     echo "  diskutil image create is unavailable; using the legacy hdiutil fallback."
     hdiutil create \
-        -volname "Qwerty Switch $VERSION" \
+        -volname "Qwerty Switcher $VERSION" \
         -srcfolder "$DMG_STAGE" \
         -ov -format UDZO \
         "$DMG_OUT" >/dev/null

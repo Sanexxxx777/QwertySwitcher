@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-// Headless test mode: `SashaSwitcher --test` runs unit tests and exits.
+// Headless test mode: `QwertySwitcher --test` runs unit tests and exits.
 if CommandLine.arguments.contains("--test") {
     exit(Int32(TestRunner.run()))
 }

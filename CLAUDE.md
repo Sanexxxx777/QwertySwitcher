@@ -1,4 +1,4 @@
-# Qwerty Switch — macOS Keyboard Layout Auto-Switcher
+# Qwerty Switcher — macOS Keyboard Layout Auto-Switcher
 
 Нативное macOS приложение для автоматического переключения раскладки клавиатуры (аналог Caramba Switcher).
 
@@ -9,7 +9,7 @@
 
 ## Structure
 ```
-Sources/SashaSwitcher/
+Sources/QwertySwitcher/
 ├── main.swift, AppDelegate.swift
 ├── Core/          — KeyboardMonitor, LanguageDetector, TextReplacer, HotkeyManager,
 │                    InputBuffer, InputSourceManager, SecureInputDetector,
@@ -34,13 +34,13 @@ swift build                     # debug (0.1s cached)
 ```
 
 ## Канон имён и путей (стандарт 03.08.2026 — НЕ плодить копии)
-- **Установленная копия ОДНА: `/Applications/Qwerty Switch.app`** — после `build.sh` обновлять её через `ditto "build/Qwerty Switch.app" "/Applications/Qwerty Switch.app"`, НЕ запускать из build/.
-- `build` — симлинк на `build.noindex/` (Spotlight не индексирует сборки; лечит расплод «Qwerty Switch.previous-*» в поиске). Не переименовывать обратно.
+- **Установленная копия ОДНА: `/Applications/Qwerty Switcher.app`** — после `build.sh` обновлять её через `ditto "build/Qwerty Switcher.app" "/Applications/Qwerty Switcher.app"`, НЕ запускать из build/.
+- `build` — симлинк на `build.noindex/` (Spotlight не индексирует сборки; лечит расплод «Qwerty Switcher.previous-*» в поиске). Не переименовывать обратно.
 - Previous-копия сборки/DMG хранится РОВНО одна: `build/previous/` (скрипты сами ротируют). Таймстампованных `.previous-*` больше не существует — их появление = регресс скриптов.
-- Публичное имя `Qwerty Switch`, bundle `tech.sasha.qwertyswitch` (AppIdentity.swift — единственный источник). Внутренний модуль/binary `SashaSwitcher` и signing identity "SashaSwitcher Developer" — НЕ переименовывать: смена identity сбросит TCC-разрешения.
+- Публичное имя `Qwerty Switcher`, bundle `tech.sasha.qwertyswitch` (AppIdentity.swift — единственный источник). Внутренний модуль/binary переименован из `SashaSwitcher` в `QwertySwitcher` 03.08.2026; signing identity осталась "SashaSwitcher Developer" — НЕ переименовывать: смена identity сбросит TCC-разрешения.
 - Скрипты — bash 3.2 (системный): пустые массивы раскрывать ТОЛЬКО как `${ARR[@]+"${ARR[@]}"}`, иначе `set -u` роняет сборку после стадии компиляции (пойман 03.08: codesign не выполнялся).
 
-Debug logs: `~/Library/Logs/QwertySwitch/debug.log` (rotation at 1MB).
+Debug logs: `~/Library/Logs/QwertySwitcher/debug.log` (rotation at 1MB).
 Menu → "Показать логи" / "Открыть папку логов".
 
 ## Key Features
@@ -59,9 +59,21 @@ Menu → "Показать логи" / "Открыть папку логов".
 - **Stage 2:** Developer ID + notarization для публичного DMG. Финальный путь: `make-dmg.sh developerid` → `notarize.sh dmg`; и `.app`, и DMG получают timestamped Developer ID signature.
 - **Stage 3:** отдельная App Store sandbox-сборка и `.pkg` pipeline подготовлены. Нужны реальные Apple certificate/profile, чистый Mac test и App Review; статический реверс sandboxed Caramba/Lang не заменяет этот live-test.
 
+## Лицензирование (v0.4.0, 03.08.2026)
+- Модель: подписка по ключам `QSW-XXXX-XXXX-XXXX` + триал 14 дней, привязка к hardware UUID (IOPlatformUUID) — переустановка не сбрасывает срок.
+- Сервер: S1 `/root/qsw-license/` (Flask, pm2 `qsw-license`, bind 127.0.0.1:8377), наружу `https://backend-test.45-82-95-142.nip.io:8443/qsw/v1/*` (nginx-location в `developer-contact-api`, `/qsw/admin` снаружи = 404). Админ — ТОЛЬКО с S1: `source /root/qsw-license/.env; curl -H "X-Admin-Token: $QSW_ADMIN_TOKEN" http://127.0.0.1:8377/admin/…` (шпаргалка `deploy-notes.md` там же).
+- Крипта: ответы сервера подписаны Ed25519; приватный ключ ТОЛЬКО на S1 (`server_ed25519.pem`, chmod 600, Мак его не видел); публичный вшит в `Services/LicenseService.swift`. Канонизация payload = python `json.dumps(sort_keys=True,separators=(",",":"))` — Swift собирает строку руками, НЕ JSONEncoder.
+- Клиент: состояние в Keychain (`tech.sasha.qwertyswitch.license`, переживает переустановку); check-in при старте + каждые 12ч; офлайн-грейс 14 дней; первый запуск офлайн → provisional-триал до первого контакта с сервером; откат часов ловится maxSeen. Enforcement: `canAutoCorrect` и Double Shift гейтятся `LicenseService.shared.isEntitled`; Single Shift и Undo сознательно НЕ гейтятся.
+- Приватность честно: ввод локально, на сервер уходит ТОЛЬКО hwid + версия (формулировка в UI/About обновлена; «0 телеметрии» больше не заявляем).
+- Граница защиты: обходы переустановкой/чисткой файлов/откатом часов закрыты; патч бинарника реверсом — НЕ закрыт (нативное приложение без обфускации, честный предел).
+
+## Current v0.4.0 (2026-08-03)
+- Переименование завершено: продукт «Qwerty Switcher», модуль/binary `QwertySwitcher`, версия `0.4.0 (4)`.
+- Лицензионный слой (см. выше). Тесты: `125 passed, 0 failed, 1 GUI-only skipped`.
+
 ## Current v0.3.0 audit (2026-08-02)
 
-- Публичное имя `Qwerty Switch`, bundle ID `tech.sasha.qwertyswitch`, версия `0.3.0 (3)`.
+- Публичное имя `Qwerty Switcher`, bundle ID `tech.sasha.qwertyswitch`, версия `0.3.0 (3)`.
 - Исправлены layout-aware trailing symbols, Russian Shift+б/ю, строгая проверка Bloom cache и пустого словаря.
 - Secure Input не кэширует `false`; modifier/focus changes инвалидируют старые word/Undo state.
 - Асинхронная замена имеет cancellation token и не пишет Undo/статистику после смены контекста.

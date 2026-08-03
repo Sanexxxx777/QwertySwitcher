@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "SashaSwitcher",
+    name: "QwertySwitcher",
     platforms: [.macOS(.v13)],
     targets: [
         .executableTarget(
-            name: "SashaSwitcher",
-            path: "Sources/SashaSwitcher",
+            name: "QwertySwitcher",
+            path: "Sources/QwertySwitcher",
             resources: [
                 .copy("../../Resources/Dictionaries"),
                 .copy("../../Resources/Fonts"),
@@ -16,6 +16,7 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("Carbon"),
                 .linkedFramework("AppKit"),
+                .linkedFramework("IOKit"),
             ]
         ),
     ]
