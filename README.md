@@ -1,14 +1,16 @@
-# SashaSwitcher
+# Qwerty Switcher
 
 Native macOS keyboard layout auto-switcher. If you type in two languages on the
 same physical keyboard — most commonly Russian on a ЙЦУКЕН/QWERTY layout — you've
 hit this: your fingers type the right word, but the OS is on the wrong layout,
-so `привет` comes out as `ghbdtn`. SashaSwitcher watches keystrokes system-wide,
+so `привет` comes out as `ghbdtn`. Qwerty Switcher watches keystrokes system-wide,
 figures out which language you actually meant, and retypes the word in the
 correct layout automatically.
 
 It's a from-scratch macOS analog of Punto Switcher / Caramba Switcher: menu-bar
-only (no Dock icon), 100% local, no network calls, no telemetry.
+only (no Dock icon). All typing analysis is 100% local — keystrokes never
+leave the Mac; the only network call is a license check that sends an
+anonymous device id (14-day free trial, then a subscription key).
 
 ## How it works
 
@@ -53,18 +55,18 @@ Full pipeline, scoring formula and file layout: [`ARCHITECTURE.md`](ARCHITECTURE
   route most "typing helper" apps use
 - Custom Bloom filter with its own binary cache format (`.ssbf`) instead of
   pulling in a dependency for a lookup structure this small
-- Standalone test runner (`SashaSwitcher --test`) — no XCTest/Xcode required
+- Standalone test runner (`QwertySwitcher --test`) — no XCTest/Xcode required
   to run the suite
 
 ## Build & run
 
 ```bash
-git clone https://github.com/Sanexxxx777/SashaSwitcher.git
-cd SashaSwitcher
+git clone https://github.com/Sanexxxx777/QwertySwitcher.git
+cd QwertySwitcher
 swift build                     # debug build
 ./Scripts/test.sh               # unit tests, no Xcode needed
 ./Scripts/build.sh              # release .app bundle
-open build/SashaSwitcher.app
+open "build/Qwerty Switcher.app"
 ```
 
 First launch asks for **Accessibility** and **Input Monitoring** permissions
@@ -83,8 +85,8 @@ by `CGEventTap` being incompatible with the App Sandbox) are documented in
 
 ## Privacy
 
-Everything runs locally: no network calls, no analytics, no keystroke
-logging. `PrivacyService` audits `UserDefaults` on launch for anything that
+All typing analysis runs locally: no analytics, no keystroke logging. The
+license check transmits only an anonymous hardware id and the app version. `PrivacyService` audits `UserDefaults` on launch for anything that
 looks like it could be leaking typed text.
 
 ## About this repo
