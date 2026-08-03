@@ -29,11 +29,14 @@ final class StatusIndicatorController {
         let size = NSSize(width: 64, height: 64)
         hostingView.frame = NSRect(origin: .zero, size: size)
 
-        // Position: top-right corner of main screen
-        guard let screen = NSScreen.main else { return }
+        let mouseLocation = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main else {
+            return
+        }
+        let visibleFrame = screen.visibleFrame
         let origin = NSPoint(
-            x: screen.frame.maxX - size.width - 20,
-            y: screen.frame.maxY - size.height - 40 // below menu bar
+            x: visibleFrame.maxX - size.width - 20,
+            y: visibleFrame.maxY - size.height - 20
         )
 
         if let window = indicatorWindow {
@@ -58,12 +61,15 @@ final class StatusIndicatorController {
             self.indicatorWindow = window
         }
 
-        // Entrance: scale up
-        indicatorWindow?.alphaValue = 0
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.2
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            indicatorWindow?.animator().alphaValue = 1
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            indicatorWindow?.alphaValue = 1
+        } else {
+            indicatorWindow?.alphaValue = 0
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.16
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                indicatorWindow?.animator().alphaValue = 1
+            }
         }
 
         // Auto-hide after 1.5 seconds
@@ -84,7 +90,8 @@ struct StatusBubble: View {
     let icon: String
     let color: Color
 
-    @State private var scale: CGFloat = 0.3
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var scale: CGFloat = 0.94
 
     var body: some View {
         Image(systemName: icon)
@@ -98,8 +105,12 @@ struct StatusBubble: View {
             )
             .scaleEffect(scale)
             .onAppear {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
-                    scale = 1.0
+                if reduceMotion {
+                    scale = 1
+                } else {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+                        scale = 1
+                    }
                 }
             }
     }

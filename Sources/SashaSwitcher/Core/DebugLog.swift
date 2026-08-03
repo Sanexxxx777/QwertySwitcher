@@ -1,6 +1,6 @@
 import Foundation
 
-/// Compact debug logger. Writes to `~/Library/Logs/SashaSwitcher/debug.log`.
+/// Compact debug logger. Writes to `~/Library/Logs/QwertySwitch/debug.log`.
 /// Rotates when file exceeds 1 MB (keeps last ~10 KB). Privacy-first:
 /// we log metadata (lengths, language codes, scores, event kinds) — never the word itself.
 final class DebugLog {
@@ -8,7 +8,7 @@ final class DebugLog {
 
     private let fm = FileManager.default
     private let url: URL
-    private let queue = DispatchQueue(label: "tech.sasha.switcher.debuglog", qos: .utility)
+    private let queue = DispatchQueue(label: AppIdentity.keyPrefix + "debuglog", qos: .utility)
     private let maxBytes = 1_000_000          // rotate at 1 MB
     private let keepTailBytes = 10_000        // retain the last 10 KB after rotation
     private let iso: ISO8601DateFormatter
@@ -16,7 +16,7 @@ final class DebugLog {
 
     private init() {
         let logsDir = fm.urls(for: .libraryDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Logs/SashaSwitcher", isDirectory: true)
+            .appendingPathComponent("Logs/QwertySwitch", isDirectory: true)
         try? fm.createDirectory(at: logsDir, withIntermediateDirectories: true)
         url = logsDir.appendingPathComponent("debug.log")
 
@@ -58,7 +58,7 @@ final class DebugLog {
         // Append
         if let handle = try? FileHandle(forWritingTo: url) {
             defer { try? handle.close() }
-            try? handle.seekToEnd()
+            _ = try? handle.seekToEnd()
             try? handle.write(contentsOf: data)
         }
 

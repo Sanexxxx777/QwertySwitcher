@@ -9,24 +9,36 @@ final class StatusBarController {
     private let exceptionsService: ExceptionsService
     private let keyboardMonitor: KeyboardMonitor
     private let inputSourceManager: InputSourceManager
+    private let perAppLayoutService: PerAppLayoutService
     private let autoStartService = AutoStartService()
+    private let permissionsService = PermissionsService()
     private var mainWindow: NSWindow?
     private var exceptionsWindow: NSWindow?
     private var aboutWindow: NSWindow?
 
     init(statsService: StatisticsService, prefsService: PreferencesService,
          exceptionsService: ExceptionsService, keyboardMonitor: KeyboardMonitor,
-         inputSourceManager: InputSourceManager) {
+         inputSourceManager: InputSourceManager,
+         perAppLayoutService: PerAppLayoutService) {
         self.statsService = statsService
         self.prefsService = prefsService
         self.exceptionsService = exceptionsService
         self.keyboardMonitor = keyboardMonitor
         self.inputSourceManager = inputSourceManager
+        self.perAppLayoutService = perAppLayoutService
         setupStatusItem()
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(refreshMenu),
             name: .autoSwitchToggled, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(refreshMenu),
+            name: .eventTapHealthChanged, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(refreshMenu),
+            name: .activeLayoutsChanged, object: nil
         )
     }
 
@@ -49,15 +61,19 @@ final class StatusBarController {
 
     private func updateStatusIcon() {
         guard let button = statusItem.button else { return }
-        let code = (inputSourceManager.currentLayout?.languageCode ?? "en").uppercased()
-        let paused = !prefsService.isAutoSwitchEnabled
-        let label = paused ? "\u{2053}" : code  // swung dash when paused
-        button.image = Self.makeStatusImage(label: label, paused: paused)
+        let languageCode = (inputSourceManager.currentLayout?.languageCode ?? "?").uppercased()
+        let code = keyboardMonitor.health == .running ? languageCode : "!"
+        let paused = !prefsService.isAutoSwitchEnabled || keyboardMonitor.health != .running
+        button.image = Self.makeStatusImage(label: code, paused: paused)
         button.imagePosition = .imageOnly
         button.title = ""
-        button.toolTip = paused
-            ? "Sasha Switcher · автопереключение отключено"
-            : "Sasha Switcher · \(code) · автопереключение включено"
+        if keyboardMonitor.health != .running {
+            button.toolTip = "\(AppIdentity.displayName) · \(keyboardMonitor.health.title)"
+        } else {
+            button.toolTip = paused
+                ? "\(AppIdentity.displayName) · автопереключение отключено"
+                : "\(AppIdentity.displayName) · \(languageCode) · автопереключение включено"
+        }
     }
 
     /// Monochrome template image — rounded rect outline + language code inside.
@@ -111,9 +127,9 @@ final class StatusBarController {
     private func rebuildMenu() {
         let menu = NSMenu()
 
-        let headerItem = NSMenuItem(title: "Sasha Switcher", action: nil, keyEquivalent: "")
+        let headerItem = NSMenuItem(title: AppIdentity.displayName, action: nil, keyEquivalent: "")
         headerItem.attributedTitle = NSAttributedString(
-            string: "Sasha Switcher",
+            string: AppIdentity.displayName,
             attributes: [
                 .font: NSFont.systemFont(ofSize: 14, weight: .semibold),
                 .foregroundColor: NSColor.labelColor
@@ -121,7 +137,50 @@ final class StatusBarController {
         )
         headerItem.isEnabled = false
         menu.addItem(headerItem)
+
+        let healthItem = NSMenuItem(
+            title: "Состояние: \(keyboardMonitor.health.title)",
+            action: nil,
+            keyEquivalent: ""
+        )
+        healthItem.isEnabled = false
+        menu.addItem(healthItem)
+
+        let permissionStatus = permissionsService.hasAccessibility && permissionsService.hasInputMonitoring
+            ? "Разрешения: выданы"
+            : "Разрешения: нужна настройка"
+        let permissionItem = NSMenuItem(title: permissionStatus, action: nil, keyEquivalent: "")
+        permissionItem.isEnabled = false
+        menu.addItem(permissionItem)
+
+        if !permissionsService.hasAccessibility || !permissionsService.hasInputMonitoring {
+            let repairItem = NSMenuItem(
+                title: "Настроить разрешения…",
+                action: #selector(openPermissions),
+                keyEquivalent: ""
+            )
+            repairItem.target = self
+            menu.addItem(repairItem)
+        }
         menu.addItem(NSMenuItem.separator())
+
+        let autoSwitchItem = NSMenuItem(
+            title: "Автопереключение",
+            action: #selector(toggleAutoSwitch(_:)),
+            keyEquivalent: ""
+        )
+        autoSwitchItem.target = self
+        autoSwitchItem.state = prefsService.isAutoSwitchEnabled ? .on : .off
+        menu.addItem(autoSwitchItem)
+
+        let perAppItem = NSMenuItem(
+            title: "Раскладка для каждого приложения",
+            action: #selector(togglePerAppLayout(_:)),
+            keyEquivalent: ""
+        )
+        perAppItem.target = self
+        perAppItem.state = perAppLayoutService.isEnabled ? .on : .off
+        menu.addItem(perAppItem)
 
         let settingsItem = NSMenuItem(title: "Настройки", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
@@ -163,7 +222,10 @@ final class StatusBarController {
         NSWorkspace.shared.activateFileViewerSelecting([DebugLog.shared.fileURL])
     }
 
-    @objc private func refreshMenu() { rebuildMenu() }
+    @objc private func refreshMenu() {
+        updateStatusIcon()
+        rebuildMenu()
+    }
 
     @objc private func openSettings() {
         if let w = mainWindow, w.isVisible {
@@ -172,16 +234,23 @@ final class StatusBarController {
             return
         }
 
-        let vm = MainViewModel(statsService: statsService, prefsService: prefsService)
+        let vm = MainViewModel(
+            statsService: statsService,
+            prefsService: prefsService,
+            inputSourceManager: inputSourceManager,
+            perAppLayoutService: perAppLayoutService,
+            keyboardMonitor: keyboardMonitor
+        )
         vm.onOpenAbout = { [weak self] in self?.openAbout() }
         vm.onOpenExceptions = { [weak self] in self?.openExceptions() }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 620),
-            styleMask: [.titled, .closable],
+            contentRect: NSRect(x: 0, y: 0, width: 660, height: 720),
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered, defer: false
         )
-        window.title = "Sasha Switcher"
+        window.title = AppIdentity.displayName
+        window.minSize = NSSize(width: 600, height: 620)
         window.contentView = NSHostingView(rootView: MainView(viewModel: vm))
         window.center()
         window.isReleasedWhenClosed = false
@@ -220,12 +289,14 @@ final class StatusBarController {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 380),
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 560),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false
         )
         window.title = "О программе"
-        window.contentView = NSHostingView(rootView: AboutView())
+        window.contentView = NSHostingView(
+            rootView: AboutView { [weak self] in self?.confirmDeleteLocalData() }
+        )
         window.center()
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
@@ -233,9 +304,50 @@ final class StatusBarController {
         aboutWindow = window
     }
 
+    private func confirmDeleteLocalData() {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Удалить все локальные данные Qwerty Switch?"
+        alert.informativeText = "Будут удалены настройки, статистика, исключения, обученные слова, кэш и логи. Отменить это действие нельзя."
+        alert.addButton(withTitle: "Удалить")
+        alert.addButton(withTitle: "Отмена")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            try autoStartService.setEnabled(false)
+            try PrivacyService.deleteAllLocalData()
+            NSApp.terminate(nil)
+        } catch {
+            let failure = NSAlert(error: error)
+            failure.messageText = "Не удалось удалить все локальные данные"
+            failure.runModal()
+        }
+    }
+
     @objc private func toggleAutoStart(_ sender: NSMenuItem) {
         autoStartService.toggle()
         sender.state = autoStartService.isEnabled ? .on : .off
+    }
+
+    @objc private func toggleAutoSwitch(_ sender: NSMenuItem) {
+        prefsService.isAutoSwitchEnabled.toggle()
+        NotificationCenter.default.post(name: .autoSwitchToggled, object: nil)
+        sender.state = prefsService.isAutoSwitchEnabled ? .on : .off
+    }
+
+    @objc private func togglePerAppLayout(_ sender: NSMenuItem) {
+        perAppLayoutService.isEnabled.toggle()
+        sender.state = perAppLayoutService.isEnabled ? .on : .off
+    }
+
+    @objc private func openPermissions() {
+        if !permissionsService.hasAccessibility {
+            permissionsService.requestAccessibility()
+            permissionsService.openAccessibilitySettings()
+        } else if !permissionsService.hasInputMonitoring {
+            permissionsService.requestInputMonitoring()
+            permissionsService.openInputMonitoringSettings()
+        }
     }
 
     @objc private func quit() {

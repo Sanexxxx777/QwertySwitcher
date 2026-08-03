@@ -7,18 +7,20 @@ struct ExceptionsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            ZStack {
-                LinearGradient(
-                    colors: [Gamma.headerGrad1, Gamma.headerGrad2],
-                    startPoint: .topLeading, endPoint: .bottomTrailing
-                )
-                Text("ИСКЛЮЧЕНИЯ")
-                    .font(.system(size: 20, weight: .bold, design: .serif))
-                    .foregroundColor(Gamma.textPrimary)
-                    .tracking(3)
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Исключения")
+                        .font(.nfaSans(19, weight: .semibold))
+                        .foregroundColor(Gamma.textPrimary)
+                    Text("Что Qwerty Switch не должен исправлять")
+                        .font(.nfaSans(11))
+                        .foregroundColor(Gamma.textSecondary)
+                }
+                Spacer()
             }
-            .frame(height: 60)
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
+            .padding(.bottom, 10)
 
             // Tab picker
             Picker("", selection: $selectedTab) {
@@ -40,10 +42,10 @@ struct ExceptionsView: View {
                 default: EmptyView()
                 }
             }
-            .animation(.easeInOut(duration: 0.2), value: selectedTab)
         }
         .frame(width: 460, height: 440)
         .background(Gamma.bgPrimary)
+        .preferredColorScheme(.dark)
     }
 
     // MARK: - Word Exceptions
@@ -74,6 +76,7 @@ struct ExceptionsView: View {
                                 .foregroundColor(Gamma.textSecondary.opacity(0.5))
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Удалить слово \(word)")
                     }
                     .listRowBackground(Gamma.bgCard)
                 }
@@ -121,6 +124,7 @@ struct ExceptionsView: View {
                                 .foregroundColor(Gamma.textSecondary.opacity(0.5))
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Удалить приложение \(bundleID)")
                     }
                     .listRowBackground(Gamma.bgCard)
                 }
@@ -160,7 +164,7 @@ struct ExceptionsView: View {
                     Text("Пока пусто")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundColor(Gamma.textSecondary)
-                    Text("Исключения добавляются автоматически\nкогда вы отменяете переключение")
+                    Text("Исключение появится после полного удаления\nисправления и точного повторного ввода")
                         .font(.system(size: 12))
                         .foregroundColor(Gamma.textSecondary.opacity(0.6))
                         .multilineTextAlignment(.center)
@@ -183,6 +187,7 @@ struct ExceptionsView: View {
                                     .foregroundColor(Gamma.textSecondary.opacity(0.5))
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Удалить запомнённое исправление \(key)")
                         }
                         .listRowBackground(Gamma.bgCard)
                     }

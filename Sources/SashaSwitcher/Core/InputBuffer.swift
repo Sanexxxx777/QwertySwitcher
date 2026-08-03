@@ -1,28 +1,34 @@
 import Foundation
 import CoreGraphics
 
+struct BufferedKeystroke: Equatable {
+    let keycode: UInt16
+    let flags: CGEventFlags
+}
+
 final class InputBuffer {
-    private(set) var keycodes: [UInt16] = []
+    private(set) var keystrokes: [BufferedKeystroke] = []
     private let maxSize = 64
 
-    var isEmpty: Bool { keycodes.isEmpty }
-    var count: Int { keycodes.count }
+    var isEmpty: Bool { keystrokes.isEmpty }
+    var count: Int { keystrokes.count }
 
-    func append(_ keycode: UInt16) {
-        if keycodes.count >= maxSize { keycodes.removeFirst() }
-        keycodes.append(keycode)
+    func append(_ keycode: UInt16, flags: CGEventFlags = []) {
+        if keystrokes.count >= maxSize { keystrokes.removeFirst() }
+        let casingFlags = flags.intersection([.maskShift, .maskAlphaShift])
+        keystrokes.append(BufferedKeystroke(keycode: keycode, flags: casingFlags))
     }
 
     func removeLast() {
-        guard !keycodes.isEmpty else { return }
-        keycodes.removeLast()
+        guard !keystrokes.isEmpty else { return }
+        keystrokes.removeLast()
     }
 
     func clear() {
-        keycodes.removeAll(keepingCapacity: true)
+        keystrokes.removeAll(keepingCapacity: true)
     }
 
-    func currentWord() -> [UInt16] { keycodes }
+    func currentWord() -> [BufferedKeystroke] { keystrokes }
 
     static func isWordBoundary(_ keycode: UInt16) -> Bool {
         switch keycode {
@@ -97,17 +103,13 @@ final class InputBuffer {
     /// Returns true if this keycode should be treated as a word-boundary / punctuation
     /// given the currently active layout's language code (e.g. "en", "ru").
     ///
-    /// In EN layout: `, . ; ' [ ] ``  are punctuation (in RU layout they are letters).
-    /// In RU layout: Shift+`,` and Shift+`.` produce `,` and `.` — also punctuation.
-    ///               Other keys (; ' [ ] `) stay as shifted letters even with Shift.
+    /// In EN layout: `, . ; ' [ ] `` are punctuation.
+    /// In Russian layouts the same physical keys remain Cyrillic letters, including
+    /// with Shift; number-row punctuation is handled separately.
     static func isPunctuationIn(keycode: UInt16, languageCode: String?, flags: CGEventFlags = []) -> Bool {
         guard let lang = languageCode else { return false }
         if lang == "en" {
             return cyrillicOnlyLetterCodes.contains(keycode)
-        }
-        if lang == "ru" && flags.contains(.maskShift) {
-            // In ЙЦУКЕН, Shift+б → `,` and Shift+ю → `.`
-            return keycode == 43 || keycode == 47
         }
         return false
     }
@@ -115,15 +117,16 @@ final class InputBuffer {
     /// For the punctuation keycodes above, return the ASCII character the user
     /// actually typed (the trigger that already landed in the text field).
     /// Needed so we can restore it after backspacing over it.
-    static func enPunctuationChar(keycode: UInt16) -> String? {
+    static func punctuationChar(keycode: UInt16, languageCode: String?, flags: CGEventFlags = []) -> String? {
+        let shifted = flags.contains(.maskShift)
         switch keycode {
-        case 30: return "]"
-        case 33: return "["
-        case 39: return "'"
-        case 41: return ";"
-        case 43: return ","
-        case 47: return "."
-        case 50: return "`"
+        case 30: return shifted ? "}" : "]"
+        case 33: return shifted ? "{" : "["
+        case 39: return shifted ? "\"" : "'"
+        case 41: return shifted ? ":" : ";"
+        case 43: return shifted ? "<" : ","
+        case 47: return shifted ? ">" : "."
+        case 50: return shifted ? "~" : "`"
         default: return nil
         }
     }
@@ -139,7 +142,25 @@ final class InputBuffer {
 
     /// The actual character the user typed on a number/`-`/`=`/`/` key.
     /// Used as a trailing char when correction triggers on a digit.
-    static func digitChar(keycode: UInt16) -> String? {
+    static func digitChar(keycode: UInt16, flags: CGEventFlags = []) -> String? {
+        if flags.contains(.maskShift) {
+            switch keycode {
+            case 18: return "!"
+            case 19: return "@"
+            case 20: return "#"
+            case 21: return "$"
+            case 23: return "%"
+            case 22: return "^"
+            case 26: return "&"
+            case 28: return "*"
+            case 25: return "("
+            case 29: return ")"
+            case 27: return "_"
+            case 24: return "+"
+            case 44: return "?"
+            default: return nil
+            }
+        }
         switch keycode {
         case 18: return "1"
         case 19: return "2"
@@ -160,5 +181,9 @@ final class InputBuffer {
 
     static func isModifierActive(_ flags: CGEventFlags) -> Bool {
         !flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty
+    }
+
+    static func shouldInvalidateEditingContext(forModifiedFlags flags: CGEventFlags) -> Bool {
+        isModifierActive(flags)
     }
 }

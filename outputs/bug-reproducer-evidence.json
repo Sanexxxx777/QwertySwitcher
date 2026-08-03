@@ -1,0 +1,44 @@
+{
+  "classification": "FIX_PROVEN",
+  "date": "2026-08-02",
+  "red_green_evidence": {
+    "layout_aware_trailing": "red on installed RussianWin fixtures; green in final suite",
+    "russian_shift_letters": "red punctuation classification; green in final suite",
+    "bloom_cache_shape": "malformed cache accepted before fix; rejected after fix",
+    "secure_modifier_cancellation": {
+      "before": { "passed": 104, "failed": 5, "skipped": 1 },
+      "after": { "passed": 109, "failed": 0, "skipped": 1 }
+    },
+    "empty_bloom_source": {
+      "before": { "passed": 109, "failed": 1, "skipped": 1 },
+      "after": { "passed": 111, "failed": 0, "skipped": 1 }
+    },
+    "developer_id_contract": "failed before prerequisite, final-DMG signing and ordering fixes; passed after",
+    "app_store_contract": "failed before early preflight and package validation fixes; passed after"
+  },
+  "final_checks": {
+    "debug_tests": { "passed": 111, "failed": 0, "skipped": 1 },
+    "release_binary_tests": { "passed": 111, "failed": 0, "skipped": 1 },
+    "universal_architectures": ["x86_64", "arm64"],
+    "minimum_macos": "13.0",
+    "codesign_verify": "passed",
+    "dmg_verify": "passed",
+    "mounted_bundle_diff": "identical",
+    "mounted_bundle_codesign": "passed",
+    "plist_lint": "passed",
+    "shell_syntax": "passed",
+    "release_contracts": "passed",
+    "diff_check": "passed",
+    "secret_scan_candidates": 0,
+    "network_client_scan_candidates": 0
+  },
+  "artifact": {
+    "app": "build/Qwerty Switch.app",
+    "dmg": "build/QwertySwitch-0.3.0.dmg",
+    "dmg_sha256": "9ca00d4a1000cb7a2db022d778e1d2e8c043cac0f19f16f404cb5ad98327c361"
+  },
+  "limitations": [
+    "CGEvent construction and end-to-end typing require a live GUI session with Accessibility and Input Monitoring.",
+    "Developer ID, Apple Distribution and Installer Distribution identities are missing locally, so notarization and App Store upload were not executed."
+  ]
+}

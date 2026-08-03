@@ -11,6 +11,7 @@ let package = Package(
             resources: [
                 .copy("../../Resources/Dictionaries"),
                 .copy("../../Resources/Fonts"),
+                .copy("../../Resources/PrivacyInfo.xcprivacy"),
             ],
             linkerSettings: [
                 .linkedFramework("Carbon"),

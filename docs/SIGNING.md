@@ -1,152 +1,128 @@
-# Code Signing & Distribution Roadmap
+# Qwerty Switch: подпись и публикация
 
-Три стадии жизни приложения, от локальной разработки до публикации в Mac App Store. Каждая следующая добавляется к предыдущей.
+Актуальные идентификаторы:
 
----
+- продукт: `Qwerty Switch`;
+- bundle ID: `tech.sasha.qwertyswitch`;
+- внутренний Swift executable: `SashaSwitcher` (это не видно пользователю);
+- версия после ребрендинга: `0.3.0` (`CFBundleVersion = 3`).
 
-## Stage 1 — Local development (бесплатно)
+## 1. Локальная beta
 
-**Сейчас.** Приложение запускается только на твоём Mac. TCC-разрешения (Accessibility, Input Monitoring) сохраняются между rebuild'ами благодаря persistent self-signed identity.
-
-### Первоначальная настройка
+Один раз создаётся self-signed certificate. Его старое имя намеренно сохранено,
+чтобы не ломать уже настроенные Mac разработчиков.
 
 ```bash
 cd ~/Projects/SashaSwitcher
-./Scripts/setup-signing.sh    # создаёт cert "SashaSwitcher Developer" в Keychain (один раз)
-./Scripts/build.sh            # dev mode по умолчанию
-open build/SashaSwitcher.app
+./Scripts/setup-signing.sh
+./Scripts/test.sh
+./Scripts/build.sh
+open "build/Qwerty Switch.app"
 ```
 
-При первом запуске macOS попросит разрешения (Onboarding) — дай их через System Settings. Все последующие `./Scripts/build.sh` уже не будут сбрасывать permissions.
+Из-за нового bundle ID macOS один раз попросит Accessibility и Input Monitoring
+заново. После выдачи разрешений приложение само повторит запуск event tap —
+перезапускать Qwerty Switch не нужно.
 
-### Что можно / нельзя
+Self-signed сборку нельзя считать публичным релизом: Gatekeeper на чужом Mac
+потребует ручного подтверждения.
 
-- ✅ Запускать на своём Mac сколько угодно
-- ✅ TCC permissions переживают rebuild
-- ❌ Отправить другому человеку — Gatekeeper заблокирует (нет Apple-подписи)
-- ❌ Загрузить в App Store
+## 2. Публичный DMG через Developer ID
 
----
-
-## Stage 2 — Developer ID distribution ($99/год)
-
-Apple Developer Program. Можно подписывать Developer ID Application certificate и нотаризовать → DMG / zip можно отправить любому пользователю Mac без блокировок Gatekeeper.
-
-### Настройка (один раз)
-
-1. **Купить Apple Developer Program** — https://developer.apple.com/programs/ (~ $99/год).
-2. **Создать Developer ID Application certificate**:
-   - Xcode → Settings → Accounts → Add Apple ID → Manage Certificates → `+` → **Developer ID Application**
-   - Либо через https://developer.apple.com/account/resources/certificates/list
-3. **Сохранить app-specific password** для notarization:
-   ```bash
-   xcrun notarytool store-credentials notarize-sasha \
-     --apple-id "твой@email.com" \
-     --team-id  "XXXXXXXXXX" \
-     --password "xxxx-xxxx-xxxx-xxxx"   # https://appleid.apple.com → app-specific passwords
-   ```
-
-### Сборка и распространение
+Нужны оплаченная Apple Developer Program и сертификат `Developer ID Application`.
 
 ```bash
-./Scripts/build.sh developerid    # подпись Developer ID
-./Scripts/notarize.sh             # submit + staple (2–10 мин)
+DEVELOPER_ID_APP="Developer ID Application: …" \
+  ./Scripts/make-dmg.sh developerid
+
+./Scripts/notarize.sh dmg
 ```
 
-Получишь `build/SashaSwitcher.app` с notarization ticket'ом. Упакуй в DMG:
+`make-dmg.sh developerid` собирает universal `arm64+x86_64` приложение и не
+допускает fallback на локальную или ad-hoc подпись. Secure timestamp и Developer
+ID signature получают и `.app`, и финальный UDZO DMG с отдельным signing ID.
+`notarize.sh dmg` повторно проверяет подпись образа, отправляет Apple именно этот
+распространяемый DMG, затем stapler прикрепляет ticket к этому же файлу. После
+notarization нельзя повторно запускать dev-режим сборки над публичным артефактом.
+
+Для notarization заранее сохранить учётные данные в Keychain profile (по
+умолчанию `notarize-sasha`):
 
 ```bash
-hdiutil create -volname "SashaSwitcher" \
-    -srcfolder build/SashaSwitcher.app \
-    -ov -format UDZO SashaSwitcher-0.2.0.dmg
+xcrun notarytool store-credentials notarize-sasha \
+  --apple-id "…" \
+  --team-id "…" \
+  --password "…"
 ```
 
-Этот DMG можно:
-- выложить на свой сайт
-- отправить друзьям по Telegram
-- подключить к Homebrew Cask (`brew install --cask sasha-switcher`)
+Пароль не хранится в репозитории: его сохраняет Keychain.
 
-### Что можно / нельзя
+Результаты:
 
-- ✅ Распространять кому угодно, без App Store
-- ✅ Sparkle auto-updates (обновления без ручного скачивания)
-- ✅ Полный доступ к CGEventTap / Accessibility
-- ❌ В App Store всё ещё нельзя — нужен Stage 3
+- `build/Qwerty Switch.app`;
+- `build/QwertySwitch-0.3.0.dmg`.
 
----
+## 3. Mac App Store
 
-## Stage 3 — Mac App Store ($99/год, те же деньги)
+App Store-сборка подготовлена как отдельный sandboxed вариант:
 
-Та же подписка на Developer Program. Добавляется:
-1. Другой certificate: **Apple Distribution**
-2. **Provisioning Profile** с entitlements
-3. **App Sandbox** — обязательно. Это самая сложная часть для SashaSwitcher.
+- `Resources/QwertySwitch.appstore.entitlements` включает только App Sandbox;
+- сеть, Apple Events, JIT и debug-entitlements не запрашиваются;
+- `PrivacyInfo.xcprivacy` объявляет отсутствие tracking/collection и использование
+  UserDefaults для функций приложения;
+- CGEventTap по-прежнему защищён системными разрешениями Accessibility/Input
+  Monitoring.
 
-### ⚠ Архитектурный нюанс: CGEventTap + App Sandbox несовместимы
+Статический реверс локальных Caramba и Lang показал, что их Mac App Store
+сборки одновременно sandboxed и используют CGEventTap/TIS. Поэтому переписывание
+на IMKit не является предварительным техническим требованием. Это не гарантирует
+решение App Review: sandboxed build всё равно нужно проверить на чистом Mac и
+отправить на review с понятным объяснением назначения разрешений.
 
-Внутри App Sandbox `CGEventTapCreate(.cgSessionEventTap, …)` **не работает** — Apple явно запрещает перехват событий sandboxed apps.
+Нужны:
 
-Альтернативы:
+1. App ID `tech.sasha.qwertyswitch` в Apple Developer;
+2. Apple Distribution certificate;
+3. Mac App Store provisioning profile для этого App ID;
+4. Mac Installer Distribution certificate;
+5. карточка приложения и privacy answers в App Store Connect.
 
-| Путь | Суть | Сложность |
-|---|---|---|
-| **Input Method Kit (IMKit)** | Зарегистрировать SashaSwitcher как метод ввода (как китайские/японские IME). Apple одобряет IME в App Store | средняя — переписать перехват клавиш через IMKit |
-| **Accessibility API only (AX…)** | Вместо event tap использовать `AXUIElementPerformAction` для чтения текущего текста в поле ввода и `AXUIElementSetAttributeValue` для замены. Работает в sandbox если есть `com.apple.security.temporary-exception.accessibility-api` entitlement | высокая — reviewers иногда отклоняют такой подход |
-| **Non-App Store only** | Остаться на Stage 2 (Developer ID + Notarize + DMG). Так делает Caramba до сих пор на части версий | низкая — уже сделано |
-
-**Моя рекомендация:** начать со Stage 2 (DMG + Sparkle) — это даст доход и userbase. Параллельно планировать переписывание на IMKit для App Store. Это большой проект (~1–2 недели).
-
-### Подготовка App Store-сборки (когда будешь готов)
-
-1. **Apple Distribution certificate** (App Store Connect → Certificates)
-2. **App ID** с bundle ID `tech.sasha.switcher` (уже тот же)
-3. **Provisioning Profile** типа "Mac App Store"
-4. Переписать перехват клавиш на IMKit (или Accessibility-only)
-5. Создать `Resources/SashaSwitcher.appstore.entitlements`:
-   ```xml
-   <key>com.apple.security.app-sandbox</key><true/>
-   <key>com.apple.security.device.audio-input</key><false/>
-   <!-- IMKit-specific entitlements -->
-   <key>com.apple.input-methods</key><true/>
-   ```
-6. `./Scripts/build.sh appstore`
-7. Загрузить через Transporter.app или `xcrun altool`
-8. Заполнить метаданные на App Store Connect
-9. Review Apple (2–7 дней)
-
-### Что можно
-
-- ✅ $4.99/месяц / $19.99 lifetime подписки (один из планов из памяти)
-- ✅ Автообновления через App Store
-- ✅ Доверие пользователей к "App Store app"
-
----
-
-## Справочник по командам
-
-| Команда | Режим | Результат |
-|---|---|---|
-| `./Scripts/setup-signing.sh` | — | создаёт self-signed identity (один раз) |
-| `./Scripts/build.sh` или `build.sh dev` | Stage 1 | локальная сборка, TCC-стабильная |
-| `./Scripts/build.sh developerid` | Stage 2 | Developer ID-подписанная .app |
-| `./Scripts/notarize.sh` | Stage 2 | нотаризация + staple |
-| `./Scripts/build.sh appstore` | Stage 3 | App Store-пригодная .app (требует переписи) |
-
----
-
-## Как проверить текущее состояние подписи
+Сборка и упаковка:
 
 ```bash
-codesign -dv --verbose=4 build/SashaSwitcher.app 2>&1 | grep -E 'Identifier|Authority|TeamIdentifier|Timestamp'
+APP_STORE_PROVISIONING_PROFILE="/path/QwertySwitch.provisionprofile" \
+APPLE_DISTRIBUTION="Apple Distribution: …" \
+./Scripts/build.sh appstore
+
+INSTALLER_IDENTITY="Mac Installer Distribution: …" \
+./Scripts/appstore-package.sh
 ```
 
-Выведет что-то вроде:
+Полученный `build/QwertySwitch-AppStore.pkg` загрузить через Transporter.
+Перед `productbuild` скрипт проверяет strict code signature, Apple Distribution
+authority, bundle ID, `com.apple.security.app-sandbox=true`, наличие и App ID
+встроенного provisioning profile. Это локальный preflight, а не замена проверки
+App Store Connect.
 
+## Проверки перед распространением
+
+```bash
+plutil -lint Resources/Info.plist Resources/PrivacyInfo.xcprivacy
+codesign --verify --deep --strict --verbose=2 "build/Qwerty Switch.app"
+codesign --display --entitlements - --xml "build/Qwerty Switch.app"
+spctl --assess --type execute --verbose=2 "build/Qwerty Switch.app"
 ```
-Identifier=tech.sasha.switcher
-Authority=SashaSwitcher Developer               ← stage 1
-# или
-Authority=Developer ID Application: Your Name   ← stage 2 (notarized)
-# или
-Authority=Apple Distribution: Your Name         ← stage 3 (App Store)
+
+Для Developer ID дополнительно:
+
+```bash
+codesign --verify --verbose=2 "build/QwertySwitch-0.3.0.dmg"
+xcrun stapler validate "build/QwertySwitch-0.3.0.dmg"
+spctl --assess --type open --context context:primary-signature \
+  --verbose=2 "build/QwertySwitch-0.3.0.dmg"
 ```
+
+Не считать релиз готовым, пока не пройдены: тесты ядра, ручные сценарии набора,
+проверка на чистом пользовательском аккаунте, подпись, notarization или App Store
+validation. Наличие сертификатов и решение App Review — внешние этапы, которые
+локальный код не может подменить.
