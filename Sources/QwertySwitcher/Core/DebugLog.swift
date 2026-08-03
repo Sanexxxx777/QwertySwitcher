@@ -1,6 +1,6 @@
 import Foundation
 
-/// Compact debug logger. Writes to `~/Library/Logs/QwertySwitch/debug.log`.
+/// Compact debug logger. Writes to `~/Library/Logs/QwertySwitcher/debug.log`.
 /// Rotates when file exceeds 1 MB (keeps last ~10 KB). Privacy-first:
 /// we log metadata (lengths, language codes, scores, event kinds) — never the word itself.
 final class DebugLog {
@@ -16,7 +16,7 @@ final class DebugLog {
 
     private init() {
         let logsDir = fm.urls(for: .libraryDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Logs/QwertySwitch", isDirectory: true)
+            .appendingPathComponent("Logs/QwertySwitcher", isDirectory: true)
         try? fm.createDirectory(at: logsDir, withIntermediateDirectories: true)
         url = logsDir.appendingPathComponent("debug.log")
 

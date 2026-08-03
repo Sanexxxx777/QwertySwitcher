@@ -1,15 +1,16 @@
 import Foundation
 import CoreGraphics
+import CryptoKit
 
 /// Lightweight test runner — no XCTest required.
-/// Invoked via `swift run SashaSwitcher --test` or `./Scripts/test.sh`.
+/// Invoked via `swift run QwertySwitcher --test` or `./Scripts/test.sh`.
 enum TestRunner {
     private static var failed = 0
     private static var passed = 0
     private static var skipped = 0
 
     static func run() -> Int {
-        print("=== Qwerty Switch test suite ===")
+        print("=== Qwerty Switcher test suite ===")
         BloomFilterTests.run()
         YoficatorTests.run()
         NGramTests.run()
@@ -26,6 +27,7 @@ enum TestRunner {
         InputSourceLanguageTests.run()
         PrivacyTests.run()
         ExceptionsTests.run()
+        LicenseServiceTests.run()
         print("---")
         print("\(passed) passed, \(failed) failed, \(skipped) skipped")
         return failed == 0 ? 0 : 1
@@ -376,7 +378,7 @@ enum SyntheticEventTests {
         )
         TestRunner.assertTrue(
             SyntheticEventMarker.shouldBypass(replay),
-            "replayed user event bypasses Qwerty Switch analysis"
+            "replayed user event bypasses Qwerty Switcher analysis"
         )
     }
 }
@@ -560,5 +562,182 @@ enum ExceptionsTests {
         TestRunner.assertTrue(!svc.isValidException("key=value"), "= disallowed")
         TestRunner.assertTrue(!svc.isValidException("path/file"), "/ disallowed")
         TestRunner.assertTrue(!svc.isValidException("123"), "digits-only invalid")
+    }
+}
+
+// MARK: - License test seams (no network, no real Keychain)
+
+private final class TestLicenseClock: LicenseClock {
+    var current: Int64
+    init(_ now: Int64) { current = now }
+    func now() -> Int64 { current }
+}
+
+private final class InMemoryLicenseStore: LicenseStateStore {
+    var stored: LicenseState?
+    func load() -> LicenseState? { stored }
+    func save(_ state: LicenseState) { stored = state }
+}
+
+private final class StubLicenseTransport: LicenseTransport {
+    var helloResult: LicenseService.ServerResult = .failure(.network)
+    var activateResult: LicenseService.ServerResult = .failure(.network)
+
+    func hello(
+        baseURL: URL, hwid: String, appVersion: String,
+        completion: @escaping (LicenseService.ServerResult) -> Void
+    ) {
+        completion(helloResult)
+    }
+
+    func activate(
+        baseURL: URL, hwid: String, key: String,
+        completion: @escaping (LicenseService.ServerResult) -> Void
+    ) {
+        completion(activateResult)
+    }
+}
+
+enum LicenseServiceTests {
+    private static let day: Int64 = 24 * 3600
+    private static let grace: Int64 = 14 * day
+    private static let rollbackTolerance: Int64 = 3600
+
+    static func run() {
+        TestRunner.section("LicenseService")
+
+        // (a) canonicalization — golden vector
+        let golden = LicensePayload(
+            hwid: "ABC-123", plan: "trial", start: 1_754_100_000, until: 1_755_309_600, issued: 1_754_200_000
+        )
+        TestRunner.assertEqual(
+            golden.canonicalString,
+            "{\"hwid\":\"ABC-123\",\"issued\":1754200000,\"plan\":\"trial\",\"start\":1754100000,\"until\":1755309600}",
+            "canonical payload string matches the golden vector"
+        )
+
+        let testKey = Curve25519.Signing.PrivateKey()
+        let testPublicHex = Self.hex(testKey.publicKey.rawRepresentation)
+
+        // (b) roundtrip: a test-generated key signs the canon → verify OK; a corrupted payload fails
+        let payload = LicensePayload(
+            hwid: "TESTHWID", plan: "sub", start: 1_700_000_000, until: 1_800_000_000, issued: 1_700_000_100
+        )
+        guard let sigData = try? testKey.signature(for: Data(payload.canonicalString.utf8)) else {
+            TestRunner.assertTrue(false, "test key signs the canonical payload")
+            return
+        }
+        let sigHex = Self.hex(sigData)
+        TestRunner.assertTrue(
+            LicenseVerifier.verifySignature(payload: payload, sigHex: sigHex, publicKeyHex: testPublicHex),
+            "roundtrip: valid signature verifies"
+        )
+        let corrupted = LicensePayload(
+            hwid: payload.hwid, plan: payload.plan, start: payload.start, until: payload.until + 1, issued: payload.issued
+        )
+        TestRunner.assertTrue(
+            !LicenseVerifier.verifySignature(payload: corrupted, sigHex: sigHex, publicKeyHex: testPublicHex),
+            "roundtrip: corrupted payload fails verification"
+        )
+
+        // (c) a payload signed for a different hwid must be rejected
+        TestRunner.assertTrue(
+            !LicenseVerifier.accept(
+                payload: payload, sigHex: sigHex, hwid: "OTHER-HWID", now: payload.issued, publicKeyHex: testPublicHex
+            ),
+            "payload signed for a different hwid is rejected"
+        )
+        TestRunner.assertTrue(
+            LicenseVerifier.accept(
+                payload: payload, sigHex: sigHex, hwid: payload.hwid, now: payload.issued, publicKeyHex: testPublicHex
+            ),
+            "payload matching our hwid with a fresh issued time is accepted"
+        )
+
+        // (d) grace window: signed cache stays valid until 14 days after the last check
+        let subPayload = LicensePayload(hwid: "GRACEHW", plan: "sub", start: 0, until: 10_000_000, issued: 1_000_000)
+        guard let graceSigData = try? testKey.signature(for: Data(subPayload.canonicalString.utf8)) else {
+            TestRunner.assertTrue(false, "test key signs the grace-window payload")
+            return
+        }
+        let graceSigHex = Self.hex(graceSigData)
+        let now: Int64 = 2_000_000
+
+        let stale15 = LicenseState(
+            payload: subPayload, sig: graceSigHex, lastCheckUnix: now - 15 * Self.day, maxSeenUnix: now, provisional: false
+        )
+        TestRunner.assertTrue(
+            !LicenseService.evaluate(
+                state: stale15, hwid: "GRACEHW", now: now,
+                graceSeconds: Self.grace, rollbackTolerance: Self.rollbackTolerance, publicKeyHex: testPublicHex
+            ),
+            "grace expired at 15 days since last check → not entitled"
+        )
+
+        let stale13 = LicenseState(
+            payload: subPayload, sig: graceSigHex, lastCheckUnix: now - 13 * Self.day, maxSeenUnix: now, provisional: false
+        )
+        TestRunner.assertTrue(
+            LicenseService.evaluate(
+                state: stale13, hwid: "GRACEHW", now: now,
+                graceSeconds: Self.grace, rollbackTolerance: Self.rollbackTolerance, publicKeyHex: testPublicHex
+            ),
+            "13 days since last check is still within grace → entitled"
+        )
+
+        // (e) clock rollback: cache is untrusted once "now" falls behind the highest seen time
+        let rolledBack = LicenseState(
+            payload: subPayload, sig: graceSigHex, lastCheckUnix: now, maxSeenUnix: now + 2 * Self.day, provisional: false
+        )
+        TestRunner.assertTrue(
+            !LicenseService.evaluate(
+                state: rolledBack, hwid: "GRACEHW", now: now,
+                graceSeconds: Self.grace, rollbackTolerance: Self.rollbackTolerance, publicKeyHex: testPublicHex
+            ),
+            "clock appears rolled back past maxSeen with no server reachable → not entitled"
+        )
+
+        // (f) provisional trial is created on an empty store while offline; until = +14 days
+        let trialClock = TestLicenseClock(5_000_000)
+        let trialStore = InMemoryLicenseStore()
+        let trialTransport = StubLicenseTransport()
+        trialTransport.helloResult = .failure(.network)
+        let trialService = LicenseService(
+            clock: trialClock, transport: trialTransport, store: trialStore,
+            hwid: "TRIALHW", appVersion: "0.4.0", publicKeyHex: testPublicHex
+        )
+        trialService.checkIn()
+        TestRunner.assertTrue(trialService.isEntitled, "offline first launch grants a provisional trial")
+        TestRunner.assertTrue(trialStore.stored?.provisional ?? false, "provisional trial is flagged in stored state")
+        TestRunner.assertEqual(
+            trialStore.stored?.payload?.until ?? -1, trialClock.now() + 14 * Self.day,
+            "provisional trial lasts exactly 14 days"
+        )
+
+        // (g) activation via mock transport with a signed sub payload → entitled, plan=sub
+        let actClock = TestLicenseClock(6_000_000)
+        let actStore = InMemoryLicenseStore()
+        let actTransport = StubLicenseTransport()
+        let subActivation = LicensePayload(
+            hwid: "ACTHW", plan: "sub", start: actClock.now(), until: actClock.now() + 30 * Self.day, issued: actClock.now()
+        )
+        guard let actSigData = try? testKey.signature(for: Data(subActivation.canonicalString.utf8)) else {
+            TestRunner.assertTrue(false, "test key signs the activation payload")
+            return
+        }
+        actTransport.activateResult = .success(payload: subActivation, sigHex: Self.hex(actSigData))
+        let actService = LicenseService(
+            clock: actClock, transport: actTransport, store: actStore,
+            hwid: "ACTHW", appVersion: "0.4.0", publicKeyHex: testPublicHex
+        )
+        var outcome: LicenseService.ActivationOutcome = .network
+        actService.activate(key: "QSW-TEST-TEST-TEST") { result in outcome = result }
+        TestRunner.assertEqual(outcome, .success, "activation with a valid signed response succeeds")
+        TestRunner.assertTrue(actService.isEntitled, "activated subscription is entitled")
+        TestRunner.assertEqual(actStore.stored?.payload?.plan ?? "", "sub", "activated state carries plan=sub")
+    }
+
+    private static func hex(_ data: Data) -> String {
+        data.map { String(format: "%02x", $0) }.joined()
     }
 }

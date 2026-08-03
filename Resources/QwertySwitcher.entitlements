@@ -3,6 +3,8 @@
 <plist version="1.0">
 <dict>
     <!-- Developer ID build: Hardened Runtime is enabled by codesign.
-         No network, Apple Events, JIT, or debug exceptions are required. -->
+         No Apple Events, JIT, or debug exceptions are required. The license
+         check does make outbound HTTPS calls, but this build is not
+         App-Sandboxed, so no network entitlement key is needed for it. -->
 </dict>
 </plist>

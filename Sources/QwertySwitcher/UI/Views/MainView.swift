@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Qwerty Switch design system
+// MARK: - Qwerty Switcher design system
 
 struct Gamma {
     static let bgPrimary = Color(hex: 0x111114)
@@ -114,6 +114,7 @@ extension View {
 
 struct MainView: View {
     @ObservedObject var viewModel: MainViewModel
+    @ObservedObject private var licenseService = LicenseService.shared
 
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
@@ -336,6 +337,17 @@ struct MainView: View {
                 viewModel.onOpenAbout?()
             } label: {
                 Label("О программе", systemImage: "info.circle")
+            }
+
+            Button {
+                viewModel.onOpenLicense?()
+            } label: {
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(licenseService.isEntitled ? Gamma.accentGreen : Gamma.accentAmber)
+                        .frame(width: 6, height: 6)
+                    Text(licenseService.statusSummary)
+                }
             }
 
             Spacer()

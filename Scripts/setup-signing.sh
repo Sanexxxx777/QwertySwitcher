@@ -1,5 +1,5 @@
 #!/bin/bash
-# Creates a persistent self-signed code-signing identity for Qwerty Switch.
+# Creates a persistent self-signed code-signing identity for Qwerty Switcher.
 # so that macOS TCC (Privacy/Accessibility) keeps permissions across rebuilds.
 # Run once — subsequent build.sh invocations will reuse the identity.
 

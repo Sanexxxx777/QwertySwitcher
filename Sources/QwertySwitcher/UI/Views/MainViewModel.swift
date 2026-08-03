@@ -8,6 +8,7 @@ final class MainViewModel: ObservableObject {
     private let keyboardMonitor: KeyboardMonitor
     var onOpenAbout: (() -> Void)?
     var onOpenExceptions: (() -> Void)?
+    var onOpenLicense: (() -> Void)?
 
     @Published var autoSwitchCount: Int = 0
     @Published var shiftSwitchCount: Int = 0

@@ -5,7 +5,7 @@ import Foundation
 
 @inline(__always)
 func _swiftTestingPlaceholder() {
-    _ = SashaSwitcherTestsVersion
+    _ = QwertySwitcherTestsVersion
 }
 
-let SashaSwitcherTestsVersion = "0.2.0"
+let QwertySwitcherTestsVersion = "0.2.0"

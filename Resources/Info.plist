@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>SashaSwitcher</string>
+    <string>QwertySwitcher</string>
     <key>CFBundleIdentifier</key>
     <string>tech.sasha.qwertyswitch</string>
     <key>CFBundleName</key>
-    <string>QwertySwitch</string>
+    <string>QwertySwitcher</string>
     <key>CFBundleDisplayName</key>
-    <string>Qwerty Switch</string>
+    <string>Qwerty Switcher</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.3.0</string>
+    <string>0.4.0</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>4</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
@@ -35,8 +35,8 @@
     <key>NSSupportsSuddenTermination</key>
     <false/>
     <key>NSAccessibilityUsageDescription</key>
-    <string>Qwerty Switch использует Универсальный доступ только для исправления раскладки в активном текстовом поле.</string>
+    <string>Qwerty Switcher использует Универсальный доступ только для исправления раскладки в активном текстовом поле.</string>
     <key>NSInputMonitoringUsageDescription</key>
-    <string>Qwerty Switch читает коды клавиш локально, чтобы определить ошибочную раскладку; история набора не сохраняется.</string>
+    <string>Qwerty Switcher читает коды клавиш локально, чтобы определить ошибочную раскладку; история набора не сохраняется.</string>
 </dict>
 </plist>

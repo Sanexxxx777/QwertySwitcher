@@ -1,10 +1,10 @@
 #!/bin/bash
-# Package an already App Store-signed Qwerty Switch.app for Transporter/App Store Connect.
+# Package an already App Store-signed Qwerty Switcher.app for Transporter/App Store Connect.
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_BUNDLE="$PROJECT_DIR/build/Qwerty Switch.app"
-PKG_PATH="$PROJECT_DIR/build/QwertySwitch-AppStore.pkg"
+APP_BUNDLE="$PROJECT_DIR/build/Qwerty Switcher.app"
+PKG_PATH="$PROJECT_DIR/build/QwertySwitcher-AppStore.pkg"
 INSTALLER_IDENTITY="${INSTALLER_IDENTITY:-Mac Installer Distribution}"
 EXPECTED_BUNDLE_ID="tech.sasha.qwertyswitch"
 PROFILE_PATH="$APP_BUNDLE/Contents/embedded.provisionprofile"

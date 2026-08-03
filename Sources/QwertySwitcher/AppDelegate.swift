@@ -78,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let seen = UserDefaults.standard.bool(forKey: onboardingSeenKey)
         let needsOnboarding = !seen || !perms.hasAccessibility || !perms.hasInputMonitoring
         if needsOnboarding {
-            NSLog("[QwertySwitch] Showing onboarding (seen=\(seen) ax=\(perms.hasAccessibility) im=\(perms.hasInputMonitoring))")
+            NSLog("[QwertySwitcher] Showing onboarding (seen=\(seen) ax=\(perms.hasAccessibility) im=\(perms.hasInputMonitoring))")
             showOnboardingWindow()
         }
 
@@ -86,9 +86,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startHealthPolling()
 
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
-        NSLog("[QwertySwitch] v\(version) Started. Dictionary: \(dictionary.stats)")
-        NSLog("[QwertySwitch] Layouts: \(inputSourceManager.availableLayouts.map(\.name))")
-        NSLog("[QwertySwitch] Privacy: all processing local, no telemetry")
+        NSLog("[QwertySwitcher] v\(version) Started. Dictionary: \(dictionary.stats)")
+        NSLog("[QwertySwitcher] Layouts: \(inputSourceManager.availableLayouts.map(\.name))")
+        NSLog("[QwertySwitcher] Privacy: all input processed locally, never leaves the Mac. "
+            + "License check sends only an anonymous device identifier.")
+        LicenseService.shared.start()
 
         let layoutsStr = inputSourceManager.availableLayouts
             .map { "\($0.languageCode):\($0.name)" }.joined(separator: ",")

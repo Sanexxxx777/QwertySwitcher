@@ -20,7 +20,7 @@ fi
 if [ "$CAN_BUILD_FULL_APP" = true ]; then
     swift build --disable-sandbox ${SWIFT_SDK_ARGS[@]+"${SWIFT_SDK_ARGS[@]}"} -c debug
     BIN_DIR=$(swift build --disable-sandbox ${SWIFT_SDK_ARGS[@]+"${SWIFT_SDK_ARGS[@]}"} -c debug --show-bin-path)
-    "$BIN_DIR/SashaSwitcher" --test
+    "$BIN_DIR/QwertySwitcher" --test
     exit $?
 fi
 
@@ -31,40 +31,43 @@ swiftc \
     -target arm64-apple-macos13.0 \
     -framework AppKit \
     -framework Carbon \
+    -framework IOKit \
     -module-cache-path .build/core-tests/module-cache \
-    -o .build/core-tests/QwertySwitchCoreTests \
+    -o .build/core-tests/QwertySwitcherCoreTests \
     Tests/CoreHarness/StatusIndicatorStub.swift \
     Tests/CoreHarness/main.swift \
-    Sources/SashaSwitcher/AppIdentity.swift \
-    Sources/SashaSwitcher/Core/AutoLearnTracker.swift \
-    Sources/SashaSwitcher/Core/DebugLog.swift \
-    Sources/SashaSwitcher/Core/EventTapHealth.swift \
-    Sources/SashaSwitcher/Core/HotkeyManager.swift \
-    Sources/SashaSwitcher/Core/InputBuffer.swift \
-    Sources/SashaSwitcher/Core/InputSourceManager.swift \
-    Sources/SashaSwitcher/Core/KeyboardMonitor.swift \
-    Sources/SashaSwitcher/Core/LanguageDetector.swift \
-    Sources/SashaSwitcher/Core/NGramAnalyzer.swift \
-    Sources/SashaSwitcher/Core/SecureInputDetector.swift \
-    Sources/SashaSwitcher/Core/ShiftStateTracker.swift \
-    Sources/SashaSwitcher/Core/ShiftTapResolver.swift \
-    Sources/SashaSwitcher/Core/SyntheticEventMarker.swift \
-    Sources/SashaSwitcher/Core/TextReplacer.swift \
-    Sources/SashaSwitcher/Core/UndoManager.swift \
-    Sources/SashaSwitcher/Core/WordFrequency.swift \
-    Sources/SashaSwitcher/Dictionary/BloomFilter.swift \
-    Sources/SashaSwitcher/Dictionary/WordDictionary.swift \
-    Sources/SashaSwitcher/Models/Language.swift \
-    Sources/SashaSwitcher/Services/AutoStartService.swift \
-    Sources/SashaSwitcher/Services/ExceptionsService.swift \
-    Sources/SashaSwitcher/Services/PerAppLayoutService.swift \
-    Sources/SashaSwitcher/Services/PermissionsService.swift \
-    Sources/SashaSwitcher/Services/PreferencesService.swift \
-    Sources/SashaSwitcher/Services/PrivacyService.swift \
-    Sources/SashaSwitcher/Services/SoundService.swift \
-    Sources/SashaSwitcher/Services/StatisticsService.swift \
-    Sources/SashaSwitcher/Services/StorageMigrationService.swift \
-    Sources/SashaSwitcher/Services/YoficatorService.swift \
-    Sources/SashaSwitcher/Tests/TestRunner.swift
+    Sources/QwertySwitcher/AppIdentity.swift \
+    Sources/QwertySwitcher/Core/AutoLearnTracker.swift \
+    Sources/QwertySwitcher/Core/DebugLog.swift \
+    Sources/QwertySwitcher/Core/EventTapHealth.swift \
+    Sources/QwertySwitcher/Core/HotkeyManager.swift \
+    Sources/QwertySwitcher/Core/InputBuffer.swift \
+    Sources/QwertySwitcher/Core/InputSourceManager.swift \
+    Sources/QwertySwitcher/Core/KeyboardMonitor.swift \
+    Sources/QwertySwitcher/Core/LanguageDetector.swift \
+    Sources/QwertySwitcher/Core/NGramAnalyzer.swift \
+    Sources/QwertySwitcher/Core/SecureInputDetector.swift \
+    Sources/QwertySwitcher/Core/ShiftStateTracker.swift \
+    Sources/QwertySwitcher/Core/ShiftTapResolver.swift \
+    Sources/QwertySwitcher/Core/SyntheticEventMarker.swift \
+    Sources/QwertySwitcher/Core/TextReplacer.swift \
+    Sources/QwertySwitcher/Core/UndoManager.swift \
+    Sources/QwertySwitcher/Core/WordFrequency.swift \
+    Sources/QwertySwitcher/Dictionary/BloomFilter.swift \
+    Sources/QwertySwitcher/Dictionary/WordDictionary.swift \
+    Sources/QwertySwitcher/Models/Language.swift \
+    Sources/QwertySwitcher/Services/AutoStartService.swift \
+    Sources/QwertySwitcher/Services/DeviceIdentity.swift \
+    Sources/QwertySwitcher/Services/ExceptionsService.swift \
+    Sources/QwertySwitcher/Services/LicenseService.swift \
+    Sources/QwertySwitcher/Services/PerAppLayoutService.swift \
+    Sources/QwertySwitcher/Services/PermissionsService.swift \
+    Sources/QwertySwitcher/Services/PreferencesService.swift \
+    Sources/QwertySwitcher/Services/PrivacyService.swift \
+    Sources/QwertySwitcher/Services/SoundService.swift \
+    Sources/QwertySwitcher/Services/StatisticsService.swift \
+    Sources/QwertySwitcher/Services/StorageMigrationService.swift \
+    Sources/QwertySwitcher/Services/YoficatorService.swift \
+    Sources/QwertySwitcher/Tests/TestRunner.swift
 
-.build/core-tests/QwertySwitchCoreTests
+.build/core-tests/QwertySwitcherCoreTests

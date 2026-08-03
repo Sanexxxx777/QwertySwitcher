@@ -1,10 +1,11 @@
-# Qwerty Switch: подпись и публикация
+# Qwerty Switcher: подпись и публикация
 
 Актуальные идентификаторы:
 
-- продукт: `Qwerty Switch`;
+- продукт: `Qwerty Switcher`;
 - bundle ID: `tech.sasha.qwertyswitch`;
-- внутренний Swift executable: `SashaSwitcher` (это не видно пользователю);
+- внутренний Swift executable: `QwertySwitcher` (переименован из `SashaSwitcher` 03.08.2026; это не видно пользователю);
+- signing identity: "SashaSwitcher Developer" (не переименовывать — смена сбросит TCC);
 - версия после ребрендинга: `0.3.0` (`CFBundleVersion = 3`).
 
 ## 1. Локальная beta
@@ -17,12 +18,12 @@ cd ~/Projects/SashaSwitcher
 ./Scripts/setup-signing.sh
 ./Scripts/test.sh
 ./Scripts/build.sh
-open "build/Qwerty Switch.app"
+open "build/Qwerty Switcher.app"
 ```
 
 Из-за нового bundle ID macOS один раз попросит Accessibility и Input Monitoring
 заново. После выдачи разрешений приложение само повторит запуск event tap —
-перезапускать Qwerty Switch не нужно.
+перезапускать Qwerty Switcher не нужно.
 
 Self-signed сборку нельзя считать публичным релизом: Gatekeeper на чужом Mac
 потребует ручного подтверждения.
@@ -59,14 +60,14 @@ xcrun notarytool store-credentials notarize-sasha \
 
 Результаты:
 
-- `build/Qwerty Switch.app`;
-- `build/QwertySwitch-0.3.0.dmg`.
+- `build/Qwerty Switcher.app`;
+- `build/QwertySwitcher-0.3.0.dmg`.
 
 ## 3. Mac App Store
 
 App Store-сборка подготовлена как отдельный sandboxed вариант:
 
-- `Resources/QwertySwitch.appstore.entitlements` включает только App Sandbox;
+- `Resources/QwertySwitcher.appstore.entitlements` включает только App Sandbox;
 - сеть, Apple Events, JIT и debug-entitlements не запрашиваются;
 - `PrivacyInfo.xcprivacy` объявляет отсутствие tracking/collection и использование
   UserDefaults для функций приложения;
@@ -90,7 +91,7 @@ App Store-сборка подготовлена как отдельный sandbo
 Сборка и упаковка:
 
 ```bash
-APP_STORE_PROVISIONING_PROFILE="/path/QwertySwitch.provisionprofile" \
+APP_STORE_PROVISIONING_PROFILE="/path/QwertySwitcher.provisionprofile" \
 APPLE_DISTRIBUTION="Apple Distribution: …" \
 ./Scripts/build.sh appstore
 
@@ -98,7 +99,7 @@ INSTALLER_IDENTITY="Mac Installer Distribution: …" \
 ./Scripts/appstore-package.sh
 ```
 
-Полученный `build/QwertySwitch-AppStore.pkg` загрузить через Transporter.
+Полученный `build/QwertySwitcher-AppStore.pkg` загрузить через Transporter.
 Перед `productbuild` скрипт проверяет strict code signature, Apple Distribution
 authority, bundle ID, `com.apple.security.app-sandbox=true`, наличие и App ID
 встроенного provisioning profile. Это локальный preflight, а не замена проверки
@@ -108,18 +109,18 @@ App Store Connect.
 
 ```bash
 plutil -lint Resources/Info.plist Resources/PrivacyInfo.xcprivacy
-codesign --verify --deep --strict --verbose=2 "build/Qwerty Switch.app"
-codesign --display --entitlements - --xml "build/Qwerty Switch.app"
-spctl --assess --type execute --verbose=2 "build/Qwerty Switch.app"
+codesign --verify --deep --strict --verbose=2 "build/Qwerty Switcher.app"
+codesign --display --entitlements - --xml "build/Qwerty Switcher.app"
+spctl --assess --type execute --verbose=2 "build/Qwerty Switcher.app"
 ```
 
 Для Developer ID дополнительно:
 
 ```bash
-codesign --verify --verbose=2 "build/QwertySwitch-0.3.0.dmg"
-xcrun stapler validate "build/QwertySwitch-0.3.0.dmg"
+codesign --verify --verbose=2 "build/QwertySwitcher-0.3.0.dmg"
+xcrun stapler validate "build/QwertySwitcher-0.3.0.dmg"
 spctl --assess --type open --context context:primary-signature \
-  --verbose=2 "build/QwertySwitch-0.3.0.dmg"
+  --verbose=2 "build/QwertySwitcher-0.3.0.dmg"
 ```
 
 Не считать релиз готовым, пока не пройдены: тесты ядра, ручные сценарии набора,
