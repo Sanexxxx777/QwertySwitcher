@@ -5,8 +5,16 @@ struct TextReplacementPlan: Equatable {
     let originalLength: Int
     let replacement: String
     let trailing: String?
+    /// True when `trailing` already landed on screen before we started (the
+    /// normal case: the user's own keystroke was let through). False only
+    /// when WE suppressed that trigger keystroke ourselves (RC-1) — it was
+    /// never printed, so it must not be backspaced over, only retyped as
+    /// part of the payload.
+    var trailingAlreadyOnScreen: Bool = true
 
-    var backspaceCount: Int { originalLength + (trailing?.count ?? 0) }
+    var backspaceCount: Int {
+        originalLength + (trailingAlreadyOnScreen ? (trailing?.count ?? 0) : 0)
+    }
     var payload: String { replacement + (trailing ?? "") }
 }
 
@@ -62,6 +70,7 @@ final class TextReplacer {
     ///               no trigger is in the field.
     func replaceCurrentWord(length: Int, replacement: String, targetLayout: KeyboardLayout,
                             trailing: String? = nil,
+                            trailingAlreadyOnScreen: Bool = true,
                             completion: @escaping (Result) -> Void) {
         let cancellation = ReplacementCancellationToken()
         activeCancellation?.cancel()
@@ -71,7 +80,8 @@ final class TextReplacer {
             let plan = TextReplacementPlan(
                 originalLength: length,
                 replacement: replacement,
-                trailing: trailing
+                trailing: trailing,
+                trailingAlreadyOnScreen: trailingAlreadyOnScreen
             )
 
             guard !cancellation.isCancelled else {

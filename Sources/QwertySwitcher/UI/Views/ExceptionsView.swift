@@ -2,19 +2,28 @@ import SwiftUI
 
 struct ExceptionsView: View {
     @ObservedObject var viewModel: ExceptionsViewModel
+    @Environment(\.appTheme) private var theme
     @State private var newWord = ""
     @State private var selectedTab = 0
 
     var body: some View {
+        ZStack {
+            AppBackground()
+            content
+        }
+        .frame(width: 460, height: 440)
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Исключения")
-                        .font(.nfaSans(19, weight: .semibold))
-                        .foregroundColor(Gamma.textPrimary)
+                        .font(.appText(19, weight: .semibold))
+                        .foregroundColor(theme.textPrimary)
                     Text("Что Qwerty Switcher не должен исправлять")
-                        .font(.nfaSans(11))
-                        .foregroundColor(Gamma.textSecondary)
+                        .font(.appText(11))
+                        .foregroundColor(theme.textSecondary)
                 }
                 Spacer()
             }
@@ -29,9 +38,9 @@ struct ExceptionsView: View {
                 Text("Авто-обучение").tag(2)
             }
             .pickerStyle(.segmented)
+            .tint(theme.accent)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
-            .colorMultiply(Gamma.accent)
 
             // Content
             Group {
@@ -43,9 +52,6 @@ struct ExceptionsView: View {
                 }
             }
         }
-        .frame(width: 460, height: 440)
-        .background(Gamma.bgPrimary)
-        .preferredColorScheme(.dark)
     }
 
     // MARK: - Word Exceptions
@@ -55,12 +61,12 @@ struct ExceptionsView: View {
             HStack {
                 TextField("Добавить слово...", text: $newWord)
                     .textFieldStyle(.roundedBorder)
-                    .foregroundColor(Gamma.textPrimary)
+                    .foregroundColor(theme.textPrimary)
                     .onSubmit { addWord() }
 
                 Button("Добавить") { addWord() }
                     .buttonStyle(.borderedProminent)
-                    .tint(Gamma.accent)
+                    .tint(theme.accent)
                     .disabled(newWord.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             .padding(.horizontal, 16)
@@ -69,23 +75,23 @@ struct ExceptionsView: View {
                 ForEach(viewModel.wordExceptions.sorted(), id: \.self) { word in
                     HStack {
                         Text(word)
-                            .foregroundColor(Gamma.textPrimary)
+                            .foregroundColor(theme.textPrimary)
                         Spacer()
                         Button(action: { withAnimation { viewModel.removeWord(word) } }) {
                             Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(Gamma.textSecondary.opacity(0.5))
+                                .foregroundColor(theme.textSecondary.opacity(0.5))
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Удалить слово \(word)")
                     }
-                    .listRowBackground(Gamma.bgCard)
+                    .listRowBackground(theme.bgCard)
                 }
             }
             .scrollContentBackground(.hidden)
 
             Text("\(viewModel.wordExceptions.count) слов в исключениях")
                 .font(.caption)
-                .foregroundColor(Gamma.textSecondary)
+                .foregroundColor(theme.textSecondary)
                 .padding(.bottom, 8)
         }
     }
@@ -104,11 +110,11 @@ struct ExceptionsView: View {
             HStack {
                 Text("Автопереключение отключено для:")
                     .font(.caption)
-                    .foregroundColor(Gamma.textSecondary)
+                    .foregroundColor(theme.textSecondary)
                 Spacer()
                 Button("+ Текущее приложение") { withAnimation { viewModel.addCurrentApp() } }
                     .font(.caption)
-                    .foregroundColor(Gamma.accent)
+                    .foregroundColor(theme.accent)
             }
             .padding(.horizontal, 16)
 
@@ -117,23 +123,23 @@ struct ExceptionsView: View {
                     HStack {
                         Text(bundleID)
                             .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(Gamma.textPrimary)
+                            .foregroundColor(theme.textPrimary)
                         Spacer()
                         Button(action: { withAnimation { viewModel.removeApp(bundleID) } }) {
                             Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(Gamma.textSecondary.opacity(0.5))
+                                .foregroundColor(theme.textSecondary.opacity(0.5))
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Удалить приложение \(bundleID)")
                     }
-                    .listRowBackground(Gamma.bgCard)
+                    .listRowBackground(theme.bgCard)
                 }
             }
             .scrollContentBackground(.hidden)
 
             Text("\(viewModel.appExceptions.count) приложений в исключениях")
                 .font(.caption)
-                .foregroundColor(Gamma.textSecondary)
+                .foregroundColor(theme.textSecondary)
                 .padding(.bottom, 8)
         }
     }
@@ -145,12 +151,12 @@ struct ExceptionsView: View {
             HStack {
                 Text("Запомненные исправления:")
                     .font(.caption)
-                    .foregroundColor(Gamma.textSecondary)
+                    .foregroundColor(theme.textSecondary)
                 Spacer()
                 if !viewModel.autoLearned.isEmpty {
                     Button("Очистить") { withAnimation { viewModel.clearAutoLearned() } }
                         .font(.caption)
-                        .foregroundColor(Gamma.accentDeep)
+                        .foregroundColor(theme.accentDeep)
                 }
             }
             .padding(.horizontal, 16)
@@ -160,13 +166,13 @@ struct ExceptionsView: View {
                 VStack(spacing: 8) {
                     Image(systemName: "brain")
                         .font(.system(size: 32))
-                        .foregroundColor(Gamma.textSecondary.opacity(0.3))
+                        .foregroundColor(theme.textSecondary.opacity(0.3))
                     Text("Пока пусто")
                         .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(Gamma.textSecondary)
+                        .foregroundColor(theme.textSecondary)
                     Text("Исключение появится после полного удаления\nисправления и точного повторного ввода")
                         .font(.system(size: 12))
-                        .foregroundColor(Gamma.textSecondary.opacity(0.6))
+                        .foregroundColor(theme.textSecondary.opacity(0.6))
                         .multilineTextAlignment(.center)
                 }
                 Spacer()
@@ -175,21 +181,21 @@ struct ExceptionsView: View {
                     ForEach(Array(viewModel.autoLearned.keys.sorted()), id: \.self) { key in
                         HStack {
                             Text(key)
-                                .foregroundColor(Gamma.textPrimary)
+                                .foregroundColor(theme.textPrimary)
                             Image(systemName: "arrow.right")
                                 .font(.caption)
-                                .foregroundColor(Gamma.textSecondary.opacity(0.5))
+                                .foregroundColor(theme.textSecondary.opacity(0.5))
                             Text(viewModel.autoLearned[key] ?? "")
-                                .foregroundColor(Gamma.textSecondary)
+                                .foregroundColor(theme.textSecondary)
                             Spacer()
                             Button(action: { withAnimation { viewModel.removeAutoLearned(key) } }) {
                                 Image(systemName: "xmark.circle.fill")
-                                    .foregroundColor(Gamma.textSecondary.opacity(0.5))
+                                    .foregroundColor(theme.textSecondary.opacity(0.5))
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Удалить запомнённое исправление \(key)")
                         }
-                        .listRowBackground(Gamma.bgCard)
+                        .listRowBackground(theme.bgCard)
                     }
                 }
                 .scrollContentBackground(.hidden)

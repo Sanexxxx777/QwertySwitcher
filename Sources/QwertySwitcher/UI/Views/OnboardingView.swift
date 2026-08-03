@@ -4,29 +4,30 @@ import Combine
 
 struct OnboardingView: View {
     @StateObject private var watcher = PermissionsWatcher()
+    @Environment(\.appTheme) private var theme
     let onContinue: () -> Void
 
     var body: some View {
         ZStack {
-            LiquidGlassBackground()
+            AppBackground()
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Gamma.accent.opacity(0.14))
+                            .fill(theme.accent.opacity(0.14))
                         Text("QS")
-                            .font(.nfaMono(15, weight: .bold))
-                            .foregroundStyle(Gamma.accentLight)
+                            .font(.appMono(15, weight: .bold))
+                            .foregroundStyle(theme.accentLight)
                     }
                     .frame(width: 40, height: 40)
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Настройка Qwerty Switcher")
-                            .font(.nfaSans(19, weight: .semibold))
-                            .foregroundStyle(Gamma.textPrimary)
+                            .font(.appText(19, weight: .semibold))
+                            .foregroundStyle(theme.textPrimary)
                         Text("Два системных разрешения — текст остаётся на Mac")
-                            .font(.nfaSans(11))
-                            .foregroundStyle(Gamma.textSecondary)
+                            .font(.appText(11))
+                            .foregroundStyle(theme.textSecondary)
                     }
                     Spacer()
                 }
@@ -36,8 +37,8 @@ struct OnboardingView: View {
 
                 VStack(alignment: .leading, spacing: 14) {
                     Text("Разрешения macOS")
-                        .font(.nfaSans(12, weight: .semibold))
-                        .foregroundColor(Gamma.textPrimary)
+                        .font(.appText(12, weight: .semibold))
+                        .foregroundColor(theme.textPrimary)
 
                     permissionRow(
                         title: "Универсальный доступ",
@@ -63,12 +64,12 @@ struct OnboardingView: View {
 
                     HStack(spacing: 8) {
                         Image(systemName: watcher.hasAll ? "checkmark.seal.fill" : "info.circle")
-                            .foregroundColor(watcher.hasAll ? Gamma.accentGreen : Gamma.textSecondary)
+                            .foregroundColor(watcher.hasAll ? theme.accentGreen : theme.textSecondary)
                         Text(watcher.hasAll
                              ? "Все разрешения на месте — нажми «Далее»"
                              : "Выдай разрешения — кнопка «Далее» активируется сама")
-                            .font(.nfaSans(11))
-                            .foregroundColor(watcher.hasAll ? Gamma.accentGreen : Gamma.textSecondary)
+                            .font(.appText(11))
+                            .foregroundColor(watcher.hasAll ? theme.accentGreen : theme.textSecondary)
                     }
                     .padding(.top, 4)
 
@@ -76,7 +77,7 @@ struct OnboardingView: View {
 
                     HStack {
                         Spacer()
-                        NFAButton(
+                        AppButton(
                             title: "Далее",
                             style: watcher.hasAll ? .primary : .disabled,
                             action: onContinue
@@ -90,7 +91,6 @@ struct OnboardingView: View {
             }
         }
         .frame(width: 480, height: 380)
-        .preferredColorScheme(.dark)
         .onAppear { watcher.startPolling() }
         .onDisappear { watcher.stopPolling() }
     }
@@ -99,36 +99,36 @@ struct OnboardingView: View {
         HStack(alignment: .center, spacing: 12) {
             Image(systemName: granted ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                 .font(.system(size: 22))
-                .foregroundColor(granted ? Gamma.accentGreen : Gamma.accent)
+                .foregroundColor(granted ? theme.accentGreen : theme.accent)
                 .frame(width: 28)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.nfaSans(13, weight: .semibold))
-                    .foregroundColor(Gamma.textPrimary)
+                    .font(.appText(13, weight: .semibold))
+                    .foregroundColor(theme.textPrimary)
                 Text(subtitle)
-                    .font(.nfaSans(11))
-                    .foregroundColor(Gamma.textSecondary)
+                    .font(.appText(11))
+                    .foregroundColor(theme.textSecondary)
             }
 
             Spacer()
 
             if !granted {
-                NFAButton(title: "Открыть", style: .secondary, action: openAction)
+                AppButton(title: "Открыть", style: .secondary, action: openAction)
             } else {
                 Text("ВЫДАНО")
-                    .font(.nfaSans(9, weight: .bold))
-                    .foregroundColor(Gamma.accentGreen)
+                    .font(.appText(9, weight: .bold))
+                    .foregroundColor(theme.accentGreen)
                     .tracking(1)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(
-                        Capsule().fill(Gamma.accentGreen.opacity(0.15))
+                        Capsule().fill(theme.accentGreen.opacity(0.15))
                     )
             }
         }
         .padding(14)
-        .nfaGlass(cornerRadius: 10)
+        .settingsCard(cornerRadius: 10)
     }
 }
 
@@ -167,10 +167,11 @@ final class PermissionsWatcher: ObservableObject {
     }
 }
 
-// MARK: - Shared NFA button (Liquid Glass)
+// MARK: - Shared button style
 
-struct NFAButton: View {
+struct AppButton: View {
     enum Style { case primary, secondary, ghost, disabled }
+    @Environment(\.appTheme) private var theme
     let title: String
     let style: Style
     let action: () -> Void
@@ -198,20 +199,20 @@ struct NFAButton: View {
 
     private var foreground: Color {
         switch style {
-        case .primary:   return Color(hex: 0x0b0b0f)
-        case .secondary: return Gamma.accent
-        case .ghost:     return Gamma.textPrimary
-        case .disabled:  return Gamma.textSecondary
+        case .primary:   return .white
+        case .secondary: return theme.accent
+        case .ghost:     return theme.textPrimary
+        case .disabled:  return theme.textSecondary
         }
     }
     private var background: some View {
         Group {
             switch style {
             case .primary:
-                LinearGradient(colors: [Gamma.accent, Gamma.accentDeep], startPoint: .top, endPoint: .bottom)
+                LinearGradient(colors: [theme.accent, theme.accentDeep], startPoint: .top, endPoint: .bottom)
                     .opacity(isHovered ? 1.0 : 0.95)
             case .secondary:
-                Gamma.accent.opacity(isHovered ? 0.22 : 0.12)
+                theme.accent.opacity(isHovered ? 0.22 : 0.12)
             case .ghost:
                 Color.white.opacity(isHovered ? 0.1 : 0.05)
             case .disabled:
@@ -222,7 +223,7 @@ struct NFAButton: View {
     private var borderColor: Color {
         switch style {
         case .primary:   return .clear
-        case .secondary: return Gamma.accent.opacity(isHovered ? 0.55 : 0.35)
+        case .secondary: return theme.accent.opacity(isHovered ? 0.55 : 0.35)
         case .ghost:     return Color.white.opacity(isHovered ? 0.25 : 0.14)
         case .disabled:  return Color.white.opacity(0.08)
         }

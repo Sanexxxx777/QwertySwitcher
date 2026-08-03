@@ -3,110 +3,109 @@ import AppKit
 
 struct LicenseView: View {
     @ObservedObject private var licenseService = LicenseService.shared
+    @Environment(\.appTheme) private var theme
     @State private var keyInput: String = ""
     @State private var isActivating = false
     @State private var errorMessage: String?
     @State private var successMessage: String?
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Лицензия")
-                    .font(.nfaSans(18, weight: .semibold))
-                    .foregroundStyle(Gamma.textPrimary)
-                Spacer()
-            }
-            .padding(22)
+        ZStack {
+            AppBackground()
 
             ScrollView {
-                VStack(spacing: 16) {
-                    statusCard
+                VStack(alignment: .leading, spacing: 16) {
+                    hero
                     activationCard
                     linksRow
                 }
-                .padding(.horizontal, 22)
-                .padding(.bottom, 22)
+                .padding(20)
             }
         }
-        .frame(width: 440, height: 480)
-        .background(Gamma.bgPrimary)
-        .preferredColorScheme(.dark)
+        .frame(width: 400, height: 420)
     }
 
-    private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(licenseService.isEntitled ? Gamma.accentGreen : Gamma.accentRed)
-                    .frame(width: 8, height: 8)
-                Text(licenseService.statusHeadline)
-                    .font(.nfaSans(14, weight: .semibold))
-                    .foregroundStyle(Gamma.textPrimary)
-            }
+    // MARK: Hero — short status word, same semantics as the footer badge in MainView.
+
+    private var heroWord: String {
+        guard licenseService.currentPayload != nil else { return "Не активирована" }
+        if !licenseService.isEntitled { return "Истекла" }
+        if licenseService.currentPayload?.plan == "trial" || licenseService.isProvisionalTrial {
+            return "Пробный период"
+        }
+        return "Подписка активна"
+    }
+
+    private var heroColor: Color {
+        guard licenseService.isEntitled else { return theme.accentRed }
+        let isTrial = licenseService.currentPayload?.plan == "trial" || licenseService.isProvisionalTrial
+        return isTrial ? theme.accentAmber : theme.accentGreen
+    }
+
+    private var hero: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(heroWord)
+                .font(.appText(22, weight: .semibold))
+                .foregroundStyle(heroColor)
+
             if licenseService.isEntitled {
                 Text("Осталось дней: \(licenseService.daysRemaining)")
-                    .font(.nfaSans(12))
-                    .foregroundStyle(Gamma.textSecondary)
+                    .font(.appText(11))
+                    .foregroundStyle(theme.textSecondary)
+                    .monospacedDigit()
             } else {
                 Text("Автозамена и конвертация слов отключены до активации ключа")
-                    .font(.nfaSans(12))
-                    .foregroundStyle(Gamma.textSecondary)
+                    .font(.appText(11))
+                    .foregroundStyle(theme.textSecondary)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .nfaGlass(cornerRadius: 14)
     }
 
     private var activationCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             Text("АКТИВИРОВАТЬ КЛЮЧ")
-                .font(.nfaSans(10, weight: .semibold))
-                .tracking(1.15)
-                .foregroundStyle(Gamma.textMuted)
+                .font(.appText(10, weight: .semibold))
+                .tracking(1.1)
+                .foregroundStyle(theme.textMuted)
 
             TextField("QSW-XXXX-XXXX-XXXX", text: Binding(
                 get: { keyInput },
                 set: { keyInput = Self.autoFormat($0) }
             ))
             .textFieldStyle(.plain)
-            .font(.nfaMono(13, weight: .medium))
-            .foregroundStyle(Gamma.textPrimary)
+            .font(.appMono(13, weight: .medium))
+            .foregroundStyle(theme.textPrimary)
             .padding(10)
-            .background(Gamma.bgInput)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(theme.bgInput)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Gamma.border, lineWidth: 1)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(theme.border, lineWidth: 1)
             )
 
             if let errorMessage {
                 Text(errorMessage)
-                    .font(.nfaSans(11))
-                    .foregroundStyle(Gamma.accentRed)
+                    .font(.appText(11))
+                    .foregroundStyle(theme.accentRed)
             }
             if let successMessage {
                 Text(successMessage)
-                    .font(.nfaSans(11))
-                    .foregroundStyle(Gamma.accentGreen)
+                    .font(.appText(11))
+                    .foregroundStyle(theme.accentGreen)
             }
 
-            Button {
-                activate()
-            } label: {
-                Text(isActivating ? "Проверка…" : "Активировать")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(Gamma.accent)
-            .disabled(isActivating || keyInput.count < 15)
+            PrimaryButton(
+                title: isActivating ? "Проверка…" : "Активировать",
+                isDisabled: isActivating || keyInput.count < 15,
+                action: activate
+            )
         }
-        .padding(16)
-        .nfaGlass(cornerRadius: 14)
+        .padding(14)
+        .settingsCard()
     }
 
     private var linksRow: some View {
-        HStack(spacing: 18) {
+        HStack(spacing: 16) {
             Button("Купить ключ") {
                 NSWorkspace.shared.open(URL(string: "https://shulgin.is-a.dev/store/#apps")!)
             }
@@ -116,8 +115,8 @@ struct LicenseView: View {
             Spacer()
         }
         .buttonStyle(.borderless)
-        .foregroundStyle(Gamma.accent)
-        .font(.nfaSans(12, weight: .medium))
+        .foregroundStyle(theme.accent)
+        .font(.appText(11, weight: .medium))
     }
 
     private func activate() {
@@ -154,5 +153,34 @@ struct LicenseView: View {
             index = end
         }
         return groups.joined(separator: "-")
+    }
+}
+
+/// Primary CTA button — accent fill, pill shape, hover brighten.
+private struct PrimaryButton: View {
+    @Environment(\.appTheme) private var theme
+    let title: String
+    let isDisabled: Bool
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.appText(13, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 9)
+                .background(
+                    LinearGradient(colors: [theme.accent, theme.accentDeep], startPoint: .top, endPoint: .bottom)
+                        .opacity(isHovered && !isDisabled ? 1.0 : 0.92)
+                )
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .opacity(isDisabled ? 0.45 : 1.0)
+        .disabled(isDisabled)
+        .onHover { isHovered = $0 }
+        .animation(.easeOut(duration: 0.15), value: isHovered)
     }
 }

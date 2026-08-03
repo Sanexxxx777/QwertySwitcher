@@ -48,6 +48,7 @@ swiftc \
     Sources/QwertySwitcher/Core/KeyboardMonitor.swift \
     Sources/QwertySwitcher/Core/LanguageDetector.swift \
     Sources/QwertySwitcher/Core/NGramAnalyzer.swift \
+    Sources/QwertySwitcher/Core/PendingUserEventQueue.swift \
     Sources/QwertySwitcher/Core/SecureInputDetector.swift \
     Sources/QwertySwitcher/Core/ShiftStateTracker.swift \
     Sources/QwertySwitcher/Core/ShiftTapResolver.swift \

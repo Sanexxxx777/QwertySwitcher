@@ -132,7 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.onboardingWindow?.close()
             self?.onboardingWindow = nil
         })
-        window.contentView = NSHostingView(rootView: view)
+        window.contentView = NSHostingView(rootView: view.gammaThemedRoot())
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         onboardingWindow = window
