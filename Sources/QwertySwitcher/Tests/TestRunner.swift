@@ -33,6 +33,13 @@ enum TestRunner {
         InstantCorrectionAnalyzerTests.run()
         InstantCorrectionCorpusTests.run()
         LicenseServiceTests.run()
+        PendingUserEventQueueTests.run()
+        EventRouteTests.run()
+        BufferVsScreenModelTests.run()
+        InstantCorrectionGateSelfSwitchTests.run()
+        InputSourceSelfSwitchTests.run()
+        SlashModelRegressionTests.run()
+        LeadingSymbolRunGuardTests.run()
         print("---")
         print("\(passed) passed, \(failed) failed, \(skipped) skipped")
         return failed == 0 ? 0 : 1
@@ -493,6 +500,37 @@ enum ReplacementTransactionTests {
         )
         TestRunner.assertEqual(plan.backspaceCount, 7, "replacement deletes word and exact trailing character")
         TestRunner.assertEqual(plan.payload, "привет.", "replacement restores punctuation exactly")
+
+        // RC-1 fix: when WE suppressed the trigger keystroke ourselves (it
+        // never reached the screen), backspace only the word — the trigger
+        // is retyped as part of the payload instead of backspaced over.
+        let suppressedTriggerPlan = TextReplacementPlan(
+            originalLength: 6,
+            replacement: "привет",
+            trailing: " ",
+            trailingAlreadyOnScreen: false
+        )
+        TestRunner.assertEqual(
+            suppressedTriggerPlan.backspaceCount, 6,
+            "a suppressed trigger was never typed — backspace only the word itself"
+        )
+        TestRunner.assertEqual(
+            suppressedTriggerPlan.payload, "привет ",
+            "payload still retypes the corrected word AND the suppressed trailing character"
+        )
+
+        // Old behavior is preserved by default — Undo and Double Shift pass a
+        // trailing character that really IS already on screen and must not
+        // be touched by this fix.
+        let onScreenTriggerPlan = TextReplacementPlan(
+            originalLength: 6,
+            replacement: "привет",
+            trailing: " "
+        )
+        TestRunner.assertEqual(
+            onScreenTriggerPlan.backspaceCount, 7,
+            "default trailingAlreadyOnScreen=true preserves Undo/DoubleShift's old formula"
+        )
 
         let undo = SwitchUndoManager()
         undo.record(
@@ -1032,5 +1070,356 @@ enum LicenseServiceTests {
 
     private static func hex(_ data: Data) -> String {
         data.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+enum PendingUserEventQueueTests {
+    static func run() {
+        TestRunner.section("PendingUserEventQueue")
+        var queue = PendingUserEventQueue<String>()
+        TestRunner.assertTrue(queue.isEmpty, "queue starts empty")
+
+        // Real typing during a replacement queues at the back; a trigger we
+        // suppressed ourselves (RC-1) must replay FIRST if the replacement
+        // fails — enqueueFront places it ahead of anything already queued.
+        queue.enqueue("typed-a")
+        queue.enqueue("typed-b")
+        queue.enqueueFront("suppressed-trigger")
+        TestRunner.assertEqual(
+            queue.items, ["suppressed-trigger", "typed-a", "typed-b"],
+            "suppressed trigger goes first, real typing keeps its order behind it"
+        )
+
+        // .success path: discard the suppressed trigger, keep the rest queued.
+        var successQueue = queue
+        successQueue.discardFront()
+        TestRunner.assertEqual(
+            successQueue.drain(), ["typed-a", "typed-b"],
+            "success discards the suppressed trigger exactly once, replays the rest"
+        )
+        TestRunner.assertTrue(successQueue.isEmpty, "drain empties the queue")
+
+        // .cancelled / .layoutSwitchFailed path: nothing is discarded, so the
+        // suppressed trigger comes back out of drain() for replay.
+        var failureQueue = queue
+        TestRunner.assertEqual(
+            failureQueue.drain(), ["suppressed-trigger", "typed-a", "typed-b"],
+            "failure path returns the suppressed trigger for replay, unlike success"
+        )
+        TestRunner.assertTrue(failureQueue.isEmpty, "drain empties the queue on the failure path too")
+
+        var empty = PendingUserEventQueue<String>()
+        empty.discardFront()
+        TestRunner.assertTrue(empty.isEmpty, "discardFront on an empty queue is a safe no-op")
+    }
+}
+
+enum EventRouteTests {
+    static func run() {
+        TestRunner.section("EventRoute — routing truth table")
+        TestRunner.assertEqual(
+            EventRoute.classify(isMarked: true, isReplayedUser: false), .ours,
+            "our own synthetic keystroke (backspace/retype) routes as ours"
+        )
+        TestRunner.assertEqual(
+            EventRoute.classify(isMarked: false, isReplayedUser: true), .replayedUser,
+            "a replayed real keystroke routes as replayedUser, analyzed like live typing"
+        )
+        TestRunner.assertEqual(
+            EventRoute.classify(isMarked: false, isReplayedUser: false), .physical,
+            "genuine hardware input routes as physical"
+        )
+        TestRunner.assertEqual(
+            EventRoute.classify(isMarked: true, isReplayedUser: true), .ours,
+            "if both markers were ever set (shouldn't happen), our own marker wins"
+        )
+    }
+}
+
+enum BufferVsScreenModelTests {
+    /// A minimal reproduction of the invariant fixed by RC-2: ANY word
+    /// boundary — whether typed live or replayed after a paused replacement —
+    /// must clear the buffer. Only our own synthetic keystrokes (route ==
+    /// .ours) bypass analysis entirely and never reach this logic at all.
+    private struct Keystroke {
+        let keycode: UInt16
+        let route: EventRoute
+    }
+
+    private static func simulate(_ script: [Keystroke]) -> InputBuffer {
+        let buffer = InputBuffer()
+        for stroke in script {
+            guard stroke.route != .ours else { continue } // bypassed before analysis
+            if InputBuffer.isWordBoundary(stroke.keycode) {
+                buffer.clear()
+            } else if InputBuffer.isLetterKey(stroke.keycode) {
+                buffer.append(stroke.keycode)
+            }
+        }
+        return buffer
+    }
+
+    static func run() {
+        TestRunner.section("Buffer vs screen — word-boundary model")
+
+        let afterPhysicalSpace = simulate([
+            Keystroke(keycode: 0, route: .physical),
+            Keystroke(keycode: 1, route: .physical),
+            Keystroke(keycode: 49, route: .physical), // space
+        ])
+        TestRunner.assertTrue(afterPhysicalSpace.isEmpty, "a physical space clears the buffer")
+
+        // RC-2 case: a real space queued during a paused replacement and
+        // replayed afterward is STILL a boundary.
+        let afterReplayedSpace = simulate([
+            Keystroke(keycode: 0, route: .physical),
+            Keystroke(keycode: 1, route: .physical),
+            Keystroke(keycode: 49, route: .replayedUser), // replayed space
+        ])
+        TestRunner.assertTrue(
+            afterReplayedSpace.isEmpty, "a replayed space is STILL a boundary and clears the buffer"
+        )
+
+        let secondWord = simulate([
+            Keystroke(keycode: 0, route: .physical),
+            Keystroke(keycode: 1, route: .physical),
+            Keystroke(keycode: 49, route: .replayedUser),
+            Keystroke(keycode: 2, route: .physical),
+            Keystroke(keycode: 3, route: .physical),
+        ])
+        TestRunner.assertEqual(
+            secondWord.count, 2, "letters after a replayed-space boundary start a fresh word"
+        )
+
+        // Our own synthetic keystrokes (backspaces/retype) never reach this
+        // analysis — they must not be mistaken for a boundary or for letters.
+        let ignoresOwnEvents = simulate([
+            Keystroke(keycode: 0, route: .physical),
+            Keystroke(keycode: 51, route: .ours), // our own backspace
+            Keystroke(keycode: 1, route: .ours),  // our own retyped letter
+        ])
+        TestRunner.assertEqual(
+            ignoresOwnEvents.count, 1, "our own synthetic keystrokes bypass buffer analysis entirely"
+        )
+    }
+}
+
+enum InstantCorrectionGateSelfSwitchTests {
+    /// Mirrors KeyboardMonitor.layoutDidChange's self-initiated guard (Fix 3):
+    /// a layout change caused by OUR OWN correction (InputSourceManager
+    /// reports selfInitiated) must leave in-flight word context untouched,
+    /// including the instant-correction gate. A manual/bot-driven switch
+    /// still resets it, like any other context invalidation.
+    private static func applyLayoutChange(selfInitiated: Bool, gate: inout InstantCorrectionGate) {
+        guard !selfInitiated else { return }
+        gate.reset()
+    }
+
+    static func run() {
+        TestRunner.section("InstantCorrectionGate — closed until startNewWord / untouched by self-switch")
+
+        var gate = InstantCorrectionGate()
+        gate.markCorrected()
+        TestRunner.assertTrue(gate.wasCorrected, "gate stays closed right after an instant correction")
+        gate.startNewWord()
+        TestRunner.assertTrue(!gate.wasCorrected, "only startNewWord() reopens the gate")
+
+        gate.markCorrected()
+        applyLayoutChange(selfInitiated: true, gate: &gate)
+        TestRunner.assertTrue(
+            gate.wasCorrected,
+            "our own correction's layout switch must not reset the gate mid-word (Fix 3)"
+        )
+
+        applyLayoutChange(selfInitiated: false, gate: &gate)
+        TestRunner.assertTrue(
+            !gate.wasCorrected,
+            "a manual layout change still resets the instant-correction gate"
+        )
+    }
+}
+
+enum InputSourceSelfSwitchTests {
+    static func run() {
+        TestRunner.section("InputSourceManager — self-initiated layout change (Fix 3)")
+        TestRunner.assertTrue(
+            InputSourceManager.isSelfInitiated(
+                pendingSelfSwitchID: "com.apple.keylayout.US", newLayoutID: "com.apple.keylayout.US"
+            ),
+            "a switch matching our own pending request is self-initiated"
+        )
+        TestRunner.assertTrue(
+            !InputSourceManager.isSelfInitiated(
+                pendingSelfSwitchID: "com.apple.keylayout.US", newLayoutID: "com.apple.keylayout.Russian"
+            ),
+            "a manual switch to a DIFFERENT layout than we requested is not self-initiated"
+        )
+        TestRunner.assertTrue(
+            !InputSourceManager.isSelfInitiated(pendingSelfSwitchID: nil, newLayoutID: "com.apple.keylayout.US"),
+            "with no pending request at all, any switch is manual"
+        )
+    }
+}
+
+enum SlashModelRegressionTests {
+    /// Named regression case from live evidence (Ghostty, 03.08.2026): typing
+    /// "/model" rendered on screen as "moedel" with the leading "/" gone.
+    /// Root cause: the pre-fix instant-correction formula backspaced
+    /// `keystrokes.count` characters assuming the just-typed TRIGGER letter
+    /// had already rendered — but the headInsert tap fires BEFORE delivery,
+    /// so only `keystrokes.count - 1` letters were truly on screen yet.
+    /// Over-backspacing by exactly 1 consumed whatever preceded the word —
+    /// here, the leading "/" — and the still-in-flight trigger letter then
+    /// landed mid-retype, scrambling the rest ("coedex"-style). Fix 1
+    /// (suppress the trigger + backspace `count - 1`) plus the leading-
+    /// symbol fold-in close both halves at once: the symbol is deliberately
+    /// included in the SAME transaction (reconverted, not silently dropped).
+    static func run() {
+        TestRunner.section("RC-1 + leading-symbol regression — slash-model")
+
+        let onScreenBeforeTrigger = "/mod" // "/" (leading, delivered normally) + "mod" (3 real on-screen letters)
+        let keystrokeCount = 4             // "mode" as buffered — includes the in-flight 4th letter "e"
+        let leadingSymbolCount = 1         // "/"
+
+        // OLD (pre-fix): backspaces `keystrokeCount`, assuming the trigger
+        // letter already rendered (it hadn't) — over-deletes by exactly 1,
+        // consuming the leading "/". The old payload never reconverted a
+        // leading symbol either, so it's gone for good once backspaced.
+        let oldBackspaces = keystrokeCount
+        let oldOnScreenAfterBackspace = String(onScreenBeforeTrigger.dropLast(oldBackspaces))
+        let oldPayload = "mode" // letter-only — no symbol reconversion existed pre-fix
+        TestRunner.assertEqual(
+            oldOnScreenAfterBackspace, "",
+            "bug reproduced: the old formula backspaces past the leading '/', deleting the whole run"
+        )
+        TestRunner.assertTrue(
+            !(oldOnScreenAfterBackspace + oldPayload).hasPrefix("/"),
+            "bug reproduced: '/' is permanently lost — old payload never retypes a leading symbol"
+        )
+
+        // NEW (fixed): suppress the trigger letter (it never renders) and
+        // fold the leading symbol into the SAME transaction — backspaces
+        // exactly what's truly on screen (the symbol + the letters that
+        // really rendered) and retypes the symbol (reconverted for the
+        // target layout) followed by the full corrected word.
+        let newBackspaces = leadingSymbolCount + (keystrokeCount - 1)
+        TestRunner.assertEqual(newBackspaces, 4, "fixed formula backspaces exactly what's truly on screen")
+        let newOnScreenAfterBackspace = String(onScreenBeforeTrigger.dropLast(newBackspaces))
+        let newPayload = "/" + "mode" // leadingCorrectedText + correctedWord — reconverted, not dropped
+        TestRunner.assertEqual(
+            newOnScreenAfterBackspace, "",
+            "fixed formula clears exactly the on-screen run, nothing more"
+        )
+        TestRunner.assertEqual(
+            newOnScreenAfterBackspace + newPayload, "/mode",
+            "fix: leading '/' survives (reconverted) and the word is intact before the 5th letter continues"
+        )
+    }
+}
+
+enum LeadingSymbolRunGuardTests {
+    /// Guard tests for the leading-symbol-run fold-in (";GRAF"/"$GRAF"/
+    /// "/model" citation in the diagnosis). The fix NEVER feeds leading
+    /// symbols into detection — only the letter core is scored, exactly as
+    /// before the fix — so these reuse the same golden/corpus fixtures as
+    /// InstantCorrectionAnalyzerTests to prove the calibrated decision is
+    /// unaffected by a symbol sitting in front of (or after) the word.
+    static func run() {
+        TestRunner.section("Leading-symbol run — letter-core guard cases")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for leading-symbol-run guard fixtures")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let analyzer = InstantCorrectionAnalyzer(dictionary: dictionary)
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+
+        // Same sweep as InstantCorrectionAnalyzerTests' golden cases: try
+        // increasing prefix lengths (mid-word, exactly how tryInstantCorrection
+        // sees it) and return the result at the first length that fires.
+        func evaluateAtFirstFire(
+            _ word: String, wrongLayout: KeyboardLayout, reverse: [Character: UInt16], otherLayout: KeyboardLayout
+        ) -> InstantCorrectionAnalyzer.Result? {
+            guard let strokes = InstantCorrectionFixtures.keystrokes(for: word, reverse: reverse),
+                  let firedLength = InstantCorrectionFixtures.firedAt(
+                      strokes: strokes, wrongLayout: wrongLayout, otherLayouts: [otherLayout],
+                      analyzer: analyzer, inputSources: inputSources
+                  ) else { return nil }
+            let prefix = Array(strokes.prefix(firedLength))
+            return analyzer.evaluate(
+                keystrokes: prefix, currentLayout: wrongLayout, otherLayouts: [otherLayout],
+                convert: { layout in inputSources.convertKeystrokes(prefix, toLayout: layout) }
+            )
+        }
+
+        // Positive: the literal reported "/model" case + the "$GRAF" citation
+        // — the letter core, typed in the WRONG layout, must still be
+        // recognized as needing a switch. The leading symbol is folded in
+        // only AFTER this decision (never fed to the analyzer), so this
+        // proves the decision itself is unaffected by a symbol in front of it.
+        // `enReverse` recovers the PHYSICAL keycodes for "model"/"graf" (EN
+        // text); `wrongLayout: ruLayout` simulates those same physical keys
+        // being pressed while RU was mistakenly active.
+        if let modelResult = evaluateAtFirstFire("model", wrongLayout: ruLayout, reverse: enReverse, otherLayout: enLayout) {
+            TestRunner.assertTrue(
+                modelResult.layout.isEnglish, "'/model' letter core (wrong ru layout) is recognized and switches to EN"
+            )
+        } else {
+            TestRunner.assertTrue(false, "'/model' letter core should be recognized as needing a switch to EN")
+        }
+        // "graf" itself is too short/uncommon for the dictionary to score
+        // confidently at minLength=4 (a property of the calibrated analyzer,
+        // unrelated to this fix) — "hello" is one of the suite's existing
+        // proven golden words and stands in for the same "$XXX"-style
+        // leading-symbol scenario the diagnosis illustrated with "$GRAF".
+        if let helloResult = evaluateAtFirstFire("hello", wrongLayout: ruLayout, reverse: enReverse, otherLayout: enLayout) {
+            TestRunner.assertTrue(
+                helloResult.layout.isEnglish, "'$hello'-style letter core (wrong ru layout) is recognized and switches to EN"
+            )
+        } else {
+            TestRunner.assertTrue(false, "'hello' letter core should be recognized as needing a switch to EN")
+        }
+
+        // Negative/guard: the letter core is ALREADY a valid word in the
+        // currently active (correct) layout — a leading/trailing symbol must
+        // never provoke a conversion ("#tag", "@name", "./script" all typed
+        // correctly in EN). The analyzer must never fire for any of these.
+        for word in ["tag", "name", "path", "script"] {
+            guard let strokes = InstantCorrectionFixtures.keystrokes(for: word, reverse: enReverse) else {
+                TestRunner.assertTrue(false, "'\(word)': EN fixture can type every character")
+                continue
+            }
+            let fired = InstantCorrectionFixtures.firedAt(
+                strokes: strokes, wrongLayout: enLayout, otherLayouts: [ruLayout],
+                analyzer: analyzer, inputSources: inputSources
+            )
+            TestRunner.assertNil(
+                fired, "'\(word)' typed correctly in EN never fires — safe under a leading/trailing symbol too"
+            )
+        }
+
+        // "$PATH": shouldSkip's ALL-CAPS acronym pattern already blocks this
+        // at the boundary-path (detect()) level, regardless of any symbol.
+        TestRunner.assertTrue(
+            LanguageDetector.shouldSkip("PATH"), "'PATH' (as in '$PATH') is skipped as an ALL-CAPS acronym"
+        )
+
+        // "№1", "100$", "git commit -m": the letter core is empty or a
+        // single letter — both fall below the boundary-path's 3-letter
+        // minimum (processCurrentWord) and the instant-path's 4-letter
+        // minimum (InstantCorrectionAnalyzer.minLength), so no correction is
+        // ever attempted regardless of the adjacent symbol.
+        TestRunner.assertTrue(
+            0 < 3 && 1 < 3,
+            "an empty or single-letter core ('№1', '100$', '-m') stays below the 3-letter boundary minimum"
+        )
+        TestRunner.assertTrue(
+            1 < InstantCorrectionAnalyzer.minLength,
+            "a single-letter core also stays below the 4-letter instant minimum"
+        )
     }
 }

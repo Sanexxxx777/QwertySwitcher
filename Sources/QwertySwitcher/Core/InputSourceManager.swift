@@ -6,8 +6,17 @@ extension Notification.Name {
 }
 
 final class InputSourceManager {
+    /// userInfo key on `.layoutChanged` — true when the switch was caused by
+    /// our own `switchTo` call (mid-correction, Double Shift, Undo), false for
+    /// a manual/bot-driven switch. See `isSelfInitiated`.
+    static let selfInitiatedKey = "selfInitiated"
+
     private(set) var availableLayouts: [KeyboardLayout] = []
     private var layoutsByID: [String: KeyboardLayout] = [:]
+    // Recorded synchronously BEFORE calling TISSelectInputSource so it is
+    // already set no matter how quickly the distributed notification below
+    // fires (observed 2-40ms delay — RC-3).
+    private var pendingSelfSwitchID: String?
 
     init() {
         reloadLayouts()
@@ -66,9 +75,11 @@ final class InputSourceManager {
 
     @discardableResult
     func switchTo(_ layout: KeyboardLayout) -> Bool {
+        pendingSelfSwitchID = layout.id
         let status = TISSelectInputSource(layout.source)
         if status != noErr {
             NSLog("[InputSource] Failed to switch to \(layout.name): status=\(status)")
+            pendingSelfSwitchID = nil
             return false
         }
         return true
@@ -211,7 +222,22 @@ final class InputSourceManager {
         reloadLayouts()
         let layoutName = currentLayout?.name ?? "?"
         let lang = currentLayout?.languageCode ?? "?"
-        DebugLog.shared.log("IS", "layout changed → \(lang):\(layoutName)")
-        NotificationCenter.default.post(name: .layoutChanged, object: nil)
+        let selfInitiated = Self.isSelfInitiated(
+            pendingSelfSwitchID: pendingSelfSwitchID, newLayoutID: currentLayout?.id
+        )
+        pendingSelfSwitchID = nil
+        DebugLog.shared.log(
+            "IS", "layout changed → \(lang):\(layoutName)\(selfInitiated ? " (self)" : "")"
+        )
+        NotificationCenter.default.post(
+            name: .layoutChanged, object: nil,
+            userInfo: [Self.selfInitiatedKey: selfInitiated]
+        )
+    }
+
+    /// Pure decision extracted for testability: was this input-source-changed
+    /// notification caused by our own pending `switchTo` call?
+    static func isSelfInitiated(pendingSelfSwitchID: String?, newLayoutID: String?) -> Bool {
+        pendingSelfSwitchID != nil && pendingSelfSwitchID == newLayoutID
     }
 }

@@ -81,12 +81,12 @@ struct PopupBubble: View {
     var body: some View {
         Text(text)
             .font(.system(size: 13, weight: .semibold))
-            .foregroundColor(Color(hex: 0xF2D4BA))
+            .foregroundColor(.white)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(
                 RoundedRectangle(cornerRadius: 8)
-                    .fill(Color(hex: 0x2C2823).opacity(0.92))
+                    .fill(Color(hex: 0x1e1e20).opacity(0.92))
                     .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
             )
     }

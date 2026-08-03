@@ -48,6 +48,12 @@ final class MainViewModel: ObservableObject {
     @Published var isPerAppLayoutEnabled: Bool {
         didSet { perAppLayoutService.isEnabled = isPerAppLayoutEnabled }
     }
+    @Published var themePreference: ThemePreference {
+        didSet {
+            prefsService.themePreference = themePreference
+            NotificationCenter.default.post(name: .themePreferenceChanged, object: nil)
+        }
+    }
     @Published var selectedEnglishLayoutID: String {
         didSet { persistActiveLayouts() }
     }
@@ -83,6 +89,7 @@ final class MainViewModel: ObservableObject {
         self.isCapsLockSwitchEnabled = prefsService.isCapsLockSwitchEnabled
         self.isInstantCorrectionEnabled = prefsService.isInstantCorrectionEnabled
         self.isPerAppLayoutEnabled = perAppLayoutService.isEnabled
+        self.themePreference = prefsService.themePreference
         let activeLayouts = inputSourceManager.resolvedActiveLayouts(
             preferredIDs: prefsService.activeLayoutIDs
         )

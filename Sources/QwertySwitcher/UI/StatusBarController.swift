@@ -45,6 +45,16 @@ final class StatusBarController {
             self, selector: #selector(refreshMenu),
             name: .licenseStatusChanged, object: nil
         )
+
+        // TEMP screenshot harness (visual-language review, remove before shipping):
+        // opens Main + License windows on launch, no menu-bar click needed — lets a
+        // headless/no-Accessibility environment still capture both windows.
+        if ProcessInfo.processInfo.environment["QSW_SCREENSHOT_MODE"] != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.openSettings()
+                self?.openLicense()
+            }
+        }
     }
 
     private func setupStatusItem() {
@@ -135,32 +145,10 @@ final class StatusBarController {
     private func rebuildMenu() {
         let menu = NSMenu()
 
-        let headerItem = NSMenuItem(title: AppIdentity.displayName, action: nil, keyEquivalent: "")
-        headerItem.attributedTitle = NSAttributedString(
-            string: AppIdentity.displayName,
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 14, weight: .semibold),
-                .foregroundColor: NSColor.labelColor
-            ]
-        )
-        headerItem.isEnabled = false
-        menu.addItem(headerItem)
-
-        let healthItem = NSMenuItem(
-            title: "Состояние: \(keyboardMonitor.health.title)",
-            action: nil,
-            keyEquivalent: ""
-        )
-        healthItem.isEnabled = false
-        menu.addItem(healthItem)
-
-        let permissionStatus = permissionsService.hasAccessibility && permissionsService.hasInputMonitoring
-            ? "Разрешения: выданы"
-            : "Разрешения: нужна настройка"
-        let permissionItem = NSMenuItem(title: permissionStatus, action: nil, keyEquivalent: "")
-        permissionItem.isEnabled = false
-        menu.addItem(permissionItem)
-
+        // Диагностика (состояние перехвата/разрешений) убрана из меню 03.08.2026 —
+        // видна в главном окне (StatusPill в MainView). Тут остаётся только action-пункт
+        // на случай реальной проблемы.
+        var hasLeadingItems = false
         if !permissionsService.hasAccessibility || !permissionsService.hasInputMonitoring {
             let repairItem = NSMenuItem(
                 title: "Настроить разрешения…",
@@ -169,8 +157,11 @@ final class StatusBarController {
             )
             repairItem.target = self
             menu.addItem(repairItem)
+            hasLeadingItems = true
         }
-        menu.addItem(NSMenuItem.separator())
+        if hasLeadingItems {
+            menu.addItem(NSMenuItem.separator())
+        }
 
         let autoSwitchItem = NSMenuItem(
             title: "Автопереключение",
@@ -261,13 +252,12 @@ final class StatusBarController {
         vm.onOpenLicense = { [weak self] in self?.openLicense() }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 660, height: 720),
-            styleMask: [.titled, .closable, .resizable],
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 460),
+            styleMask: [.titled, .closable],
             backing: .buffered, defer: false
         )
         window.title = AppIdentity.displayName
-        window.minSize = NSSize(width: 600, height: 620)
-        window.contentView = NSHostingView(rootView: MainView(viewModel: vm))
+        window.contentView = NSHostingView(rootView: MainView(viewModel: vm).gammaThemedRoot())
         window.center()
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
@@ -289,7 +279,7 @@ final class StatusBarController {
             backing: .buffered, defer: false
         )
         window.title = "Исключения"
-        window.contentView = NSHostingView(rootView: ExceptionsView(viewModel: vm))
+        window.contentView = NSHostingView(rootView: ExceptionsView(viewModel: vm).gammaThemedRoot())
         window.center()
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
@@ -312,6 +302,7 @@ final class StatusBarController {
         window.title = "О программе"
         window.contentView = NSHostingView(
             rootView: AboutView { [weak self] in self?.confirmDeleteLocalData() }
+                .gammaThemedRoot()
         )
         window.center()
         window.isReleasedWhenClosed = false
@@ -328,12 +319,12 @@ final class StatusBarController {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 480),
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 420),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false
         )
         window.title = "Лицензия"
-        window.contentView = NSHostingView(rootView: LicenseView())
+        window.contentView = NSHostingView(rootView: LicenseView().gammaThemedRoot())
         window.center()
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)

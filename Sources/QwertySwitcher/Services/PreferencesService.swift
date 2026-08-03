@@ -60,4 +60,10 @@ final class PreferencesService {
         set { defaults.set(Array(newValue.prefix(2)), forKey: keyPrefix + "activeLayoutIDs") }
     }
 
+    /// Light / Dark / System — default follows the OS.
+    var themePreference: ThemePreference {
+        get { ThemePreference(rawValue: defaults.string(forKey: keyPrefix + "themePreference") ?? "") ?? .system }
+        set { defaults.set(newValue.rawValue, forKey: keyPrefix + "themePreference") }
+    }
+
 }
