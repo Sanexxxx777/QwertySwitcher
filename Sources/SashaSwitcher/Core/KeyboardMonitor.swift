@@ -3,8 +3,40 @@ import CoreGraphics
 import AppKit
 
 final class KeyboardMonitor {
+    private struct QueuedUserEvent {
+        let type: CGEventType
+        let keycode: CGKeyCode
+        let flags: CGEventFlags
+        let autorepeat: Int64
+        let keyboardType: Int64
+
+        init(type: CGEventType, event: CGEvent) {
+            self.type = type
+            keycode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+            flags = event.flags
+            autorepeat = event.getIntegerValueField(.keyboardEventAutorepeat)
+            keyboardType = event.getIntegerValueField(.keyboardEventKeyboardType)
+        }
+
+        func makeEvent() -> CGEvent? {
+            let source = CGEventSource(stateID: .hidSystemState)
+            guard let event = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: keycode,
+                keyDown: type != .keyUp
+            ) else { return nil }
+            event.type = type
+            event.flags = flags
+            event.setIntegerValueField(.keyboardEventAutorepeat, value: autorepeat)
+            event.setIntegerValueField(.keyboardEventKeyboardType, value: keyboardType)
+            SyntheticEventMarker.markAsReplayedUserEvent(event)
+            return event
+        }
+    }
+
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var mouseMonitor: Any?
     private let buffer = InputBuffer()
     private let languageDetector: LanguageDetector
     private let textReplacer: TextReplacer
@@ -15,18 +47,20 @@ final class KeyboardMonitor {
     private let switchUndoManager: SwitchUndoManager
     private let perAppLayoutService: PerAppLayoutService
     private let secureInputDetector = SecureInputDetector()
+    private let permissionsService = PermissionsService()
     var hotkeyManager: HotkeyManager?
     private(set) var isRunning = false
+    private(set) var health: EventTapHealth = .stopped {
+        didSet {
+            guard health != oldValue else { return }
+            NotificationCenter.default.post(name: .eventTapHealthChanged, object: self)
+        }
+    }
     var isPaused = false
+    private var pendingUserEvents: [QueuedUserEvent] = []
+    private var invalidateAfterReplacement = false
 
-    // Auto-learning
-    private var lastCorrectedOriginal: String?
-    private var lastCorrectedReplacement: String?
-    private var backspaceCountAfterCorrection = 0
-
-    // Self-capture prevention
-    private var lastCorrectionTime: CFAbsoluteTime = 0
-    private let correctionCooldown: CFAbsoluteTime = 0.3
+    private var autoLearnTracker = AutoLearnTracker()
 
     // Stale-buffer eviction: drop accumulated keys if user paused typing too long
     private var lastKeyTime: CFAbsoluteTime = 0
@@ -35,7 +69,7 @@ final class KeyboardMonitor {
     // Last completed word (for Double Shift fallback after space).
     // When user types "ghbdtn " and then hits Double Shift, the main buffer is
     // already empty — we pull keycodes from here instead.
-    private var lastCompletedWord: (keycodes: [UInt16], trailing: String, timestamp: CFAbsoluteTime)?
+    private var lastCompletedWord: (keystrokes: [BufferedKeystroke], trailing: String)?
 
     private let spotlightBundleID = "com.apple.Spotlight"
 
@@ -68,20 +102,26 @@ final class KeyboardMonitor {
     }
 
     @objc private func appDidActivate() {
-        buffer.clear()
-        languageDetector.resetContext()
+        invalidateEditingContext()
     }
 
     @objc private func layoutDidChange() {
         buffer.clear()
+        lastCompletedWord = nil
         languageDetector.resetContext()
     }
 
     func start() {
         guard eventTap == nil else { return }
+        guard permissionsService.hasAllPermissions else {
+            health = .missingPermissions
+            return
+        }
+        health = .starting
 
         let eventMask: CGEventMask =
             (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.keyUp.rawValue) |
             (1 << CGEventType.flagsChanged.rawValue)
 
         let userInfo = Unmanaged.passUnretained(self).toOpaque()
@@ -89,14 +129,14 @@ final class KeyboardMonitor {
         eventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
+            options: .defaultTap,
             eventsOfInterest: eventMask,
             callback: eventTapCallback,
             userInfo: userInfo
         ) ?? CGEvent.tapCreate(
             tap: .cghidEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
+            options: .defaultTap,
             eventsOfInterest: eventMask,
             callback: eventTapCallback,
             userInfo: userInfo
@@ -105,6 +145,7 @@ final class KeyboardMonitor {
         guard let tap = eventTap else {
             NSLog("[KeyboardMonitor] Failed to create event tap")
             DebugLog.shared.log("KM", "ERROR: failed to create CGEventTap (check permissions)")
+            health = .unavailable
             return
         }
 
@@ -112,6 +153,16 @@ final class KeyboardMonitor {
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
         isRunning = true
+        if mouseMonitor == nil {
+            mouseMonitor = NSEvent.addGlobalMonitorForEvents(
+                matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+            ) { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.invalidateEditingContext()
+                }
+            }
+        }
+        health = secureInputDetector.isSecureInput ? .secureInput : .running
         NSLog("[KeyboardMonitor] Started")
         DebugLog.shared.log("KM", "event tap started")
     }
@@ -121,16 +172,75 @@ final class KeyboardMonitor {
         if let source = runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
         eventTap = nil
         runLoopSource = nil
+        if let mouseMonitor {
+            NSEvent.removeMonitor(mouseMonitor)
+            self.mouseMonitor = nil
+        }
         isRunning = false
+        health = .stopped
+    }
+
+    /// Polling entry point used by AppDelegate. It makes permission grants and
+    /// event-tap recovery take effect without requiring an application restart.
+    func refreshHealth() {
+        guard permissionsService.hasAllPermissions else {
+            if eventTap != nil { stop() }
+            health = .missingPermissions
+            return
+        }
+        guard let tap = eventTap else {
+            start()
+            return
+        }
+        if !CFMachPortIsValid(tap) {
+            DebugLog.shared.log("KM", "event tap invalidated — restarting")
+            stop()
+            start()
+            return
+        }
+        health = secureInputDetector.isSecureInput ? .secureInput : .running
     }
 
     // MARK: - Event Handling
 
+    fileprivate func queueIfReplacementActive(_ event: CGEvent) -> Bool {
+        guard isPaused, !SyntheticEventMarker.shouldBypass(event) else { return false }
+        pendingUserEvents.append(QueuedUserEvent(type: event.type, event: event))
+        return true
+    }
+
+    fileprivate func handlesShortcut(type: CGEventType, event: CGEvent) -> Bool {
+        let keycode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        if type == .flagsChanged && keycode == 57 {
+            return prefsService.isCapsLockSwitchEnabled
+        }
+        guard type == .keyDown else { return false }
+        let flags = event.flags
+        if flags.contains(.maskCommand) && flags.contains(.maskShift) && keycode == 9 {
+            return prefsService.isPasteNoFormatEnabled
+                && NSPasteboard.general.string(forType: .string) != nil
+        }
+        return flags.contains(.maskCommand)
+            && flags.contains(.maskAlternate)
+            && keycode == 6
+            && switchUndoManager.canUndo
+    }
+
     fileprivate func handleEvent(_ proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
+            if let tap = eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+                health = secureInputDetector.isSecureInput ? .secureInput : .running
+            } else {
+                health = .unavailable
+            }
             return
         }
+
+        // Generated events carry a process-local marker. Unlike the old 300ms
+        // cooldown, this filters only our own keystrokes and never drops real
+        // user input typed immediately after a correction.
+        if SyntheticEventMarker.shouldBypass(event) { return }
 
         if type == .flagsChanged {
             hotkeyManager?.handleFlagsChanged(event)
@@ -144,7 +254,13 @@ final class KeyboardMonitor {
 
         // Cmd+Shift+V
         if flags.contains(.maskCommand) && flags.contains(.maskShift) && keycode == 9 {
-            if prefsService.isPasteNoFormatEnabled { hotkeyManager?.handlePasteNoFormat() }
+            if prefsService.isPasteNoFormatEnabled {
+                isPaused = true
+                let started = hotkeyManager?.handlePasteNoFormat { [weak self] in
+                    self?.finishReplacement()
+                } ?? false
+                if !started { isPaused = false }
+            }
             return
         }
 
@@ -152,21 +268,23 @@ final class KeyboardMonitor {
         // (Plain Cmd+Z is left to the host app to avoid conflicting with its own undo stack.)
         if flags.contains(.maskCommand) && flags.contains(.maskAlternate)
             && keycode == 6 && switchUndoManager.canUndo {
-            performUndo()
+            _ = undoLastCorrection()
             return
         }
 
-        // Filter out self-capture FIRST. Our own re-typed characters come back
-        // through the event tap; if we let markKeyPressed() see them, it flips
-        // `anyKeyBetweenShifts` and cancels any pending singleShift — which
-        // kills Double Shift right after an auto-correction (user Shift-Shift
-        // within 300ms sees pendingSingleShift == nil). Order matters.
-        let inCooldown = (CFAbsoluteTimeGetCurrent() - lastCorrectionTime) < correctionCooldown
-        if isPaused { return }
-        if inCooldown { return }
-
         hotkeyManager?.markKeyPressed()
         perAppLayoutService.rememberCurrentLayout()
+
+        // Secure fields are never buffered, including while auto-switch is off.
+        if secureInputDetector.isSecureInput {
+            buffer.clear()
+            lastCompletedWord = nil
+            autoLearnTracker.cancel()
+            health = .secureInput
+            DebugLog.shared.log("KM", "skip: secure input")
+            return
+        }
+        if health != .running { health = .running }
 
         // Stale buffer eviction — user paused typing too long, old keys don't belong to current word
         let now = CFAbsoluteTimeGetCurrent()
@@ -176,107 +294,127 @@ final class KeyboardMonitor {
         lastKeyTime = now
 
         let isSpotlight = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == spotlightBundleID
-        if InputBuffer.isModifierActive(flags) { return }
-
-        // Word-boundary + history capture runs even when auto-switch is OFF,
-        // so Double Shift can still swap a word the user just finished typing.
-        if InputBuffer.isWordBoundary(keycode) {
-            let capturedKeycodes = buffer.currentWord()
-            let canAutoCorrect = prefsService.isAutoSwitchEnabled
-                && !secureInputDetector.isSecureInput
-                && !exceptionsService.isCurrentAppExcepted()
-                && !isSpotlight
-            if canAutoCorrect && !buffer.isEmpty && InputBuffer.isCorrectableBoundary(keycode) {
-                processCurrentWord(trigger: " ")
+        if InputBuffer.isModifierActive(flags) {
+            if InputBuffer.shouldInvalidateEditingContext(forModifiedFlags: flags) {
+                invalidateEditingContext()
             }
-            if !capturedKeycodes.isEmpty && InputBuffer.isCorrectableBoundary(keycode) {
-                lastCompletedWord = (capturedKeycodes, " ", CFAbsoluteTimeGetCurrent())
-            }
-            buffer.clear()
             return
         }
+        let canAutoCorrect = prefsService.isAutoSwitchEnabled
+            && !exceptionsService.isCurrentAppExcepted()
+            && !isSpotlight
 
-        if !prefsService.isAutoSwitchEnabled {
-            DebugLog.shared.log("KM", "skip: auto-switch OFF")
-            // Still track letters so Double Shift can pick them from buffer.
-            if InputBuffer.isLetterKey(keycode) { buffer.append(keycode) }
-            return
-        }
-        if secureInputDetector.isSecureInput {
-            DebugLog.shared.log("KM", "skip: secure input")
-            return
-        }
-        if exceptionsService.isCurrentAppExcepted() {
-            let app = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
-            DebugLog.shared.log("KM", "skip: app exception (\(app))")
-            return
-        }
-        if isSpotlight { return }
-
-        // Auto-learning: backspace after correction
         if InputBuffer.isDeleteKey(keycode) {
+            switchUndoManager.invalidate()
             buffer.removeLast()
-            if lastCorrectedReplacement != nil {
-                backspaceCountAfterCorrection += 1
-                if let orig = lastCorrectedOriginal, let repl = lastCorrectedReplacement,
-                   backspaceCountAfterCorrection >= repl.count {
-                    exceptionsService.learnException(original: orig, corrected: repl)
-                    lastCorrectedOriginal = nil
-                    lastCorrectedReplacement = nil
-                    backspaceCountAfterCorrection = 0
-                }
-            }
+            lastCompletedWord = nil
+            autoLearnTracker.registerDeletion()
             return
         }
 
-        if lastCorrectedReplacement != nil {
-            lastCorrectedOriginal = nil
-            lastCorrectedReplacement = nil
-            backspaceCountAfterCorrection = 0
+        if InputBuffer.isWordBoundary(keycode) {
+            let correctable = InputBuffer.isCorrectableBoundary(keycode)
+            handleWordBoundary(
+                trailing: correctable ? " " : nil,
+                canAutoCorrect: canAutoCorrect && correctable,
+                keepForManualSwitch: correctable
+            )
+            return
         }
-
-        // (word-boundary handled above — before the autoSwitch gate)
 
         // Context-aware punctuation: e.g. `.` `,` `;` `'` produce real letters in
         // Russian layout (ю, б, ж, э) but punctuation in English. Treat them as a
         // word boundary only when current layout is Latin.
-        let currentLang = languageDetector.inputSourceManager.currentLayout?.languageCode
-        if InputBuffer.isPunctuationIn(keycode: keycode, languageCode: currentLang) {
-            let capturedKeycodes = buffer.currentWord()
-            if !buffer.isEmpty {
-                let punctChar = InputBuffer.enPunctuationChar(keycode: keycode) ?? ""
-                processCurrentWord(trigger: punctChar)
-            }
-            if !capturedKeycodes.isEmpty {
-                let punctChar = InputBuffer.enPunctuationChar(keycode: keycode) ?? ""
-                lastCompletedWord = (capturedKeycodes, punctChar, CFAbsoluteTimeGetCurrent())
-            }
-            buffer.clear()
+        let currentLayout = languageDetector.inputSourceManager.currentLayout
+        let currentLang = currentLayout?.languageCode
+        if InputBuffer.isPunctuationIn(keycode: keycode, languageCode: currentLang, flags: flags) {
+            let punctChar = currentLayout.flatMap {
+                languageDetector.inputSourceManager.characterForKeycode(
+                    keycode, layout: $0, flags: flags
+                )
+            } ?? InputBuffer.punctuationChar(
+                keycode: keycode, languageCode: currentLang, flags: flags
+            ) ?? ""
+            handleWordBoundary(
+                trailing: punctChar,
+                canAutoCorrect: canAutoCorrect,
+                keepForManualSwitch: true
+            )
             return
         }
 
         if InputBuffer.isLetterKey(keycode) {
-            buffer.append(keycode)
+            switchUndoManager.invalidate()
+            autoLearnTracker.registerNonDeletion()
+            if buffer.isEmpty { lastCompletedWord = nil }
+            buffer.append(keycode, flags: flags)
         } else if InputBuffer.isNumberOrSpecial(keycode) {
-            // Numbers don't get re-typed for us — they already printed before we ran.
-            // Pass them as trailing so the word + digit come out in correct order.
-            if !buffer.isEmpty {
-                let digit = InputBuffer.digitChar(keycode: keycode) ?? ""
-                processCurrentWord(trigger: digit)
-            }
-            buffer.clear()
+            switchUndoManager.invalidate()
+            let digit = languageDetector.inputSourceManager.trailingCharacter(
+                keycode: keycode, flags: flags
+            ) ?? ""
+            handleWordBoundary(
+                trailing: digit,
+                canAutoCorrect: canAutoCorrect,
+                keepForManualSwitch: true
+            )
         } else {
-            // Unknown key type — don't try to retype it; just flush the buffer.
-            if !buffer.isEmpty { processCurrentWord(trigger: nil) }
+            switchUndoManager.invalidate()
+            autoLearnTracker.cancel()
             buffer.clear()
+            lastCompletedWord = nil
         }
+    }
+
+    private func handleWordBoundary(
+        trailing: String?, canAutoCorrect: Bool, keepForManualSwitch: Bool
+    ) {
+        let captured = buffer.currentWord()
+        if captured.isEmpty { switchUndoManager.invalidate() }
+        let retyped = languageDetector.lastConvertedWord(keystrokes: captured) ?? ""
+        let learned = autoLearnTracker.confirmRetype(word: retyped, trailing: trailing)
+        if let learned {
+            exceptionsService.learnException(
+                original: learned.original,
+                corrected: learned.corrected
+            )
+            DebugLog.shared.log("AUTOLEARN", "exact retype confirmed")
+        }
+
+        let replacementStarted = canAutoCorrect
+            && learned == nil
+            && !captured.isEmpty
+            && processCurrentWord(trigger: trailing)
+
+        if replacementStarted {
+            lastCompletedWord = nil
+        } else if keepForManualSwitch, !captured.isEmpty, let trailing {
+            lastCompletedWord = (captured, trailing)
+        } else {
+            lastCompletedWord = nil
+        }
+        buffer.clear()
+    }
+
+    private func invalidateEditingContext() {
+        if isPaused {
+            invalidateAfterReplacement = true
+            textReplacer.cancelCurrentReplacement()
+            return
+        }
+        buffer.clear()
+        lastCompletedWord = nil
+        autoLearnTracker.cancel()
+        switchUndoManager.invalidate()
+        languageDetector.resetContext()
     }
 
     /// Try to swap the last word currently sitting in the input buffer.
     /// Returns true if a correction was applied. Called from Double Shift hotkey.
     @discardableResult
     func swapLastWordInBuffer() -> Bool {
-        var keycodes = buffer.currentWord()
+        guard !isPaused else { return false }
+        var keystrokes = buffer.currentWord()
         var trailing: String? = nil
         var source = "buffer"
 
@@ -285,24 +423,26 @@ final class KeyboardMonitor {
         // the word hasn't been replaced by a new one, Double Shift must work.
         // History is invalidated only when a new word starts or after a
         // successful conversion (line below this function).
-        if keycodes.count < 2 {
-            if let last = lastCompletedWord, last.keycodes.count >= 2 {
-                keycodes = last.keycodes
+        if keystrokes.count < 2 {
+            if let last = lastCompletedWord, last.keystrokes.count >= 2 {
+                keystrokes = last.keystrokes
                 trailing = last.trailing
                 source = "history"
             }
         }
 
-        guard keycodes.count >= 2 else { return false }
+        guard keystrokes.count >= 2 else { return false }
 
-        let layouts = languageDetector.inputSourceManager.availableLayouts
-        guard layouts.count >= 2, let currentLayout = languageDetector.inputSourceManager.currentLayout else { return false }
+        let layouts = languageDetector.activeLayouts
+        guard layouts.count >= 2,
+              let currentLayout = languageDetector.inputSourceManager.currentLayout,
+              layouts.contains(where: { $0.id == currentLayout.id }) else { return false }
 
         // Decide target: if detector finds a valid other layout, use it.
         // Otherwise fall back to "the other layout" (force swap).
         var targetLayout: KeyboardLayout
         var correctedWord: String
-        let result = languageDetector.detect(keycodes: keycodes)
+        let result = languageDetector.detect(keystrokes: keystrokes)
         switch result {
         case .switchTo(let layout, let word):
             targetLayout = layout
@@ -310,38 +450,48 @@ final class KeyboardMonitor {
         case .noSwitch:
             guard let other = layouts.first(where: { $0.id != currentLayout.id }) else { return false }
             targetLayout = other
-            correctedWord = languageDetector.inputSourceManager.convertKeycodes(keycodes, toLayout: other)
+            correctedWord = languageDetector.inputSourceManager.convertKeystrokes(keystrokes, toLayout: other)
             guard !correctedWord.isEmpty else { return false }
         }
 
-        let originalWord = languageDetector.lastConvertedWord(keycodes: keycodes) ?? ""
-
-        // Record for undo
-        switchUndoManager.record(
-            originalKeycodes: keycodes,
-            originalWord: originalWord,
-            correctedWord: correctedWord,
-            originalLayoutID: currentLayout.id,
-            targetLayoutID: targetLayout.id
-        )
+        let originalWord = languageDetector.lastConvertedWord(keystrokes: keystrokes) ?? ""
 
         isPaused = true
-        lastCorrectionTime = CFAbsoluteTimeGetCurrent()
-        let length = keycodes.count
+        let length = keystrokes.count
 
         textReplacer.replaceCurrentWord(
             length: length,
             replacement: correctedWord,
             targetLayout: targetLayout,
             trailing: trailing
-        ) { [weak self] in
-            self?.isPaused = false
-            self?.lastCorrectionTime = CFAbsoluteTimeGetCurrent()
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.switchUndoManager.record(
+                    originalKeycodes: keystrokes.map(\.keycode),
+                    originalWord: originalWord,
+                    correctedWord: correctedWord,
+                    trailing: trailing,
+                    originalLayoutID: currentLayout.id,
+                    targetLayoutID: targetLayout.id
+                )
+                self.buffer.clear()
+                self.lastCompletedWord = nil
+                self.statsService.recordOptionSwitch()
+                SoundService.shared.playSwitch(prefsService: self.prefsService)
+                NotificationCenter.default.post(name: .statsUpdated, object: nil)
+                DebugLog.shared.log(
+                    "KM",
+                    "doubleShift via \(source): \(currentLayout.languageCode)→\(targetLayout.languageCode) len=\(length) trail=\(trailing ?? "∅")"
+                )
+            case .layoutSwitchFailed:
+                DebugLog.shared.log("KM", "doubleShift aborted: layout switch verification failed")
+            case .cancelled:
+                DebugLog.shared.log("KM", "doubleShift cancelled: editing context changed")
+            }
+            self.finishReplacement()
         }
-
-        buffer.clear()
-        lastCompletedWord = nil
-        DebugLog.shared.log("KM", "doubleShift via \(source): \(currentLayout.languageCode)→\(targetLayout.languageCode) len=\(length) trail=\(trailing ?? "∅")")
         return true
     }
 
@@ -350,101 +500,184 @@ final class KeyboardMonitor {
     ///                      etc). It already landed in the text field, so the
     ///                      replacer must backspace over it and re-type it.
     ///                      Pass nil only if nothing was printed after the word.
-    private func processCurrentWord(trigger: String?) {
-        let keycodes = buffer.currentWord()
+    @discardableResult
+    private func processCurrentWord(trigger: String?) -> Bool {
+        guard !isPaused else { return false }
+        let keystrokes = buffer.currentWord()
         // Require 3+ letters: 2-letter "words" (it/аа/oo) give too many false positives.
-        guard keycodes.count >= 3 else {
-            DebugLog.shared.log("KM", "word too short (len=\(keycodes.count))")
-            return
+        guard keystrokes.count >= 3 else {
+            DebugLog.shared.log("KM", "word too short (len=\(keystrokes.count))")
+            return false
         }
 
-        let result = languageDetector.detect(keycodes: keycodes)
+        let result = languageDetector.detect(keystrokes: keystrokes)
         let currentLang = languageDetector.inputSourceManager.currentLayout?.languageCode ?? "?"
 
         switch result {
         case .noSwitch:
-            DebugLog.shared.log("KM", "detect: noSwitch len=\(keycodes.count) cur=\(currentLang)")
-            if prefsService.isYoficatorEnabled { applyYoficator(keycodes: keycodes, trigger: trigger) }
+            DebugLog.shared.log("KM", "detect: noSwitch len=\(keystrokes.count) cur=\(currentLang)")
+            if prefsService.isYoficatorEnabled {
+                return applyYoficator(keystrokes: keystrokes, trigger: trigger)
+            }
+            return false
 
         case .switchTo(let layout, var correctedWord):
             if exceptionsService.isWordExcepted(correctedWord) {
                 DebugLog.shared.log("KM", "skip: word exception match")
-                return
+                return false
             }
-            let originalWord = languageDetector.lastConvertedWord(keycodes: keycodes)
+            let originalWord = languageDetector.lastConvertedWord(keystrokes: keystrokes)
             if let orig = originalWord, exceptionsService.isAutoLearned(orig) {
                 DebugLog.shared.log("KM", "skip: auto-learned exception")
-                return
+                return false
             }
 
             if prefsService.isYoficatorEnabled && layout.isRussian {
                 if let yo = yoficatorService.yoficate(correctedWord) { correctedWord = yo }
             }
 
-            // Record for undo
-            let currentLayoutID = languageDetector.inputSourceManager.currentLayout?.id ?? ""
-            switchUndoManager.record(
-                originalKeycodes: keycodes,
-                originalWord: originalWord ?? "",
-                correctedWord: correctedWord,
-                originalLayoutID: currentLayoutID,
-                targetLayoutID: layout.id
-            )
-
-            lastCorrectedOriginal = originalWord
-            lastCorrectedReplacement = correctedWord
-            backspaceCountAfterCorrection = 0
+            guard let sourceLayout = languageDetector.inputSourceManager.currentLayout else {
+                return false
+            }
 
             isPaused = true
-            lastCorrectionTime = CFAbsoluteTimeGetCurrent()
-
             textReplacer.replaceCurrentWord(
-                length: keycodes.count,
+                length: keystrokes.count,
                 replacement: correctedWord,
                 targetLayout: layout,
                 trailing: trigger
-            ) { [weak self] in
-                self?.isPaused = false
-                self?.lastCorrectionTime = CFAbsoluteTimeGetCurrent()
+            ) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    let original = originalWord ?? ""
+                    self.switchUndoManager.record(
+                        originalKeycodes: keystrokes.map(\.keycode),
+                        originalWord: original,
+                        correctedWord: correctedWord,
+                        trailing: trigger,
+                        originalLayoutID: sourceLayout.id,
+                        targetLayoutID: layout.id
+                    )
+                    if !original.isEmpty {
+                        self.autoLearnTracker.recordCorrection(
+                            original: original,
+                            corrected: correctedWord,
+                            trailing: trigger
+                        )
+                    }
+                    self.statsService.recordAutoSwitch()
+                    SoundService.shared.playSwitch(prefsService: self.prefsService)
+                    NotificationCenter.default.post(name: .statsUpdated, object: nil)
+                    DebugLog.shared.log(
+                        "KM",
+                        "correction: \(sourceLayout.languageCode)→\(layout.languageCode) len=\(keystrokes.count) trig=\(trigger ?? "∅")"
+                    )
+                case .layoutSwitchFailed:
+                    if let trigger {
+                        self.lastCompletedWord = (keystrokes, trigger)
+                    }
+                    DebugLog.shared.log("KM", "correction aborted: layout switch verification failed")
+                case .cancelled:
+                    DebugLog.shared.log("KM", "correction cancelled: editing context changed")
+                }
+                self.finishReplacement()
             }
-
-            let fromLang = languageDetector.inputSourceManager.currentLayout?.languageCode ?? "?"
-            DebugLog.shared.log("KM", "correction: \(fromLang)→\(layout.languageCode) len=\(keycodes.count) trig=\(trigger ?? "∅")")
-            statsService.recordAutoSwitch()
-            SoundService.shared.playSwitch(prefsService: prefsService)
-            NotificationCenter.default.post(name: .statsUpdated, object: nil)
+            return true
         }
     }
 
-    private func applyYoficator(keycodes: [UInt16], trigger: String?) {
-        guard let currentLayout = languageDetector.currentRussianLayout() else { return }
-        let word = languageDetector.inputSourceManager.convertKeycodes(keycodes, toLayout: currentLayout)
+    @discardableResult
+    private func applyYoficator(keystrokes: [BufferedKeystroke], trigger: String?) -> Bool {
+        guard let currentLayout = languageDetector.currentRussianLayout() else { return false }
+        let word = languageDetector.inputSourceManager.convertKeystrokes(keystrokes, toLayout: currentLayout)
         if let yo = yoficatorService.yoficate(word), yo != word {
             isPaused = true
-            textReplacer.replaceCurrentWord(length: keycodes.count, replacement: yo, targetLayout: currentLayout, trailing: trigger) { [weak self] in
-                self?.isPaused = false
+            textReplacer.replaceCurrentWord(
+                length: keystrokes.count,
+                replacement: yo,
+                targetLayout: currentLayout,
+                trailing: trigger
+            ) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.switchUndoManager.record(
+                        originalKeycodes: keystrokes.map(\.keycode),
+                        originalWord: word,
+                        correctedWord: yo,
+                        trailing: trigger,
+                        originalLayoutID: currentLayout.id,
+                        targetLayoutID: currentLayout.id
+                    )
+                    self.statsService.recordTypoFix()
+                    NotificationCenter.default.post(name: .statsUpdated, object: nil)
+                case .layoutSwitchFailed:
+                    DebugLog.shared.log("KM", "yoficator aborted: layout switch verification failed")
+                case .cancelled:
+                    DebugLog.shared.log("KM", "yoficator cancelled: editing context changed")
+                }
+                self.finishReplacement()
             }
-            statsService.recordTypoFix()
-            NotificationCenter.default.post(name: .statsUpdated, object: nil)
+            return true
         }
+        return false
     }
 
-    private func performUndo() {
-        guard let correction = switchUndoManager.consume() else { return }
-        guard let originalLayout = languageDetector.inputSourceManager.availableLayouts
-                .first(where: { $0.id == correction.originalLayoutID }) else { return }
+    @discardableResult
+    func undoLastCorrection() -> Bool {
+        guard !isPaused else { return false }
+        guard let correction = switchUndoManager.lastCorrection else { return false }
+        guard let originalLayout = languageDetector.inputSourceManager.layout(
+            withID: correction.originalLayoutID
+        ) else { return false }
+        _ = switchUndoManager.consume()
 
         isPaused = true
         textReplacer.replaceCurrentWord(
             length: correction.correctedWord.count,
             replacement: correction.originalWord,
-            targetLayout: originalLayout
-        ) { [weak self] in
-            self?.isPaused = false
+            targetLayout: originalLayout,
+            trailing: correction.trailing
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.buffer.clear()
+                self.lastCompletedWord = nil
+                self.autoLearnTracker.cancel()
+                SoundService.shared.playSwitch(prefsService: self.prefsService)
+                DebugLog.shared.log("KM", "undo applied with trailing preserved")
+            case .layoutSwitchFailed:
+                self.switchUndoManager.record(
+                    originalKeycodes: correction.originalKeycodes,
+                    originalWord: correction.originalWord,
+                    correctedWord: correction.correctedWord,
+                    trailing: correction.trailing,
+                    originalLayoutID: correction.originalLayoutID,
+                    targetLayoutID: correction.targetLayoutID
+                )
+                DebugLog.shared.log("KM", "undo aborted: layout switch verification failed")
+            case .cancelled:
+                DebugLog.shared.log("KM", "undo cancelled: editing context changed")
+            }
+            self.finishReplacement()
         }
+        return true
+    }
 
-        SoundService.shared.playSwitch(prefsService: prefsService)
-        DebugLog.shared.log("KM", "undo applied")
+    private func finishReplacement() {
+        isPaused = false
+        if invalidateAfterReplacement {
+            invalidateAfterReplacement = false
+            invalidateEditingContext()
+        }
+        let events = pendingUserEvents
+        pendingUserEvents.removeAll(keepingCapacity: true)
+        for queued in events {
+            guard let event = queued.makeEvent() else { continue }
+            event.post(tap: .cgAnnotatedSessionEventTap)
+        }
     }
 }
 
@@ -453,6 +686,13 @@ private func eventTapCallback(
 ) -> Unmanaged<CGEvent>? {
     guard let userInfo = userInfo else { return Unmanaged.passUnretained(event) }
     let monitor = Unmanaged<KeyboardMonitor>.fromOpaque(userInfo).takeUnretainedValue()
+    let isDisableNotification = type == .tapDisabledByTimeout
+        || type == .tapDisabledByUserInput
+    if !isDisableNotification && SyntheticEventMarker.shouldBypass(event) {
+        return Unmanaged.passUnretained(event)
+    }
+    if !isDisableNotification && monitor.queueIfReplacementActive(event) { return nil }
+    let suppressHandledShortcut = monitor.handlesShortcut(type: type, event: event)
     monitor.handleEvent(proxy, type: type, event: event)
-    return Unmanaged.passUnretained(event)
+    return suppressHandledShortcut ? nil : Unmanaged.passUnretained(event)
 }

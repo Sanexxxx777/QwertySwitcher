@@ -2,7 +2,7 @@ import Foundation
 
 final class StatisticsService {
     private let defaults = UserDefaults.standard
-    private let keyPrefix = "tech.sasha.switcher.stats."
+    private let keyPrefix = AppIdentity.keyPrefix + "stats."
 
     // Track time when feature was first enabled (for "hours" display like Caramba)
     var firstLaunchDate: Date {

@@ -1,10 +1,12 @@
 #!/bin/bash
-# Creates a persistent self-signed code-signing identity for SashaSwitcher
+# Creates a persistent self-signed code-signing identity for Qwerty Switch.
 # so that macOS TCC (Privacy/Accessibility) keeps permissions across rebuilds.
 # Run once — subsequent build.sh invocations will reuse the identity.
 
 set -e
 
+# Keep the legacy identity name so existing developer machines do not need a
+# second private certificate. Product branding and bundle ID are independent.
 IDENTITY_NAME="SashaSwitcher Developer"
 KEYCHAIN_PATH="$HOME/Library/Keychains/login.keychain-db"
 

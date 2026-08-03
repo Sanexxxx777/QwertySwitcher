@@ -10,27 +10,37 @@ struct OnboardingView: View {
         ZStack {
             LiquidGlassBackground()
             VStack(spacing: 0) {
-                VStack(spacing: 4) {
-                    Text("ДОБРО  ПОЖАЛОВАТЬ")
-                        .font(.nfaSerif(12, weight: .medium))
-                        .foregroundColor(Gamma.textSecondary)
-                        .tracking(6)
-                    Text("SASHA SWITCHER")
-                        .font(.nfaSerif(22, weight: .semibold))
-                        .tracking(3)
-                        .nfaTitleGradient()
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Gamma.accent.opacity(0.14))
+                        Text("QS")
+                            .font(.nfaMono(15, weight: .bold))
+                            .foregroundStyle(Gamma.accentLight)
+                    }
+                    .frame(width: 40, height: 40)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Настройка Qwerty Switch")
+                            .font(.nfaSans(19, weight: .semibold))
+                            .foregroundStyle(Gamma.textPrimary)
+                        Text("Два системных разрешения — текст остаётся на Mac")
+                            .font(.nfaSans(11))
+                            .foregroundStyle(Gamma.textSecondary)
+                    }
+                    Spacer()
                 }
-                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 22)
                 .padding(.top, 22)
-                .padding(.bottom, 18)
+                .padding(.bottom, 16)
 
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("Для работы приложению нужны два разрешения macOS:")
-                        .font(.system(size: 13))
+                    Text("Разрешения macOS")
+                        .font(.nfaSans(12, weight: .semibold))
                         .foregroundColor(Gamma.textPrimary)
 
                     permissionRow(
-                        title: "Universal Access (Accessibility)",
+                        title: "Универсальный доступ",
                         subtitle: "для перехвата нажатий и исправления текста",
                         granted: watcher.hasAccessibility,
                         openAction: {
@@ -57,7 +67,7 @@ struct OnboardingView: View {
                         Text(watcher.hasAll
                              ? "Все разрешения на месте — нажми «Далее»"
                              : "Выдай разрешения — кнопка «Далее» активируется сама")
-                            .font(.system(size: 11))
+                            .font(.nfaSans(11))
                             .foregroundColor(watcher.hasAll ? Gamma.accentGreen : Gamma.textSecondary)
                     }
                     .padding(.top, 4)
@@ -80,6 +90,7 @@ struct OnboardingView: View {
             }
         }
         .frame(width: 480, height: 380)
+        .preferredColorScheme(.dark)
         .onAppear { watcher.startPolling() }
         .onDisappear { watcher.stopPolling() }
     }
@@ -93,10 +104,10 @@ struct OnboardingView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.nfaSans(13, weight: .semibold))
                     .foregroundColor(Gamma.textPrimary)
                 Text(subtitle)
-                    .font(.system(size: 11))
+                    .font(.nfaSans(11))
                     .foregroundColor(Gamma.textSecondary)
             }
 
@@ -106,7 +117,7 @@ struct OnboardingView: View {
                 NFAButton(title: "Открыть", style: .secondary, action: openAction)
             } else {
                 Text("ВЫДАНО")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.nfaSans(9, weight: .bold))
                     .foregroundColor(Gamma.accentGreen)
                     .tracking(1)
                     .padding(.horizontal, 8)

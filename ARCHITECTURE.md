@@ -1,172 +1,140 @@
-# SashaSwitcher — Architecture (v0.2.0)
+# Qwerty Switch — архитектура (v0.3.0)
 
-Нативное macOS приложение для автоматического переключения раскладки клавиатуры.
-Работает как menu-bar app (без Dock), перехватывает нажатия через CGEventTap,
-определяет язык набираемого слова и при необходимости переключает раскладку
-и исправляет текст. Аналог Caramba Switcher / Punto Switcher, но локальный и без телеметрии.
+Нативное menu-bar приложение для macOS 13+, которое локально определяет неверную
+раскладку набираемого слова, переключает источник ввода и исправляет текст.
+Публичное имя и bundle ID: `Qwerty Switch`, `tech.sasha.qwertyswitch`.
+Внутреннее имя SwiftPM-target/executable `SashaSwitcher` сохранено, чтобы не делать
+рискованное механическое переименование исходного дерева.
 
-## Tech Stack
+## Стек
 
-| Компонент | Технология | Обоснование |
-|-----------|-----------|-------------|
-| Язык | Swift 5.9+ | Производительный (lookup < 1μs на BloomFilter) |
-| UI | AppKit + SwiftUI | AppKit для `NSStatusItem`, SwiftUI для окон |
-| Сборка | SPM + bash | `swift build` + `./Scripts/build.sh` → .app, без Xcode |
-| Словарь | BloomFilter (≈480 KB) + `NSSpellChecker` подтверждение | Минимум RAM (≈7 MB total) |
-| Перехват клавиш | `CGEventTap` (ListenOnly) | Единственный API; не блокирует события |
-| Раскладки | `TIS` (`TISCopyCurrentKeyboardInputSource`, `UCKeyTranslate`) | Единственный Apple API |
-| Хранение | `UserDefaults` + cached `.ssbf` в `~/Library/Application Support/SashaSwitcher/` | Просто и надёжно |
+| Компонент | Реализация |
+|---|---|
+| Язык и сборка | Swift tools 5.9, SwiftPM, AppKit + SwiftUI |
+| Перехват ввода | `CGEventTap` с Accessibility и Input Monitoring |
+| Раскладки | Carbon TIS + `UCKeyTranslate` |
+| Определение языка | Bloom filter, `NSSpellChecker`, n-gram и частотный/context score |
+| Хранение | `UserDefaults`, локальный Bloom-кэш и локальный debug log |
+| Дистрибуция | self-signed beta, Developer ID DMG, отдельная App Store sandbox-ветка |
 
-## File Structure
+Сетевого и телеметрического клиента в приложении нет. Набираемые слова не пишутся
+в debug log; сохранение текста возможно только как явно управляемые пользователем
+исключения и автообученные исключения.
 
-```
-SashaSwitcher/
-├── Package.swift
-├── Sources/SashaSwitcher/
-│   ├── main.swift                        — entry point + `--test` mode
-│   ├── AppDelegate.swift                 — wire-up, onboarding
-│   ├── Core/
-│   │   ├── KeyboardMonitor.swift         — CGEventTap + word buffer + correction
-│   │   ├── HotkeyManager.swift           — Single/Double Shift, L+R, CapsLock
-│   │   ├── LanguageDetector.swift        — 4-level scoring
-│   │   ├── InputBuffer.swift             — ring buffer 64, keycode classification
-│   │   ├── InputSourceManager.swift      — TIS wrappers, layout change notifications
-│   │   ├── TextReplacer.swift            — backspace + unicode type
-│   │   ├── UndoManager.swift             — SwitchUndoManager (Cmd+Option+Z)
-│   │   ├── SecureInputDetector.swift     — password field detection
-│   │   ├── NGramAnalyzer.swift           — forbidden/common bigrams RU/EN
-│   │   └── WordFrequency.swift           — top-200 common-word bonus
-│   ├── Dictionary/
-│   │   ├── BloomFilter.swift             — FNV-1a double hashing + disk format (SSBF)
-│   │   └── WordDictionary.swift          — bloom + NSSpellChecker, cached to disk
-│   ├── UI/
-│   │   ├── StatusBarController.swift     — menu bar item (shows layout RU/EN)
-│   │   └── Views/
-│   │       ├── MainView.swift            — Gamma-themed main window
-│   │       ├── MainViewModel.swift
-│   │       ├── AboutView.swift
-│   │       ├── ExceptionsView.swift      — word/app/auto-learned tabs
-│   │       ├── OnboardingView.swift      — Accessibility + Input Monitoring
-│   │       ├── SwitchPopup.swift         — floating bubble near cursor
-│   │       └── StatusIndicator.swift     — top-right ✓/✗ toggle indicator
-│   ├── Models/
-│   │   └── Language.swift                — KeyboardLayout, DetectionResult
-│   ├── Services/
-│   │   ├── StatisticsService.swift       — counters + time-saved formula
-│   │   ├── PreferencesService.swift
-│   │   ├── ExceptionsService.swift       — word/app/auto-learned
-│   │   ├── PermissionsService.swift      — AX + InputMonitoring prompts
-│   │   ├── PerAppLayoutService.swift     — bundle ID → layout memory
-│   │   ├── YoficatorService.swift        — е → ё rules
-│   │   ├── SoundService.swift            — Tink/Pop/Basso, respects toggle
-│   │   ├── AutoStartService.swift        — SMAppService login item
-│   │   └── PrivacyService.swift          — audit UserDefaults for keylog keys
-│   └── Tests/TestRunner.swift            — standalone runner (`--test`)
-├── Resources/
-│   ├── Dictionaries/{en_US,ru_RU}.txt    — 714K words bundled
-│   ├── Info.plist                        — v0.2.0 build 2, LSUIElement
-│   └── AppIcon.icns
-├── Scripts/
-│   ├── build.sh                          — release .app bundle
-│   └── test.sh                           — debug build + --test
-└── build/SashaSwitcher.app                — output (9.8 MB)
+## Основные компоненты
+
+```text
+Sources/SashaSwitcher/
+├── AppIdentity.swift               публичные и legacy-идентификаторы
+├── AppDelegate.swift               создание сервисов, onboarding, health polling
+├── Core/
+│   ├── KeyboardMonitor.swift       event tap, буфер, коррекция, context invalidation
+│   ├── HotkeyManager.swift         Shift-комбинации, Caps Lock, plain-text paste
+│   ├── InputBuffer.swift           keycode/flags и границы слова
+│   ├── InputSourceManager.swift    TIS, layout verification, UCKeyTranslate
+│   ├── LanguageDetector.swift      scoring и решение о переключении
+│   ├── TextReplacer.swift          проверка layout, backspace/retype, cancellation
+│   ├── SecureInputDetector.swift   Secure Event Input + AXSecureTextField
+│   ├── UndoManager.swift           одна отменяемая транзакция коррекции
+│   └── *Tracker/*Resolver.swift    чистые state machines для горячих клавиш
+├── Dictionary/
+│   ├── BloomFilter.swift           SSBF v2 + fingerprint и строгая валидация кэша
+│   └── WordDictionary.swift        словари EN/RU + системный spell checker
+├── Services/                       настройки, исключения, статистика, privacy
+├── UI/                             status bar, onboarding и окна настроек
+└── Tests/TestRunner.swift          автономный test runner без XCTest
 ```
 
-## Core Pipeline
+Legacy-настройки `tech.sasha.switcher.*` мигрируются один раз в новый namespace.
+Новые данные находятся в `~/Library/Application Support/QwertySwitch`, журнал —
+в `~/Library/Logs/QwertySwitch/debug.log`.
 
-```
-CGEventTap (listenOnly)
-    │
-    ├── flagsChanged ── HotkeyManager
-    │     ├─ Left+Right Shift → toggle auto-switch
-    │     ├─ Single Shift tap → switch layout (→ different-language first)
-    │     ├─ Double Shift tap → swapLastWordInBuffer() → clipboard fallback
-    │     └─ CapsLock → switch layout
-    │
-    └── keyDown ── KeyboardMonitor
-          │
-          ├── filter: cooldown, modifiers, secure input, app exception, Spotlight
-          ├── stale buffer eviction (>10s idle → clear)
-          │
-          ├── Cmd+Option+Z → Undo last correction
-          ├── Cmd+Shift+V  → Paste plain text
-          │
-          ├── Backspace → buffer.removeLast + auto-learn tracking
-          │
-          ├── Space (49) → processCurrentWord() + clear   [triggers correction]
-          ├── Enter/Tab/Esc → clear buffer only           [no correction: chat-safe]
-          │
-          ├── Punctuation in EN layout (. , ; ' [ ] `) → processCurrentWord + clear
-          ├── Letter key → buffer.append
-          └── Number/slash → processCurrentWord + clear
+## Поток обработки
+
+```text
+physical CGEvent
+  ├─ synthetic/replayed marker → пропустить повторный анализ
+  ├─ flagsChanged → HotkeyManager
+  └─ keyDown
+       ├─ secure field → очистить контекст и ничего не буферизовать
+       ├─ Cmd/Ctrl/Option → инвалидировать word/Undo-контекст
+       ├─ letter → добавить keycode + Shift/Caps flags
+       ├─ Space/актуальная пунктуация/цифра → завершить слово
+       └─ Enter/Tab/Esc → очистить без автозамены
 ```
 
-### LanguageDetector scoring
+Пунктуация и символ после слова вычисляются через активный TIS layout. Жёсткая
+US-карта используется только как fallback, поэтому Russian/RussianWin и другие
+установленные раскладки не получают американский символ по ошибке.
 
-```
-for each installed layout L:
-    word = convertKeycodes(buffer, toLayout: L)
-    skip if mixed script or matches skipPatterns (URL, email, hex, camelCase)
-    score =   80..100 if BloomFilter + NSSpellChecker confirm (strong)
-            + 62..70  if only NSSpellChecker (weak)
-            + n-gram bonus/penalty (±50)
-            + frequency bonus (+25 for top-200 word)
-            + context bias (+15 if matches previous word's language)
-            + current-layout tiebreaker (+5)
+## Определение языка
 
-candidates = layouts with score > 0, sorted desc
-if candidates[0].layout == current            → noSwitch
-if score gap < 10                             → noSwitch (ambiguous)
-otherwise                                      → switchTo
-```
+Для каждой из двух выбранных раскладок физические нажатия конвертируются с
+сохранением регистра. Кандидат получает словарный, spell-check, n-gram,
+частотный и контекстный score. URL, email, hex-подобные значения, uppercase
+аббревиатуры, mixed-script и неоднозначные результаты не переключаются.
 
-### Text replacement
+Автокоррекция запускается для слов от трёх букв и только на безопасной границе.
+Enter/Tab/Esc не запускают замену, потому что в мессенджере поле уже могло быть
+отправлено или сменено.
 
-1. `sendBackspaces(count: wordLength)` — keycode 51 × N
-2. `TISSelectInputSource(targetLayout)` on main thread
-3. `typeStringFast(corrected)` — `keyboardSetUnicodeString` in chunks of 20
+## Транзакция замены
 
-Each step separated by 2.5 ms to avoid dropped events in slow apps.
+1. Создаётся независимый cancellation token.
+2. Целевая раскладка выбирается и проверяется до удаления текста.
+3. Удаляется слово вместе с уже напечатанным trailing-символом.
+4. Исправленный текст и точный trailing-символ вводятся Unicode-событиями по
+   одному символу — это совместимо с Electron/web-полями.
+5. Только успешная транзакция записывает Undo и статистику.
 
-## Hotkey summary
+Пока идёт замена, физические клавиатурные события временно ставятся в очередь и
+затем переигрываются с отдельным marker. Клик или активация другого приложения
+отменяет оставшуюся замену и инвалидирует старый буфер/Undo. Уже отправленные
+низкоуровневые события нельзя сделать атомарными средствами `CGEvent` — этот
+краевой сценарий дополнительно проверяется вручную в реальных приложениях.
 
-| Shortcut | Action |
-|----------|--------|
-| Single Shift (tap) | Next layout (prefers different-language) |
-| Double Shift (tap × 2 < 350 ms) | Convert last word (uses internal buffer, clipboard fallback) |
-| Left+Right Shift | Toggle auto-switching (✓/✗ top-right indicator) |
-| CapsLock | Switch layout |
-| Cmd+Shift+V | Paste without formatting |
-| Cmd+Option+Z | Undo last auto-switch (2s window) |
+## Горячие клавиши
 
-## Permissions
+| Комбинация | Действие |
+|---|---|
+| Single Shift | Сменить выбранную раскладку |
+| Double Shift (окно 450 мс) | Конвертировать текущее/последнее слово; повторно — Undo |
+| Left + Right Shift | Включить или выключить автопереключение |
+| Caps Lock | Сменить раскладку, если функция включена |
+| Cmd + Shift + V | Вставить plain text с безопасным восстановлением clipboard |
+| Cmd + Option + Z | Отменить последнюю коррекцию |
 
-1. **Accessibility** — for CGEventTap + TextReplacer
-2. **Input Monitoring** — for CGEventTap keycode reading
+Undo не имеет таймера, но инвалидируется следующим физическим редактированием,
+командным сочетанием, кликом, сменой приложения или иным новым контекстом.
 
-Onboarding window (`OnboardingView`) appears on launch if either is missing.
-Buttons call both `request*()` (system prompt) and `open*Settings()` fallback.
+## Secure Input и privacy
 
-## Privacy
+`IsSecureEventInputEnabled()` и AX-role/subrole проверяются до буферизации.
+Положительный результат кэшируется на 500 мс; отрицательный не кэшируется, чтобы
+активация password field не скрывалась fail-open окном. При отсутствии системных
+разрешений event tap не запускается и health state сообщает причину.
 
-- 100% local processing, no network calls
-- No keystroke logging
-- `PrivacyService.auditStorage()` on launch scans UserDefaults for suspicious keys
-- BloomFilter cache stored only in `~/Library/Application Support/SashaSwitcher/`
+`PrivacyInfo.xcprivacy` объявляет локальные `UserDefaults` и доступ к file metadata
+для ротации локального журнала. Tracking и collected-data categories отсутствуют.
 
-## Testing
+## Сборка и проверка
 
 ```bash
-./Scripts/test.sh    # builds + runs --test mode, prints pass/fail
+./Scripts/test.sh
+./Scripts/build.sh
+./Scripts/make-dmg.sh
 ```
 
-43 assertions across BloomFilter, Yoficator, NGram, InputBuffer, Exceptions.
-XCTest not used (Command Line Tools only, no Xcode required).
+`make-dmg.sh` создаёт universal `arm64+x86_64` приложение и UDZO DMG. На macOS 26+
+используется `diskutil image create from`; `hdiutil create` оставлен fallback для
+старых систем. Локальная beta подписана persistent self-signed identity и требует
+ручного Gatekeeper override на другом Mac.
 
-## Build
+Developer ID-кандидат собирается командой `./Scripts/make-dmg.sh developerid`:
+приложение и финальный DMG подписываются `Developer ID Application` с secure
+timestamp, после чего именно DMG отправляется через `./Scripts/notarize.sh dmg` и
+получает stapled ticket. App Store workflow описан в `docs/SIGNING.md` и отдельно
+проверяет profile, bundle ID, sandbox entitlement и Apple Distribution signature.
 
-```bash
-swift build                       # debug
-./Scripts/build.sh                # release .app bundle (9.8 MB)
-open build/SashaSwitcher.app      # launch
-```
+На аудите 2026-08-02 прошли 111 автоматических проверок; одна проверка создания
+живого `CGEvent` намеренно остаётся `SKIP` вне интерактивной GUI-сессии.

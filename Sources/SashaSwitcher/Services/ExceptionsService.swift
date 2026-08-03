@@ -3,9 +3,9 @@ import AppKit
 
 final class ExceptionsService {
     private let defaults = UserDefaults.standard
-    private let wordExceptionsKey = "tech.sasha.switcher.wordExceptions"
-    private let appExceptionsKey = "tech.sasha.switcher.appExceptions"
-    private let autoLearnedKey = "tech.sasha.switcher.autoLearned"
+    private let wordExceptionsKey = AppIdentity.keyPrefix + "wordExceptions"
+    private let appExceptionsKey = AppIdentity.keyPrefix + "appExceptions"
+    private let autoLearnedKey = AppIdentity.keyPrefix + "autoLearned"
 
     // MARK: - Word Exceptions (user-added words to never switch)
 
@@ -95,7 +95,10 @@ final class ExceptionsService {
         var learned = autoLearned
         learned[original.lowercased()] = corrected.lowercased()
         autoLearned = learned
-        NSLog("[AutoLearn] Exception: '\(original)' should NOT be corrected to '\(corrected)'")
+        DebugLog.shared.log(
+            "AUTOLEARN",
+            "exception stored originalLen=\(original.count) replacementLen=\(corrected.count)"
+        )
     }
 
     func isAutoLearned(_ word: String) -> Bool {

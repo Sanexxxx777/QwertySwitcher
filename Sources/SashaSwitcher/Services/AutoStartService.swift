@@ -12,16 +12,21 @@ final class AutoStartService {
     func toggle() {
         if #available(macOS 13.0, *) {
             do {
-                if isEnabled {
-                    try SMAppService.mainApp.unregister()
-                    NSLog("[AutoStart] Disabled")
-                } else {
-                    try SMAppService.mainApp.register()
-                    NSLog("[AutoStart] Enabled")
-                }
+                try setEnabled(!isEnabled)
             } catch {
                 NSLog("[AutoStart] Error: \(error)")
             }
+        }
+    }
+
+    func setEnabled(_ enabled: Bool) throws {
+        guard #available(macOS 13.0, *), enabled != isEnabled else { return }
+        if enabled {
+            try SMAppService.mainApp.register()
+            NSLog("[AutoStart] Enabled")
+        } else {
+            try SMAppService.mainApp.unregister()
+            NSLog("[AutoStart] Disabled")
         }
     }
 }

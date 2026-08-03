@@ -4,13 +4,14 @@ import AppKit
 final class LanguageDetector {
     private let dictionary: WordDictionary
     let inputSourceManager: InputSourceManager
+    private let prefsService: PreferencesService
     private let ngramAnalyzer = NGramAnalyzer()
     private let wordFrequency = WordFrequency()
 
     private var previousWordLanguage: String?
     private let contextBias = 15
 
-    private let skipPatterns: [NSRegularExpression] = {
+    private static let skipPatterns: [NSRegularExpression] = {
         let patterns = [
             #"^\d+$"#,                          // numbers
             #"^0x[0-9a-fA-F]+$"#,               // hex
@@ -25,23 +26,34 @@ final class LanguageDetector {
         return patterns.compactMap { try? NSRegularExpression(pattern: $0) }
     }()
 
-    init(dictionary: WordDictionary, inputSourceManager: InputSourceManager) {
+    init(dictionary: WordDictionary, inputSourceManager: InputSourceManager,
+         prefsService: PreferencesService) {
         self.dictionary = dictionary
         self.inputSourceManager = inputSourceManager
+        self.prefsService = prefsService
+    }
+
+    var activeLayouts: [KeyboardLayout] {
+        inputSourceManager.resolvedActiveLayouts(preferredIDs: prefsService.activeLayoutIDs)
     }
 
     func detect(keycodes: [UInt16]) -> DetectionResult {
-        guard let currentLayout = inputSourceManager.currentLayout else { return .noSwitch }
-        let layouts = inputSourceManager.availableLayouts
-        guard layouts.count >= 2 else { return .noSwitch }
+        detect(keystrokes: keycodes.map { BufferedKeystroke(keycode: $0, flags: []) })
+    }
 
-        let currentText = inputSourceManager.convertKeycodes(keycodes, toLayout: currentLayout).lowercased()
-        if shouldSkip(currentText) { return .noSwitch }
+    func detect(keystrokes: [BufferedKeystroke]) -> DetectionResult {
+        guard let currentLayout = inputSourceManager.currentLayout else { return .noSwitch }
+        let layouts = activeLayouts
+        guard layouts.count >= 2 else { return .noSwitch }
+        guard layouts.contains(where: { $0.id == currentLayout.id }) else { return .noSwitch }
+
+        let currentText = inputSourceManager.convertKeystrokes(keystrokes, toLayout: currentLayout)
+        if Self.shouldSkip(currentText) { return .noSwitch }
 
         var candidates: [(layout: KeyboardLayout, word: String, score: Int)] = []
 
         for layout in layouts {
-            let word = inputSourceManager.convertKeycodes(keycodes, toLayout: layout)
+            let word = inputSourceManager.convertKeystrokes(keystrokes, toLayout: layout)
             guard !word.isEmpty else { continue }
             if isMixedScript(word) { continue }
 
@@ -89,8 +101,12 @@ final class LanguageDetector {
     }
 
     func lastConvertedWord(keycodes: [UInt16]) -> String? {
+        lastConvertedWord(keystrokes: keycodes.map { BufferedKeystroke(keycode: $0, flags: []) })
+    }
+
+    func lastConvertedWord(keystrokes: [BufferedKeystroke]) -> String? {
         guard let current = inputSourceManager.currentLayout else { return nil }
-        return inputSourceManager.convertKeycodes(keycodes, toLayout: current)
+        return inputSourceManager.convertKeystrokes(keystrokes, toLayout: current)
     }
 
     func currentRussianLayout() -> KeyboardLayout? {
@@ -112,14 +128,14 @@ final class LanguageDetector {
         }
 
         // Pure SpellChecker fallback (word not in our 714K dict but known to macOS)
-        if dictionary.mightContain(lowered, language: language) {
+        if dictionary.isSpellCheckerValid(lowered, language: language) {
             return 60 + min(10, lowered.count)  // 62-70
         }
 
         return 0
     }
 
-    private func shouldSkip(_ text: String) -> Bool {
+    static func shouldSkip(_ text: String) -> Bool {
         let range = NSRange(text.startIndex..., in: text)
         for p in skipPatterns {
             if p.firstMatch(in: text, range: range) != nil { return true }

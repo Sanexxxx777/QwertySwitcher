@@ -6,11 +6,16 @@ struct BloomFilter {
     let hashCount: Int
 
     init(expectedCount: Int, falsePositiveRate: Double = 0.01) {
-        let m = max(64, Int(ceil(-Double(expectedCount) * log(falsePositiveRate) / pow(log(2), 2))))
-        let k = max(1, Int(ceil(Double(m) / Double(expectedCount) * log(2))))
+        let safeExpectedCount = Self.normalizedExpectedCount(expectedCount)
+        let m = max(64, Int(ceil(-Double(safeExpectedCount) * log(falsePositiveRate) / pow(log(2), 2))))
+        let k = max(1, Int(ceil(Double(m) / Double(safeExpectedCount) * log(2))))
         self.bitCount = m
         self.hashCount = k
         self.bits = [UInt64](repeating: 0, count: (m + 63) / 64)
+    }
+
+    static func normalizedExpectedCount(_ count: Int) -> Int {
+        max(1, count)
     }
 
     private init(bits: [UInt64], bitCount: Int, hashCount: Int) {
@@ -52,43 +57,74 @@ struct BloomFilter {
 
     // MARK: - Serialization
 
-    func save(to url: URL) throws {
+    func save(to url: URL, sourceFingerprint: UInt64 = 0) throws {
         var data = Data()
-        // Header: magic(4) + bitCount(4) + hashCount(4) + bitsCount(4) = 16 bytes
-        let magic: UInt32 = 0x53534246  // "SSBF" — SashaSwitcher BloomFilter
-        data.append(contentsOf: withUnsafeBytes(of: magic) { Array($0) })
-        data.append(contentsOf: withUnsafeBytes(of: UInt32(bitCount)) { Array($0) })
-        data.append(contentsOf: withUnsafeBytes(of: UInt32(hashCount)) { Array($0) })
-        data.append(contentsOf: withUnsafeBytes(of: UInt32(bits.count)) { Array($0) })
-        // Bit data
+        Self.appendLittleEndian(UInt32(0x51574246), to: &data) // "QWBF"
+        Self.appendLittleEndian(UInt32(2), to: &data)
+        Self.appendLittleEndian(UInt32(bitCount), to: &data)
+        Self.appendLittleEndian(UInt32(hashCount), to: &data)
+        Self.appendLittleEndian(UInt32(bits.count), to: &data)
+        Self.appendLittleEndian(sourceFingerprint, to: &data)
         for word in bits {
-            data.append(contentsOf: withUnsafeBytes(of: word) { Array($0) })
+            Self.appendLittleEndian(word, to: &data)
         }
-        try data.write(to: url)
+        try data.write(to: url, options: .atomic)
     }
 
-    static func load(from url: URL) throws -> BloomFilter {
+    static func load(from url: URL, expectedFingerprint: UInt64? = nil) throws -> BloomFilter {
         let data = try Data(contentsOf: url, options: [.mappedIfSafe])
-        guard data.count >= 16 else { throw BloomFilterError.invalidFormat }
+        let headerSize = 28
+        guard data.count >= headerSize else { throw BloomFilterError.invalidFormat }
 
-        let magic = data.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt32.self) }
-        guard magic == 0x53534246 else { throw BloomFilterError.invalidMagic }
+        let magic: UInt32 = try readLittleEndian(from: data, offset: 0)
+        guard magic == 0x51574246 else { throw BloomFilterError.invalidMagic }
+        let version: UInt32 = try readLittleEndian(from: data, offset: 4)
+        guard version == 2 else { throw BloomFilterError.unsupportedVersion }
 
-        let bitCount = Int(data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self) })
-        let hashCount = Int(data.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt32.self) })
-        let bitsCount = Int(data.withUnsafeBytes { $0.load(fromByteOffset: 12, as: UInt32.self) })
+        let storedBitCount: UInt32 = try readLittleEndian(from: data, offset: 8)
+        let storedHashCount: UInt32 = try readLittleEndian(from: data, offset: 12)
+        let storedBitsCount: UInt32 = try readLittleEndian(from: data, offset: 16)
+        let fingerprint: UInt64 = try readLittleEndian(from: data, offset: 20)
+        if let expectedFingerprint, fingerprint != expectedFingerprint {
+            throw BloomFilterError.sourceChanged
+        }
 
-        guard data.count >= 16 + bitsCount * 8 else { throw BloomFilterError.truncated }
+        let bitCount = Int(storedBitCount)
+        let hashCount = Int(storedHashCount)
+        let bitsCount = Int(storedBitsCount)
+        guard bitCount >= 64, hashCount > 0, bitsCount > 0,
+              bitsCount == (bitCount + 63) / 64,
+              data.count == headerSize + bitsCount * 8 else {
+            throw BloomFilterError.invalidFormat
+        }
 
         var bits = [UInt64](repeating: 0, count: bitsCount)
         for i in 0..<bitsCount {
-            bits[i] = data.withUnsafeBytes { $0.load(fromByteOffset: 16 + i * 8, as: UInt64.self) }
+            bits[i] = try readLittleEndian(from: data, offset: headerSize + i * 8)
         }
 
         return BloomFilter(bits: bits, bitCount: bitCount, hashCount: hashCount)
     }
 
+    private static func appendLittleEndian<T: FixedWidthInteger>(_ value: T, to data: inout Data) {
+        var little = value.littleEndian
+        withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
+    }
+
+    private static func readLittleEndian<T: FixedWidthInteger>(
+        from data: Data, offset: Int
+    ) throws -> T {
+        guard offset >= 0, offset + MemoryLayout<T>.size <= data.count else {
+            throw BloomFilterError.truncated
+        }
+        var value: T = 0
+        for index in 0..<MemoryLayout<T>.size {
+            value |= T(data[offset + index]) << T(index * 8)
+        }
+        return value
+    }
+
     enum BloomFilterError: Error {
-        case invalidFormat, invalidMagic, truncated
+        case invalidFormat, invalidMagic, unsupportedVersion, sourceChanged, truncated
     }
 }

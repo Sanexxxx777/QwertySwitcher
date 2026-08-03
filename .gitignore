@@ -1,5 +1,6 @@
 .build/
-build/
+build
+build.noindex/
 *.xcuserstate
 xcuserdata/
 .DS_Store

@@ -1,9 +1,9 @@
-# SashaSwitcher — macOS Keyboard Layout Auto-Switcher
+# Qwerty Switch — macOS Keyboard Layout Auto-Switcher
 
 Нативное macOS приложение для автоматического переключения раскладки клавиатуры (аналог Caramba Switcher).
 
 ## Tech Stack
-- Swift 6.3, SwiftUI + AppKit, SPM (без Xcode)
+- Swift tools 5.9 (локально Swift 6.4), SwiftUI + AppKit, SPM (без Xcode)
 - CGEventTap (перехват клавиш), TIS API (раскладки), UCKeyTranslate (маппинг)
 - BloomFilter + NSSpellChecker (словарь 714K слов, ~1MB RAM)
 
@@ -28,13 +28,19 @@ Scripts/build.sh        — сборка .app bundle
 ## Build, Test & Run
 ```bash
 swift build                     # debug (0.1s cached)
-./Scripts/test.sh               # 43 unit tests via --test mode
-./Scripts/build.sh              # release .app (arm64 only, 11MB)
+./Scripts/test.sh               # 111 проверок via --test mode (+ 1 GUI SKIP)
+./Scripts/build.sh              # release .app текущей архитектуры
 ./Scripts/make-dmg.sh           # universal (arm64+x86_64) .app + DMG для distribution
-open build/SashaSwitcher.app    # запуск
 ```
 
-Debug logs: `~/Library/Logs/SashaSwitcher/debug.log` (rotation at 1MB).
+## Канон имён и путей (стандарт 03.08.2026 — НЕ плодить копии)
+- **Установленная копия ОДНА: `/Applications/Qwerty Switch.app`** — после `build.sh` обновлять её через `ditto "build/Qwerty Switch.app" "/Applications/Qwerty Switch.app"`, НЕ запускать из build/.
+- `build` — симлинк на `build.noindex/` (Spotlight не индексирует сборки; лечит расплод «Qwerty Switch.previous-*» в поиске). Не переименовывать обратно.
+- Previous-копия сборки/DMG хранится РОВНО одна: `build/previous/` (скрипты сами ротируют). Таймстампованных `.previous-*` больше не существует — их появление = регресс скриптов.
+- Публичное имя `Qwerty Switch`, bundle `tech.sasha.qwertyswitch` (AppIdentity.swift — единственный источник). Внутренний модуль/binary `SashaSwitcher` и signing identity "SashaSwitcher Developer" — НЕ переименовывать: смена identity сбросит TCC-разрешения.
+- Скрипты — bash 3.2 (системный): пустые массивы раскрывать ТОЛЬКО как `${ARR[@]+"${ARR[@]}"}`, иначе `set -u` роняет сборку после стадии компиляции (пойман 03.08: codesign не выполнялся).
+
+Debug logs: `~/Library/Logs/QwertySwitch/debug.log` (rotation at 1MB).
 Menu → "Показать логи" / "Открыть папку логов".
 
 ## Key Features
@@ -50,8 +56,17 @@ Menu → "Показать логи" / "Открыть папку логов".
 
 ## Signing & Distribution (see docs/SIGNING.md)
 - **Stage 1 (current):** persistent self-signed identity "SashaSwitcher Developer" in login keychain → stable CDHash → TCC permissions survive rebuilds. Run once: `./Scripts/setup-signing.sh` (asks for login password once to unlock keychain + set partition list). Free.
-- **Stage 2:** Developer ID + notarization for DMG distribution ($99/year Apple Developer Program). Scripts ready (`build.sh developerid` + `notarize.sh`).
-- **Stage 3:** App Store — blocked by CGEventTap being incompatible with App Sandbox. Requires rewrite to IMKit (Input Method Kit) or Accessibility-only API.
+- **Stage 2:** Developer ID + notarization для публичного DMG. Финальный путь: `make-dmg.sh developerid` → `notarize.sh dmg`; и `.app`, и DMG получают timestamped Developer ID signature.
+- **Stage 3:** отдельная App Store sandbox-сборка и `.pkg` pipeline подготовлены. Нужны реальные Apple certificate/profile, чистый Mac test и App Review; статический реверс sandboxed Caramba/Lang не заменяет этот live-test.
+
+## Current v0.3.0 audit (2026-08-02)
+
+- Публичное имя `Qwerty Switch`, bundle ID `tech.sasha.qwertyswitch`, версия `0.3.0 (3)`.
+- Исправлены layout-aware trailing symbols, Russian Shift+б/ю, строгая проверка Bloom cache и пустого словаря.
+- Secure Input не кэширует `false`; modifier/focus changes инвалидируют старые word/Undo state.
+- Асинхронная замена имеет cancellation token и не пишет Undo/статистику после смены контекста.
+- Developer ID/App Store prerequisites проверяются до замены существующего `.app`.
+- `111 passed, 0 failed, 1 GUI-only skipped`; universal beta и DMG пересобираются через `make-dmg.sh`.
 
 ## Version 0.2.0 (2026-04-22 full audit)
 
@@ -108,11 +123,11 @@ Menu → "Показать логи" / "Открыть папку логов".
 - Buffer timeout in real long pauses
 - Regressions → check `~/Library/Logs/SashaSwitcher/debug.log`
 
-## Known bugs
+## Historical bugs (исправлены в v0.3.0)
 1. ~~**Double Shift не всегда срабатывает с первого раза**~~ ✅ 2026-04-23: Bug A — self-capture отменял `pendingSingleShift`. Перенёс `isPaused/inCooldown` гейты ДО `markKeyPressed`.
-2. **Лишняя английская буква при автозамене** — Саша напечатал "привет ghbdtn<SPACE>", получил `"привет gпривет"` (одна `g` осталась нетронутой, остальные 5 букв `hbdtn` backspace'нулись и заменились на `привет`). Вероятно race condition: `InputBuffer` пропустил первую букву либо `TextReplacer` выдал меньше backspaces чем длина слова. Возможно связано с self-capture cooldown (300ms) — начало слова попало в окно. Диагностика: снять debug.log, сверить `[KM] buffer add` count с фактически введённым словом
-3. **Регистр теряется при автокоррекции** — `UCKeyTranslate(modifierKeys=0)` в `InputSourceManager.convertKeycodes` всегда отдаёт lowercase. "Hello" после коррекции становится "hello". Fix: пробрасывать Shift-state в `InputBuffer` для каждой keycode и передавать в `UCKeyTranslate`.
-4. **Одновременное удержание обоих Shifts** — когда оба зажаты и один отпускают, `shiftPressed` всё ещё true (из-за оставшегося) → код интерпретирует release как повторный press. В типичном сценарии маскируется combo-веткой, но edge case остаётся.
+2. ~~**Лишняя английская буква при автозамене**~~ — заменён временной cooldown на marker собственных событий; физический ввод во время замены ставится в очередь и переигрывается.
+3. ~~**Регистр теряется при автокоррекции**~~ — `BufferedKeystroke` хранит Shift/Caps flags, `UCKeyTranslate` получает их при конвертации.
+4. ~~**Одновременное удержание обоих Shifts**~~ — вынесено в `ShiftStateTracker`; combo/release edge cases покрыты регрессиями.
 
 ## v0.2.0 tweak (2026-04-24) — Popup убран, TTL снят
 По просьбе Саши:
@@ -166,7 +181,7 @@ Menu → "Показать логи" / "Открыть папку логов".
   - Option → `isDoubleShiftEnabled` (управляет Double Shift / Option конвертацией слова)
 - Menu bar icon: `isTemplate=true` + NSColor.black — macOS автоматически красит monochrome под цвет menubar (было цветное)
 
-### Known — не реализовано
+### Historical notes — состояние на 2026-04-22
 - `isTypoFixEnabled` — чисто UI тумблер, логика не отвязана от главной `isAutoSwitchEnabled`. TODO: отдельная ветка для dictionary-only typo correction
 - Windows-версия — отложена на 6-12 месяцев (Rust + tauri + global-hotkey)
 - App Store (Stage 3) — требует переход с CGEventTap на IMKit

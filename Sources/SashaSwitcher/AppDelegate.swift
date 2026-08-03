@@ -15,10 +15,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var perAppLayoutService: PerAppLayoutService!
     private var switchUndoManager: SwitchUndoManager!
     private var onboardingWindow: NSWindow?
+    private var healthTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Privacy audit on launch
-        PrivacyService.auditStorage()
+        StorageMigrationService.migrateIfNeeded()
+        _ = PrivacyService.auditStorage()
 
         prefsService = PreferencesService()
         SoundService.prefs = prefsService
@@ -27,12 +28,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         yoficatorService = YoficatorService()
         inputSourceManager = InputSourceManager()
         switchUndoManager = SwitchUndoManager()
-        perAppLayoutService = PerAppLayoutService(inputSourceManager: inputSourceManager)
+        perAppLayoutService = PerAppLayoutService(
+            inputSourceManager: inputSourceManager,
+            prefsService: prefsService
+        )
 
         let dictionary = WordDictionary()
         languageDetector = LanguageDetector(
             dictionary: dictionary,
-            inputSourceManager: inputSourceManager
+            inputSourceManager: inputSourceManager,
+            prefsService: prefsService
         )
 
         textReplacer = TextReplacer(inputSourceManager: inputSourceManager)
@@ -64,32 +69,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             prefsService: prefsService,
             exceptionsService: exceptionsService,
             keyboardMonitor: keyboardMonitor,
-            inputSourceManager: inputSourceManager
+            inputSourceManager: inputSourceManager,
+            perAppLayoutService: perAppLayoutService
         )
 
         let perms = PermissionsService()
-        let onboardingSeenKey = "tech.sasha.switcher.onboardingSeen"
+        let onboardingSeenKey = AppIdentity.keyPrefix + "onboardingSeen"
         let seen = UserDefaults.standard.bool(forKey: onboardingSeenKey)
         let needsOnboarding = !seen || !perms.hasAccessibility || !perms.hasInputMonitoring
         if needsOnboarding {
-            NSLog("[SashaSwitcher] Showing onboarding (seen=\(seen) ax=\(perms.hasAccessibility) im=\(perms.hasInputMonitoring))")
+            NSLog("[QwertySwitch] Showing onboarding (seen=\(seen) ax=\(perms.hasAccessibility) im=\(perms.hasInputMonitoring))")
             showOnboardingWindow()
         }
 
-        keyboardMonitor.start()
+        keyboardMonitor.refreshHealth()
+        startHealthPolling()
 
-        NSLog("[SashaSwitcher] v0.2.0 Started. Dictionary: \(dictionary.stats)")
-        NSLog("[SashaSwitcher] Layouts: \(inputSourceManager.availableLayouts.map(\.name))")
-        NSLog("[SashaSwitcher] Privacy: all processing local, no telemetry")
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+        NSLog("[QwertySwitch] v\(version) Started. Dictionary: \(dictionary.stats)")
+        NSLog("[QwertySwitch] Layouts: \(inputSourceManager.availableLayouts.map(\.name))")
+        NSLog("[QwertySwitch] Privacy: all processing local, no telemetry")
 
         let layoutsStr = inputSourceManager.availableLayouts
             .map { "\($0.languageCode):\($0.name)" }.joined(separator: ",")
-        DebugLog.shared.log("APP", "v0.2.0 started | layouts=[\(layoutsStr)] | dict=\(dictionary.stats)")
+        DebugLog.shared.log("APP", "v\(version) started | layouts=[\(layoutsStr)] | dict=\(dictionary.stats)")
         DebugLog.shared.log("APP", "perms accessibility=\(perms.hasAccessibility) input_mon=\(perms.hasInputMonitoring)")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         DebugLog.shared.log("APP", "shutting down")
+        healthTimer?.invalidate()
         keyboardMonitor?.stop()
         statsService?.save()
     }
@@ -109,12 +118,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false
         )
-        window.title = "Sasha Switcher"
+        window.title = AppIdentity.displayName
         window.center()
         window.isReleasedWhenClosed = false
 
         let view = OnboardingView(onContinue: { [weak self] in
-            UserDefaults.standard.set(true, forKey: "tech.sasha.switcher.onboardingSeen")
+            UserDefaults.standard.set(true, forKey: AppIdentity.keyPrefix + "onboardingSeen")
+            self?.keyboardMonitor.refreshHealth()
             self?.onboardingWindow?.close()
             self?.onboardingWindow = nil
         })
@@ -122,5 +132,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         onboardingWindow = window
+    }
+
+    private func startHealthPolling() {
+        healthTimer?.invalidate()
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.keyboardMonitor?.refreshHealth()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        healthTimer = timer
     }
 }

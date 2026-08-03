@@ -2,7 +2,7 @@ import Foundation
 
 final class PreferencesService {
     private let defaults = UserDefaults.standard
-    private let keyPrefix = "tech.sasha.switcher."
+    private let keyPrefix = AppIdentity.keyPrefix
 
     var isAutoSwitchEnabled: Bool {
         get { defaults.object(forKey: keyPrefix + "autoEnabled") as? Bool ?? true }
@@ -35,15 +35,22 @@ final class PreferencesService {
         set { defaults.set(newValue, forKey: keyPrefix + "singleShift") }
     }
 
-    /// Double Shift / Option — convert last word or selection
+    /// Double Shift — convert the current or last completed buffered word
     var isDoubleShiftEnabled: Bool {
         get { defaults.object(forKey: keyPrefix + "doubleShift") as? Bool ?? true }
         set { defaults.set(newValue, forKey: keyPrefix + "doubleShift") }
     }
 
-    /// Typo correction (reserved toggle — currently bundled with autoSwitch)
-    var isTypoFixEnabled: Bool {
-        get { defaults.object(forKey: keyPrefix + "typoFix") as? Bool ?? true }
-        set { defaults.set(newValue, forKey: keyPrefix + "typoFix") }
+    /// Caps Lock is deliberately independent from Single Shift.
+    var isCapsLockSwitchEnabled: Bool {
+        get { defaults.object(forKey: keyPrefix + "capsLockSwitch") as? Bool ?? false }
+        set { defaults.set(newValue, forKey: keyPrefix + "capsLockSwitch") }
     }
+
+    /// Exactly two supported layouts take part in detection and manual switching.
+    var activeLayoutIDs: [String] {
+        get { defaults.stringArray(forKey: keyPrefix + "activeLayoutIDs") ?? [] }
+        set { defaults.set(Array(newValue.prefix(2)), forKey: keyPrefix + "activeLayoutIDs") }
+    }
+
 }
