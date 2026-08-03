@@ -14,7 +14,7 @@
 чтобы не ломать уже настроенные Mac разработчиков.
 
 ```bash
-cd ~/Projects/SashaSwitcher
+cd ~/Projects/QwertySwitcher
 ./Scripts/setup-signing.sh
 ./Scripts/test.sh
 ./Scripts/build.sh
