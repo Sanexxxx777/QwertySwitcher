@@ -5,7 +5,7 @@
 ## Tech Stack
 - Swift tools 5.9 (локально Swift 6.4), SwiftUI + AppKit, SPM (без Xcode)
 - CGEventTap (перехват клавиш), TIS API (раскладки), UCKeyTranslate (маппинг)
-- BloomFilter + NSSpellChecker (словарь 714K слов, ~1MB RAM)
+- BloomFilter + NSSpellChecker (словарь 714K слов; Bloom ~1MB + префикс-индекс мгновенной коррекции ~11MB RAM, строится асинхронно)
 
 ## Structure
 ```
@@ -66,6 +66,11 @@ Menu → "Показать логи" / "Открыть папку логов".
 - Клиент: состояние в Keychain (`tech.sasha.qwertyswitch.license`, переживает переустановку); check-in при старте + каждые 12ч; офлайн-грейс 14 дней; первый запуск офлайн → provisional-триал до первого контакта с сервером; откат часов ловится maxSeen. Enforcement: `canAutoCorrect` и Double Shift гейтятся `LicenseService.shared.isEntitled`; Single Shift и Undo сознательно НЕ гейтятся.
 - Приватность честно: ввод локально, на сервер уходит ТОЛЬКО hwid + версия (формулировка в UI/About обновлена; «0 телеметрии» больше не заявляем).
 - Граница защиты: обходы переустановкой/чисткой файлов/откатом часов закрыты; патч бинарника реверсом — НЕ закрыт (нативное приложение без обфускации, честный предел).
+
+## Current v0.4.1 (2026-08-03)
+- **Мгновенная автокоррекция (как Caramba)**: срабатывает ПО МЕРЕ НАБОРА, не ждёт пробела. `Core/InstantCorrectionAnalyzer.swift` (пороги: minLength 4, candidateFloor 40, margin 30, гейт wordLevel==0 — словарный префикс своего языка всегда блокирует триггер) + `InstantCorrectionGate` (анти-двойная коррекция с boundary-путём). Тумблер «Мгновенная коррекция» (default ON). Калибровка: 0 false positives на ~3.9K частотных слов EN+RU (корпусный тест в сьюте). ⚠️NSSpellChecker.checkSpelling принимает мусор («zzzz») как валидный EN — в скоринге мгновенной коррекции НЕ используется, только свой словарь/префикс-индекс.
+- Boundary-коррекция по пробелу/пунктуации осталась как fallback.
+- Тесты: `146 passed, 0 failed, 1 GUI-only skipped`.
 
 ## Current v0.4.0 (2026-08-03)
 - Переименование завершено: продукт «Qwerty Switcher», модуль/binary `QwertySwitcher`, версия `0.4.0 (4)`.

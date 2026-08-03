@@ -2,13 +2,33 @@ import Foundation
 import AppKit
 
 /// Dictionary uses BloomFilter (834KB) as primary + NSSpellChecker as confirmation.
-/// No Set<String> in memory — saves ~60MB RAM.
+/// No Set<String> in memory for membership checks — saves ~60MB RAM.
+///
+/// `sortedWords` is the one exception: instant (mid-word) correction needs a
+/// reliable PREFIX check (bloom filters can't do that, and NSSpellChecker's
+/// completions/spellcheck are unreliable for short unrecognized tokens — e.g.
+/// it accepts "fdef"/"zzzz" as correctly-spelled English). It is built on a
+/// background queue after `init` returns so it never delays app startup or
+/// blocks the event tap, and read behind a lock (~11MB combined for en+ru).
 final class WordDictionary {
     private var bloomFilters: [String: BloomFilter] = [:]
+    private var sortedWords: [String: [String]] = [:]
+    private let sortedWordsLock = NSLock()
+    private let sortedWordsGroup = DispatchGroup()
     private let spellChecker = NSSpellChecker.shared
 
     init() {
         loadDictionaries()
+        loadSortedWordsAsync()
+    }
+
+    /// Blocks until the background prefix index (see `sortedWords`) finishes
+    /// loading, or `timeout` elapses. Production code never needs this —
+    /// `isPrefixOfBundledWord` just answers "not confirmed yet" until the
+    /// index is ready. Tests that need a deterministic result right after
+    /// `init` should call this first.
+    func waitUntilPrefixIndexReady(timeout: TimeInterval = 5) {
+        _ = sortedWordsGroup.wait(timeout: .now() + timeout)
     }
 
     /// BloomFilter pre-check: might this word be in the dictionary?
@@ -38,6 +58,28 @@ final class WordDictionary {
             wrap: false, inSpellDocumentWithTag: 0, wordCount: nil
         )
         return range.location == NSNotFound
+    }
+
+    /// Whether `prefix` is the start of at least one word in our own bundled
+    /// dictionary (binary search over a sorted array — deterministic, and not
+    /// limited to whatever macOS's spellchecker happens to recognize). Used
+    /// by instant (mid-word) correction, where the buffered text is not a
+    /// complete word yet. Returns false until the background load finishes.
+    func isPrefixOfBundledWord(_ prefix: String, language: String) -> Bool {
+        guard !prefix.isEmpty else { return false }
+        sortedWordsLock.lock()
+        let words = sortedWords[language]
+        sortedWordsLock.unlock()
+        guard let words else { return false }
+
+        var lo = 0
+        var hi = words.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if words[mid] < prefix { lo = mid + 1 } else { hi = mid }
+        }
+        guard lo < words.count else { return false }
+        return words[lo].hasPrefix(prefix)
     }
 
     var stats: String {
@@ -71,6 +113,27 @@ final class WordDictionary {
             bloomFilters[lang] = bloom
             saveCachedBloom(bloom, lang: lang, fingerprint: fingerprint)
             NSLog("[Dictionary] Loaded \(lang): \(words.count) words, bloom built \(bloom.sizeInBytes / 1024)KB")
+        }
+    }
+
+    /// Populates `sortedWords` off the main thread. Re-reads the same word
+    /// list files the bloom filters were built from (or loaded, cached,
+    /// from disk) — a second, cheap I/O pass rather than plumbing the
+    /// already-freed `words` array out of the (possibly cache-hit) bloom path.
+    private func loadSortedWordsAsync() {
+        let group = sortedWordsGroup
+        group.enter()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            defer { group.leave() }
+            guard let self else { return }
+            for lang in ["en", "ru"] {
+                let fileName = lang == "en" ? "en_US" : "ru_RU"
+                guard let source = self.loadWordListData(named: fileName) else { continue }
+                let sorted = self.parseWordList(source.data).sorted()
+                self.sortedWordsLock.lock()
+                self.sortedWords[lang] = sorted
+                self.sortedWordsLock.unlock()
+            }
         }
     }
 

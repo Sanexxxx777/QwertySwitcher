@@ -43,6 +43,8 @@ swiftc \
     Sources/QwertySwitcher/Core/HotkeyManager.swift \
     Sources/QwertySwitcher/Core/InputBuffer.swift \
     Sources/QwertySwitcher/Core/InputSourceManager.swift \
+    Sources/QwertySwitcher/Core/InstantCorrectionAnalyzer.swift \
+    Sources/QwertySwitcher/Core/InstantCorrectionGate.swift \
     Sources/QwertySwitcher/Core/KeyboardMonitor.swift \
     Sources/QwertySwitcher/Core/LanguageDetector.swift \
     Sources/QwertySwitcher/Core/NGramAnalyzer.swift \

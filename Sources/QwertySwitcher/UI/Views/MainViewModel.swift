@@ -42,6 +42,9 @@ final class MainViewModel: ObservableObject {
     @Published var isCapsLockSwitchEnabled: Bool {
         didSet { prefsService.isCapsLockSwitchEnabled = isCapsLockSwitchEnabled }
     }
+    @Published var isInstantCorrectionEnabled: Bool {
+        didSet { prefsService.isInstantCorrectionEnabled = isInstantCorrectionEnabled }
+    }
     @Published var isPerAppLayoutEnabled: Bool {
         didSet { perAppLayoutService.isEnabled = isPerAppLayoutEnabled }
     }
@@ -78,6 +81,7 @@ final class MainViewModel: ObservableObject {
         self.isSingleShiftEnabled = prefsService.isSingleShiftEnabled
         self.isDoubleShiftEnabled = prefsService.isDoubleShiftEnabled
         self.isCapsLockSwitchEnabled = prefsService.isCapsLockSwitchEnabled
+        self.isInstantCorrectionEnabled = prefsService.isInstantCorrectionEnabled
         self.isPerAppLayoutEnabled = perAppLayoutService.isEnabled
         let activeLayouts = inputSourceManager.resolvedActiveLayouts(
             preferredIDs: prefsService.activeLayoutIDs

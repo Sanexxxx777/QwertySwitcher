@@ -301,6 +301,13 @@ struct MainView: View {
             SectionTitle("Дополнительно")
             VStack(spacing: 0) {
                 SettingToggleRow(
+                    icon: "bolt",
+                    title: "Мгновенная коррекция",
+                    subtitle: "исправлять слово прямо во время набора, не дожидаясь пробела",
+                    isOn: $viewModel.isInstantCorrectionEnabled
+                )
+                rowDivider
+                SettingToggleRow(
                     icon: "textformat",
                     title: "Ёфикатор",
                     subtitle: "добавлять букву ё по правилам языка",

@@ -55,7 +55,7 @@ final class LanguageDetector {
         for layout in layouts {
             let word = inputSourceManager.convertKeystrokes(keystrokes, toLayout: layout)
             guard !word.isEmpty else { continue }
-            if isMixedScript(word) { continue }
+            if Self.isMixedScript(word) { continue }
 
             var score = scoreWord(word, language: layout.languageCode)
 
@@ -143,7 +143,7 @@ final class LanguageDetector {
         return false
     }
 
-    private func isMixedScript(_ text: String) -> Bool {
+    static func isMixedScript(_ text: String) -> Bool {
         var hasCyrillic = false, hasLatin = false
         for s in text.unicodeScalars {
             if (0x0400...0x04FF).contains(s.value) { hasCyrillic = true }

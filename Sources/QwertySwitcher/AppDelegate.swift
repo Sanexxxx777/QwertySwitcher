@@ -41,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         textReplacer = TextReplacer(inputSourceManager: inputSourceManager)
+        let instantCorrectionAnalyzer = InstantCorrectionAnalyzer(dictionary: dictionary)
 
         keyboardMonitor = KeyboardMonitor(
             languageDetector: languageDetector,
@@ -50,7 +51,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exceptionsService: exceptionsService,
             yoficatorService: yoficatorService,
             switchUndoManager: switchUndoManager,
-            perAppLayoutService: perAppLayoutService
+            perAppLayoutService: perAppLayoutService,
+            instantCorrectionAnalyzer: instantCorrectionAnalyzer
         )
 
         hotkeyManager = HotkeyManager(
