@@ -2308,6 +2308,36 @@ enum KeyboardMonitorIntegrationTests {
             }
         }
 
+        // --- "на 300$" — history must not outlive the caret ------------------
+        // Double Shift's history fallback rewrites text AT THE CARET. Owner
+        // typed "на" + space + "300$" and pressed Double Shift: the stale "на"
+        // was converted and retyped at the caret, eating the digits and
+        // producing "на 30yf" (log 08:26:04, "doubleShift via history:
+        // ru→en len=2" with four leading symbols already typed after it).
+        TestRunner.section("Digits kill the history slot — the \"на 300$\" corruption")
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(autoSwitch: false)
+            if let na = InstantCorrectionFixtures.keystrokes(for: "на", reverse: ruReverse) {
+                h.type(na)
+                h.press(49)  // space — "на" moves into the history slot
+                h.press(29)  // "3"
+                h.press(26)  // "0"
+                h.press(26)  // "0"
+                let before = h.screen
+                TestRunner.assertTrue(
+                    !h.monitor.swapLastWordInBuffer(),
+                    "Double Shift refuses: the history word is no longer next to the caret"
+                )
+                TestRunner.assertEqual(
+                    h.screen, before,
+                    "fix: nothing is rewritten — the digits stay intact instead of being eaten"
+                )
+            } else {
+                TestRunner.assertTrue(false, "'на': RU fixture can type every character")
+            }
+        }
+
         // --- "$GRAF", "/model" — same fold-in via the automatic paths -------
         TestRunner.section("Auto-correct folds a leading symbol — \"/model\", \"$GRAF\"")
         inputSources.switchTo(ruLayout)

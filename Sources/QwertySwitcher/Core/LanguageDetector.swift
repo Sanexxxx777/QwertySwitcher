@@ -59,14 +59,16 @@ final class LanguageDetector {
         let currentText = inputSourceManager.convertKeystrokes(keystrokes, toLayout: currentLayout)
         if Self.shouldSkip(currentText) { return .noSwitch }
 
-        var candidates: [(layout: KeyboardLayout, word: String, score: Int)] = []
+        var candidates: [(layout: KeyboardLayout, word: String, score: Int, inDictionary: Bool)] = []
 
         for layout in layouts {
             let word = inputSourceManager.convertKeystrokes(keystrokes, toLayout: layout)
             guard !word.isEmpty else { continue }
             if Self.isMixedScript(word) { continue }
 
-            var score = scoreWord(word, language: layout.languageCode)
+            let dictionaryScore = scoreWord(word, language: layout.languageCode)
+            let inDictionary = dictionaryScore > 0
+            var score = dictionaryScore
 
             // N-gram bonus/penalty
             let ngramScore = ngramAnalyzer.score(word, language: layout.languageCode)
@@ -86,7 +88,7 @@ final class LanguageDetector {
             }
 
             if score > 0 {
-                candidates.append((layout, word, score))
+                candidates.append((layout, word, score, inDictionary))
             }
         }
 
@@ -100,6 +102,20 @@ final class LanguageDetector {
         previousWordLanguage = best.layout.languageCode
 
         if best.layout.id == currentLayout.id { return .noSwitch }
+
+        // Rewriting text the user already typed correctly is the one failure
+        // this feature must not have ("промахи нам не надо" — 05.08.2026, a
+        // correct 9-letter Russian word was flipped to latin on a trailing
+        // period; log 08:24:05 "correction: ru→en len=9 trig=."). The hole:
+        // `scoreWord` returns 80-100 for a dictionary hit and 0 for a miss, so
+        // a correctly-typed word that simply isn't in our 714K list scores 0
+        // and never becomes a candidate at all — leaving the other layout's
+        // gibberish as the SOLE candidate, where the collision gate below
+        // (which needs two) can't touch it, and a handful of n-gram points
+        // wins unopposed. So: the winner must be a real word of the target
+        // language. Cost is a missed correction (recoverable — Double Shift),
+        // never corrupted text (not recoverable without noticing it first).
+        guard best.inDictionary else { return .noSwitch }
 
         // Collision: need clear winner (gap >= 10)
         if candidates.count >= 2 && (candidates[0].score - candidates[1].score) < 10 {
