@@ -431,6 +431,9 @@ final class KeyboardMonitor {
             && !isSpotlight
 
         if InputBuffer.isDeleteKey(keycode) {
+            if !pendingLeadingSymbols.isEmpty || lastCompletedWord != nil {
+                logContextWipe("backspace")
+            }
             switchUndoManager.invalidate()
             buffer.removeLast()
             lastCompletedWord = nil
