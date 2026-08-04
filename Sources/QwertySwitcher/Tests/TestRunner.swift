@@ -11,6 +11,13 @@ enum TestRunner {
 
     static func run() -> Int {
         print("=== Qwerty Switcher test suite ===")
+        // See InputSourceManager's `layoutSwitchingIsSimulated` doc — real
+        // layout switching during a --test run is an explicit, rare opt-in
+        // (QSW_ALLOW_REAL_LAYOUT_SWITCH=1) and must never be silent: it
+        // switches the Mac's actual active keyboard layout while this runs.
+        if InputSourceManager.isTestBinaryWithRealLayoutSwitchEnabled {
+            print("⚠️⚠️⚠️  QSW_ALLOW_REAL_LAYOUT_SWITCH=1 — this run switches your Mac's REAL keyboard layout. Do not type until it finishes.  ⚠️⚠️⚠️")
+        }
         BloomFilterTests.run()
         YoficatorTests.run()
         NGramTests.run()
@@ -33,6 +40,8 @@ enum TestRunner {
         InstantCorrectionAnalyzerTests.run()
         InstantCorrectionCorpusTests.run()
         LicenseServiceTests.run()
+        FileLicenseStoreTests.run()
+        DebugLogTests.run()
         PendingUserEventQueueTests.run()
         EventRouteTests.run()
         BufferVsScreenModelTests.run()
@@ -40,6 +49,23 @@ enum TestRunner {
         InputSourceSelfSwitchTests.run()
         SlashModelRegressionTests.run()
         LeadingSymbolRunGuardTests.run()
+        SoundServiceTests.run()
+        CaretWordExtractorTests.run()
+        LayoutTextConverterTests.run()
+        DominantScriptLanguageTests.run()
+        MarzheDoubleShiftRegressionTests.run()
+        OnboardingStateTests.run()
+        KeyboardMonitorIntegrationTests.run()
+        CorrectionAvalancheGuardTests.run()
+        QueueReplacementActiveTests.run()
+        AvalancheGuardWiringTests.run()
+        HotPathStructuralGuardTests.run()
+        SecureInputAXTierTests.run()
+        CallbackDurationThresholdTests.run()
+        TapTimeoutCounterTests.run()
+        SwitchBlockReasonTests.run()
+        SoundServiceToggleCueTests.run()
+        DockIconPolicyTests.run()
         print("---")
         print("\(passed) passed, \(failed) failed, \(skipped) skipped")
         return failed == 0 ? 0 : 1
@@ -671,6 +697,302 @@ enum PreferencesServiceTests {
             PreferencesService().isInstantCorrectionEnabled,
             "instant correction can be re-enabled"
         )
+
+        // isLayoutSoundEnabled — separate from isSoundEnabled by design (see
+        // SoundService: the master sound gate stays isSoundEnabled).
+        let soundKey = AppIdentity.keyPrefix + "layoutSoundEnabled"
+        let previousSoundSet = UserDefaults.standard.object(forKey: soundKey)
+        defer {
+            if let previousSoundSet {
+                UserDefaults.standard.set(previousSoundSet, forKey: soundKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: soundKey)
+            }
+        }
+        UserDefaults.standard.removeObject(forKey: soundKey)
+        TestRunner.assertTrue(
+            PreferencesService().isLayoutSoundEnabled,
+            "layout-switch sound defaults to enabled when never configured"
+        )
+        prefs.isLayoutSoundEnabled = false
+        TestRunner.assertTrue(
+            !PreferencesService().isLayoutSoundEnabled,
+            "layout-switch sound can be disabled independently and persists"
+        )
+        TestRunner.assertTrue(
+            PreferencesService().isSoundEnabled,
+            "disabling the layout-switch sound alone does not touch the master sound gate"
+        )
+
+        // layoutSoundName — which system sound plays (see SoundService).
+        let layoutSoundKey = AppIdentity.keyPrefix + "layoutSoundName"
+        let previousLayoutSound = UserDefaults.standard.object(forKey: layoutSoundKey)
+        defer {
+            if let previousLayoutSound {
+                UserDefaults.standard.set(previousLayoutSound, forKey: layoutSoundKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: layoutSoundKey)
+            }
+        }
+        UserDefaults.standard.removeObject(forKey: layoutSoundKey)
+        TestRunner.assertEqual(
+            PreferencesService().layoutSoundName, "Pop",
+            "layout sound defaults to 'Pop' when never configured — neutral, not an alert cue"
+        )
+        prefs.layoutSoundName = "Glass"
+        TestRunner.assertEqual(
+            PreferencesService().layoutSoundName, "Glass",
+            "layout sound choice persists across instances (saved/read from prefs)"
+        )
+        prefs.layoutSoundName = SoundService.noSoundName
+        TestRunner.assertEqual(
+            PreferencesService().layoutSoundName, SoundService.noSoundName,
+            "'Без звука' is a storable, readable choice like any other"
+        )
+    }
+}
+
+enum SoundServiceTests {
+    static func run() {
+        TestRunner.section("SoundService — sound-name resolution (pure, no NSSound touched)")
+        TestRunner.assertTrue(
+            SoundService.systemSoundNames.contains("Pop"),
+            "curated system sound list includes the default 'Pop'"
+        )
+        TestRunner.assertEqual(
+            SoundService.effectiveSoundName(for: "Pop"), "Pop",
+            "a known system sound name resolves to itself"
+        )
+        TestRunner.assertEqual(
+            SoundService.effectiveSoundName(for: SoundService.noSoundName), nil,
+            "'Без звука' resolves to nil — stays silent, not a fallback sound"
+        )
+        TestRunner.assertEqual(
+            SoundService.effectiveSoundName(for: "TotallyBogusSoundName"), "Pop",
+            "an unrecognized/corrupted stored name falls back to Pop — safe fallback, not a crash"
+        )
+
+        TestRunner.section("SoundService — gates override the selected sound")
+        TestRunner.assertEqual(
+            SoundService.layoutCueName(isSoundEnabled: false, isLayoutSoundEnabled: true, storedName: "Glass"),
+            nil,
+            "master sound gate off overrides any selected sound"
+        )
+        TestRunner.assertEqual(
+            SoundService.layoutCueName(isSoundEnabled: true, isLayoutSoundEnabled: false, storedName: "Glass"),
+            nil,
+            "layout-sound gate off overrides any selected sound"
+        )
+        TestRunner.assertEqual(
+            SoundService.layoutCueName(isSoundEnabled: true, isLayoutSoundEnabled: true, storedName: "Glass"),
+            "Glass",
+            "both gates on — the selected sound plays"
+        )
+        TestRunner.assertEqual(
+            SoundService.layoutCueName(
+                isSoundEnabled: true, isLayoutSoundEnabled: true, storedName: SoundService.noSoundName
+            ),
+            nil,
+            "both gates on but 'Без звука' selected — still stays silent"
+        )
+    }
+}
+
+enum CaretWordExtractorTests {
+    static func run() {
+        TestRunner.section("CaretWordExtractor — Double Shift's word-before-caret path")
+        TestRunner.assertEqual(
+            CaretWordExtractor.wordBeforeCaret(text: "привет", caretUTF16Offset: 6),
+            CaretWordExtractor.Result(word: "привет", utf16Range: NSRange(location: 0, length: 6)),
+            "whole single word before the caret at the end of the field"
+        )
+        TestRunner.assertEqual(
+            CaretWordExtractor.wordBeforeCaret(text: "hello ghbdtn", caretUTF16Offset: 12),
+            CaretWordExtractor.Result(word: "ghbdtn", utf16Range: NSRange(location: 6, length: 6)),
+            "only the LAST word before the caret is taken, not the whole field"
+        )
+        TestRunner.assertEqual(
+            CaretWordExtractor.wordBeforeCaret(text: "мама мыла раму", caretUTF16Offset: 9),
+            CaretWordExtractor.Result(word: "мыла", utf16Range: NSRange(location: 5, length: 4)),
+            "caret in the MIDDLE of the field takes the word ending there, not the last word overall"
+        )
+        TestRunner.assertNil(
+            CaretWordExtractor.wordBeforeCaret(text: "hello ", caretUTF16Offset: 6),
+            "caret right after whitespace has no word to convert"
+        )
+        TestRunner.assertNil(
+            CaretWordExtractor.wordBeforeCaret(text: "hello", caretUTF16Offset: 0),
+            "caret at the very start has no word before it"
+        )
+        TestRunner.assertNil(
+            CaretWordExtractor.wordBeforeCaret(text: "a", caretUTF16Offset: 1),
+            "single-character word is below the 2-char floor (matches the buffer/history path)"
+        )
+    }
+}
+
+enum LayoutTextConverterTests {
+    static func run() {
+        TestRunner.section("LayoutTextConverter — Double Shift selection/clipboard conversion")
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for selection-conversion fixtures")
+            return
+        }
+
+        // "ghbdtn" typed on the EN layout is what "привет" looks like on
+        // screen when the wrong layout was active — exactly what AX-selected
+        // or clipboard text looks like to Double Shift (no original keystrokes).
+        let converted = LayoutTextConverter.convert(
+            "ghbdtn", from: enLayout, to: ruLayout, inputSourceManager: inputSources
+        )
+        TestRunner.assertEqual(converted, "привет", "en-typed text converts to the intended Russian word")
+
+        let roundTrip = LayoutTextConverter.convert(
+            converted, from: ruLayout, to: enLayout, inputSourceManager: inputSources
+        )
+        TestRunner.assertEqual(roundTrip, "ghbdtn", "conversion round-trips back to the original keys")
+
+        let capitalized = LayoutTextConverter.convert(
+            "Ghbdtn", from: enLayout, to: ruLayout, inputSourceManager: inputSources
+        )
+        TestRunner.assertEqual(capitalized, "Привет", "capitalization survives the conversion")
+
+        let mixed = LayoutTextConverter.convert(
+            "ghbdtn123", from: enLayout, to: ruLayout, inputSourceManager: inputSources
+        )
+        TestRunner.assertEqual(mixed, "привет123", "characters with no reverse mapping (digits) pass through unchanged")
+
+        let strokes = LayoutTextConverter.keystrokes(for: "ghbdtn", typedOn: enLayout, inputSourceManager: inputSources)
+        TestRunner.assertEqual(strokes?.count ?? -1, 6, "reconstructed keystrokes match the source text length")
+        TestRunner.assertNil(
+            LayoutTextConverter.keystrokes(for: "gh1btn", typedOn: enLayout, inputSourceManager: inputSources),
+            "text containing an unmapped character (digit) can't be reconstructed into keystrokes"
+        )
+    }
+}
+
+enum DominantScriptLanguageTests {
+    /// `LanguageDetector.dominantScriptLanguageCode` is what the AX-selection,
+    /// clipboard and word-before-caret Double Shift paths use to pick the
+    /// SOURCE layout — from the text's own characters, never from whatever
+    /// layout happens to be active (see CLAUDE.md "марже" bug).
+    static func run() {
+        TestRunner.section("LanguageDetector.dominantScriptLanguageCode — content-based direction")
+        TestRunner.assertEqual(
+            LanguageDetector.dominantScriptLanguageCode("привет"), "ru",
+            "pure Cyrillic text is detected as ru regardless of the active layout"
+        )
+        TestRunner.assertEqual(
+            LanguageDetector.dominantScriptLanguageCode("hello"), "en",
+            "pure Latin text is detected as en regardless of the active layout"
+        )
+        TestRunner.assertEqual(
+            LanguageDetector.dominantScriptLanguageCode("привhi"), "ru",
+            "mixed content picks the majority script — Cyrillic majority (4 vs 2) → ru"
+        )
+        TestRunner.assertEqual(
+            LanguageDetector.dominantScriptLanguageCode("прivet"), "en",
+            "mixed content picks the majority script — Latin majority (4 vs 2) → en"
+        )
+        TestRunner.assertNil(
+            LanguageDetector.dominantScriptLanguageCode("12345"),
+            "digits-only text carries no script — no direction can be guessed, caller must no-op"
+        )
+    }
+}
+
+enum MarzheDoubleShiftRegressionTests {
+    /// Named regression from live evidence (09:16, EN layout active): the
+    /// owner typed «марже» intending Russian — the physical keys landed on
+    /// screen as "vfh;t" (EN interpretation of the same keycodes). Pre-fix,
+    /// Double Shift's buffer/history path (`swapLastWordInBuffer`) scored
+    /// the word against whatever layout was ACTIVE AT THE MOMENT the hotkey
+    /// fired, not the layout the word was actually typed on — history has no
+    /// TTL, so if the active layout had drifted by press time, direction
+    /// scrambled (live log: "ru→en", result "мavfh;t" garbage instead of
+    /// «марже»). Fixed by always resolving direction from an explicit
+    /// `typedLayout` (`LanguageDetector.swapTarget`, fed by
+    /// `KeyboardMonitor.lastCompletedWord.typedLayout`, captured AT WORD-
+    /// COMPLETION time) — this suite exercises that same primitive directly.
+    ///
+    /// Also covers the "3 presses needed" toggle bug from the same log
+    /// (Spotlight, 11:16): a second immediate Double Shift on a word the
+    /// first press just converted must flip it straight back — not fall
+    /// through to caret-word/Undo — and a third press must convert again.
+    static func run() {
+        TestRunner.section("Double Shift buffer/history — «марже» direction + toggle regression")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the «марже» regression fixtures")
+            return
+        }
+
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let prefs = PreferencesService()
+        let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
+
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+
+        // Physical keys that spell «марже» when interpreted via RU — exactly
+        // what the owner physically pressed.
+        guard let marzheStrokes = InstantCorrectionFixtures.keystrokes(for: "марже", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "«марже»: fixture layout can type every character")
+            return
+        }
+        TestRunner.assertEqual(
+            inputSources.convertKeystrokes(marzheStrokes, toLayout: enLayout), "vfh;t",
+            "sanity: the same physical keys render as 'vfh;t' when EN is active — matches the live log verbatim"
+        )
+
+        // --- Named regression: typed while EN was active → must convert en→ru ---
+        guard let regression = detector.swapTarget(keystrokes: marzheStrokes, typedLayout: enLayout) else {
+            TestRunner.assertTrue(false, "«марже» regression: swapTarget must find a conversion")
+            return
+        }
+        TestRunner.assertEqual(regression.layout.languageCode, "ru", "«марже» regression: direction is en→ru, not ru→en")
+        TestRunner.assertEqual(regression.word, "марже", "«марже» regression: corrected word is «марже», not garbage")
+
+        // --- Mirror: an EN word typed while RU was active → must convert ru→en ---
+        // Physical keys that spell "hello" when interpreted via EN render as
+        // "руддщ" while RU is active (same fixture pairing InstantCorrectionAnalyzerTests uses).
+        guard let helloStrokes = InstantCorrectionFixtures.keystrokes(for: "руддщ", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "mirror case: fixture layout can type every character")
+            return
+        }
+        guard let mirror = detector.swapTarget(keystrokes: helloStrokes, typedLayout: ruLayout) else {
+            TestRunner.assertTrue(false, "mirror case: swapTarget must find a conversion")
+            return
+        }
+        TestRunner.assertEqual(mirror.layout.languageCode, "en", "mirror case: direction is ru→en")
+        TestRunner.assertEqual(mirror.word, "hello", "mirror case: corrected word is 'hello'")
+
+        // --- Toggle: two presses return the original, the third converts again ---
+        guard let press1 = detector.swapTarget(keystrokes: marzheStrokes, typedLayout: enLayout) else {
+            TestRunner.assertTrue(false, "toggle 1st press: must convert")
+            return
+        }
+        TestRunner.assertEqual(press1.word, "марже", "toggle 1st press: en→ru gives «марже»")
+
+        guard let press2 = detector.swapTarget(keystrokes: marzheStrokes, typedLayout: press1.layout) else {
+            TestRunner.assertTrue(false, "toggle 2nd press: must convert back, not get stuck")
+            return
+        }
+        TestRunner.assertEqual(press2.word, "vfh;t", "toggle 2nd press: converts BACK to the original on-screen text")
+        TestRunner.assertEqual(press2.layout.languageCode, "en", "toggle 2nd press: back to en")
+
+        guard let press3 = detector.swapTarget(keystrokes: marzheStrokes, typedLayout: press2.layout) else {
+            TestRunner.assertTrue(false, "toggle 3rd press: must convert again")
+            return
+        }
+        TestRunner.assertEqual(
+            press3.word, "марже",
+            "toggle 3rd press: converts to «марже» again — one press per result, never 3 presses to work"
+        )
     }
 }
 
@@ -937,6 +1259,14 @@ enum LicenseServiceTests {
     static func run() {
         TestRunner.section("LicenseService")
 
+        // Anti-tamper first-seen marks are scoped by hwid in UserDefaults —
+        // clean up every fake hwid this suite touches so re-runs stay isolated.
+        defer {
+            for hwid in ["TRIALHW", "ACTHW", "ANTITAMPERHW"] {
+                UserDefaults.standard.removeObject(forKey: AppIdentity.keyPrefix + "licenseFirstSeen." + hwid)
+            }
+        }
+
         // (a) canonicalization — golden vector
         let golden = LicensePayload(
             hwid: "ABC-123", plan: "trial", start: 1_754_100_000, until: 1_755_309_600, issued: 1_754_200_000
@@ -1066,10 +1396,187 @@ enum LicenseServiceTests {
         TestRunner.assertEqual(outcome, .success, "activation with a valid signed response succeeds")
         TestRunner.assertTrue(actService.isEntitled, "activated subscription is entitled")
         TestRunner.assertEqual(actStore.stored?.payload?.plan ?? "", "sub", "activated state carries plan=sub")
+
+        // (h) anti-tamper: deleting the license state (simulated by a fresh
+        // empty store) while offline must NOT restart the provisional trial —
+        // the second instance has to anchor on the first instance's
+        // first-seen mark, not on its own later "now".
+        let firstClock = TestLicenseClock(1_000_000)
+        let firstStore = InMemoryLicenseStore()
+        let offlineTransport = StubLicenseTransport()
+        offlineTransport.helloResult = .failure(.network)
+        let firstService = LicenseService(
+            clock: firstClock, transport: offlineTransport, store: firstStore,
+            hwid: "ANTITAMPERHW", appVersion: "test", publicKeyHex: testPublicHex
+        )
+        firstService.checkIn()
+        let firstUntil = firstStore.stored?.payload?.until ?? -1
+        TestRunner.assertEqual(
+            firstUntil, firstClock.now() + 14 * Self.day,
+            "genuinely first launch anchors the trial at its own now"
+        )
+
+        // "File deleted": a brand new, empty store — same hwid, 20 days later.
+        let laterClock = TestLicenseClock(1_000_000 + 20 * Self.day)
+        let wipedStore = InMemoryLicenseStore()
+        let secondService = LicenseService(
+            clock: laterClock, transport: offlineTransport, store: wipedStore,
+            hwid: "ANTITAMPERHW", appVersion: "test", publicKeyHex: testPublicHex
+        )
+        secondService.checkIn()
+        TestRunner.assertEqual(
+            wipedStore.stored?.payload?.until ?? -1, firstUntil,
+            "trial restored after local state loss keeps the ORIGINAL until — it is not restarted"
+        )
+        TestRunner.assertTrue(
+            !secondService.isEntitled,
+            "restored trial is already expired 20 days after a 14-day anchor, exactly as it should be"
+        )
     }
 
     private static func hex(_ data: Data) -> String {
         data.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private final class StubLegacyLicenseKeychainReader: LegacyLicenseKeychainReader {
+    var stateToReturn: LicenseState?
+    private(set) var deleteCalled = false
+    func readSilently() -> LicenseState? { stateToReturn }
+    func deleteSilently() { deleteCalled = true }
+}
+
+enum FileLicenseStoreTests {
+    static func run() {
+        TestRunner.section("FileLicenseStore — migration off Keychain")
+
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("qsw-license-store-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let legacyPayload = LicensePayload(hwid: "MIGRATEHW", plan: "trial", start: 1, until: 2, issued: 1)
+        let legacyState = LicenseState(
+            payload: legacyPayload, sig: "deadbeef", lastCheckUnix: 1, maxSeenUnix: 1, provisional: false
+        )
+        let legacyReader = StubLegacyLicenseKeychainReader()
+        legacyReader.stateToReturn = legacyState
+
+        let store = FileLicenseStore(directory: tempDir, legacyReader: legacyReader)
+
+        if let migrated = store.load() {
+            TestRunner.assertEqual(
+                migrated, legacyState,
+                "state read from the old Keychain source is migrated into the file store"
+            )
+        } else {
+            TestRunner.assertTrue(false, "state read from the old Keychain source is migrated into the file store")
+        }
+        TestRunner.assertTrue(
+            legacyReader.deleteCalled,
+            "legacy Keychain entry is deleted once migration completes"
+        )
+
+        let fileURL = tempDir.appendingPathComponent("license.json")
+        let perms = (try? FileManager.default.attributesOfItem(atPath: fileURL.path))?[.posixPermissions] as? NSNumber
+        TestRunner.assertEqual(
+            perms?.intValue ?? -1, 0o600,
+            "license.json is created with 0600 permissions"
+        )
+
+        // A second store pointed at the same directory must never re-read
+        // (or delete from) Keychain — the file already exists.
+        let secondReader = StubLegacyLicenseKeychainReader()
+        secondReader.stateToReturn = LicenseState(
+            payload: LicensePayload(hwid: "SHOULDNOTAPPEAR", plan: "trial", start: 0, until: 0, issued: 0),
+            sig: nil, lastCheckUnix: 0, maxSeenUnix: 0, provisional: true
+        )
+        let secondStore = FileLicenseStore(directory: tempDir, legacyReader: secondReader)
+        TestRunner.assertEqual(
+            secondStore.load()?.payload?.hwid ?? "", "MIGRATEHW",
+            "an existing file is never overwritten by a second migration attempt"
+        )
+        TestRunner.assertTrue(
+            !secondReader.deleteCalled,
+            "Keychain is not touched at all once a file already exists"
+        )
+
+        // Fresh install, nothing in Keychain either: store starts empty, no crash.
+        let emptyDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("qsw-license-store-empty-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: emptyDir) }
+        let emptyReader = StubLegacyLicenseKeychainReader()
+        let emptyStore = FileLicenseStore(directory: emptyDir, legacyReader: emptyReader)
+        TestRunner.assertNil(emptyStore.load(), "fresh install with no legacy state has an empty file store")
+    }
+}
+
+enum DebugLogTests {
+    static func run() {
+        TestRunner.section("DebugLog — verbose gate & rotation")
+
+        let verboseKey = AppIdentity.keyPrefix + "verboseLog"
+        let previousVerbose = UserDefaults.standard.object(forKey: verboseKey)
+        defer {
+            if let previousVerbose {
+                UserDefaults.standard.set(previousVerbose, forKey: verboseKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: verboseKey)
+            }
+        }
+
+        // (a) level filtering
+        let levelDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("qsw-debuglog-level-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: levelDir) }
+
+        UserDefaults.standard.set(false, forKey: verboseKey)
+        let levelLog = DebugLog(directory: levelDir)
+        levelLog.log("KM", "detect: noSwitch len=5 cur=en", level: .verbose)
+        levelLog.log("KM", "significant event", level: .normal)
+        levelLog.waitForPendingWrites()
+        TestRunner.assertTrue(
+            !levelLog.currentContents.contains("noSwitch"),
+            "verbose-level events are dropped while verbose logging is off"
+        )
+        TestRunner.assertTrue(
+            levelLog.currentContents.contains("significant event"),
+            "normal-level events are always written regardless of the verbose setting"
+        )
+
+        UserDefaults.standard.set(true, forKey: verboseKey)
+        levelLog.log("KM", "detect: noSwitch len=6 cur=ru", level: .verbose)
+        levelLog.waitForPendingWrites()
+        TestRunner.assertTrue(
+            levelLog.currentContents.contains("noSwitch"),
+            "verbose-level events are written once verbose logging is turned on"
+        )
+
+        // (b) rotation preserves content instead of truncating it
+        let rotateDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("qsw-debuglog-rotate-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rotateDir) }
+        let rotateLog = DebugLog(directory: rotateDir)
+        let filler = String(repeating: "x", count: 900)
+        for i in 0..<700 {
+            rotateLog.log("KM", "filler \(i) \(filler)")
+        }
+        rotateLog.log("LIC", "MARKER_AFTER_ROTATION")
+        rotateLog.waitForPendingWrites()
+
+        let rotatedFileURL = rotateDir.appendingPathComponent("debug.1.log")
+        TestRunner.assertTrue(
+            FileManager.default.fileExists(atPath: rotatedFileURL.path),
+            "exceeding the size limit creates a second debug.1.log file"
+        )
+        let rotatedContents = (try? String(contentsOf: rotatedFileURL, encoding: .utf8)) ?? ""
+        TestRunner.assertTrue(
+            rotatedContents.contains("filler 0 "),
+            "rotation preserves earlier content in debug.1.log instead of truncating it to a tail"
+        )
+        TestRunner.assertTrue(
+            rotateLog.currentContents.contains("MARKER_AFTER_ROTATION"),
+            "logging continues into a fresh debug.log right after rotation"
+        )
     }
 }
 
@@ -1421,5 +1928,936 @@ enum LeadingSymbolRunGuardTests {
             1 < InstantCorrectionAnalyzer.minLength,
             "a single-letter core also stays below the 4-letter instant minimum"
         )
+    }
+}
+
+// MARK: - Onboarding state machine
+//
+// Guards the 04.08.2026 fix: the onboarding window used to vanish behind
+// System Settings and there was no honest rule for when a restart is needed.
+// The window plumbing is AppKit (live-only), but "which grants are in → what
+// do we show" is pure and is pinned here.
+enum OnboardingStateTests {
+    static func run() {
+        TestRunner.section("Onboarding — permission state → step")
+
+        let nothing = OnboardingStatus(hasAccessibility: false, hasInputMonitoring: false,
+                                       isInterceptionRunning: false)
+        TestRunner.assertEqual(OnboardingStateMachine.step(for: nothing), .grantAccessibility,
+                               "no permissions at all → ask for Accessibility first")
+
+        // Input Monitoring is derived from Accessibility on this system (there
+        // is no separate kTCCServiceListenEvent row for our bundle id), so it
+        // must never be the first thing we ask for.
+        let onlyInputMonitoring = OnboardingStatus(hasAccessibility: false, hasInputMonitoring: true,
+                                                   isInterceptionRunning: false)
+        TestRunner.assertEqual(OnboardingStateMachine.step(for: onlyInputMonitoring), .grantAccessibility,
+                               "Input Monitoring without Accessibility still asks for Accessibility")
+
+        let onlyAccessibility = OnboardingStatus(hasAccessibility: true, hasInputMonitoring: false,
+                                                 isInterceptionRunning: false)
+        TestRunner.assertEqual(OnboardingStateMachine.step(for: onlyAccessibility), .grantInputMonitoring,
+                               "Accessibility granted → next step is Input Monitoring")
+
+        let running = OnboardingStatus(hasAccessibility: true, hasInputMonitoring: true,
+                                       isInterceptionRunning: true)
+        TestRunner.assertEqual(OnboardingStateMachine.step(for: running), .ready,
+                               "both grants + live interception → ready")
+
+        let justGranted = OnboardingStatus(hasAccessibility: true, hasInputMonitoring: true,
+                                           isInterceptionRunning: false, secondsSinceAllGranted: 1)
+        TestRunner.assertEqual(OnboardingStateMachine.step(for: justGranted), .verifying,
+                               "grants just landed and the tap is still coming up → verifying, not a restart prompt")
+
+        let borderline = OnboardingStatus(
+            hasAccessibility: true, hasInputMonitoring: true, isInterceptionRunning: false,
+            secondsSinceAllGranted: OnboardingStateMachine.restartGraceSeconds - 0.01
+        )
+        TestRunner.assertEqual(OnboardingStateMachine.step(for: borderline), .verifying,
+                               "just inside the grace window is still verifying")
+
+        let stalled = OnboardingStatus(
+            hasAccessibility: true, hasInputMonitoring: true, isInterceptionRunning: false,
+            secondsSinceAllGranted: OnboardingStateMachine.restartGraceSeconds
+        )
+        TestRunner.assertEqual(OnboardingStateMachine.step(for: stalled), .stalled,
+                               "grants in place but no interception past the grace window → stalled")
+
+        TestRunner.assertTrue(OnboardingStateMachine.offersRestart(.stalled),
+                              "restart is offered in the stalled state")
+        TestRunner.assertTrue(!OnboardingStateMachine.offersRestart(.verifying)
+                              && !OnboardingStateMachine.offersRestart(.ready)
+                              && !OnboardingStateMachine.offersRestart(.grantAccessibility)
+                              && !OnboardingStateMachine.offersRestart(.grantInputMonitoring),
+                              "restart is never offered anywhere else — permissions are picked up hot")
+
+        TestRunner.assertTrue(!OnboardingStateMachine.canFinish(.grantAccessibility)
+                              && !OnboardingStateMachine.canFinish(.grantInputMonitoring),
+                              "window can't be confirmed away while a permission is missing")
+        TestRunner.assertTrue(OnboardingStateMachine.canFinish(.verifying)
+                              && OnboardingStateMachine.canFinish(.stalled)
+                              && OnboardingStateMachine.canFinish(.ready),
+                              "once both grants are in, the user may confirm — the tap self-heals on its own poll")
+
+        TestRunner.assertEqual(OnboardingStateMachine.pendingPermission(for: nothing), .accessibility,
+                               "pending permission with nothing granted is Accessibility")
+        TestRunner.assertEqual(OnboardingStateMachine.pendingPermission(for: onlyAccessibility), .inputMonitoring,
+                               "pending permission after Accessibility is Input Monitoring")
+        TestRunner.assertNil(OnboardingStateMachine.pendingPermission(for: running),
+                             "nothing pending when both are granted — no repeat prompts")
+
+        // A missing timestamp must not be read as "waited forever".
+        let noTimestamp = OnboardingStatus(hasAccessibility: true, hasInputMonitoring: true,
+                                           isInterceptionRunning: false, secondsSinceAllGranted: nil)
+        TestRunner.assertEqual(OnboardingStateMachine.step(for: noTimestamp), .verifying,
+                               "unknown wait time counts as 0s, not as stalled")
+
+        TestRunner.assertTrue(!OnboardingStateMachine.hint(for: .grantInputMonitoring).contains("Перезапусти"),
+                              "the Input Monitoring hint does not claim a restart is required")
+        TestRunner.assertTrue(OnboardingStateMachine.hint(for: .stalled).contains("перезапуск"),
+                              "the stalled hint is the only one that mentions restarting")
+    }
+}
+
+// MARK: - KeyboardMonitor integration harness (headless — no GUI, no real CGEventTap)
+//
+// Everything above tests pure functions or components in isolation. This
+// section drives a REAL `KeyboardMonitor` with synthetic CGEvents through
+// the exact contract the live CGEventTap callback uses (`eventTapCallback`
+// at the bottom of KeyboardMonitor.swift), and substitutes a `TextReplacing`
+// fake that models "what's on screen" as a plain string instead of posting
+// real CGEvents. This is the missing layer between unit tests
+// (LanguageDetector/InstantCorrectionAnalyzer, above) and a live GUI — it
+// catches bugs that only exist at the STITCH between buffering, leading-
+// symbol tracking and the backspace/retype transaction, which is exactly
+// where the ".yexit" bug lived: `swapLastWordInBuffer` never read
+// `pendingLeadingSymbols` at all (fixed in KeyboardMonitor.swift alongside
+// this harness).
+
+/// Deterministic stand-in for `TextReplacer`: models "what's on screen" as a
+/// plain string instead of posting real CGEvents. Interprets `length`/
+/// `trailing`/`trailingAlreadyOnScreen` via the SAME `TextReplacementPlan`
+/// production code uses, so a wrong backspace-count formula in
+/// `KeyboardMonitor` shows up here exactly as it would on a real screen.
+final class FakeTextReplacer: TextReplacing {
+    private(set) var screen: String = ""
+    private(set) var invocationCount = 0
+    private let inputSources: InputSourceManager
+
+    init(inputSources: InputSourceManager) {
+        self.inputSources = inputSources
+    }
+
+    func replaceCurrentWord(
+        length: Int, replacement: String, targetLayout: KeyboardLayout,
+        trailing: String?, trailingAlreadyOnScreen: Bool,
+        completion: @escaping (TextReplacer.Result) -> Void
+    ) {
+        invocationCount += 1
+        // The real TextReplacer switches the input source FIRST, before any
+        // backspace/retype — matters here too: any further keys the harness
+        // presses after this correction (mid-word instant-correction cases
+        // keep typing the rest of the word) must render under the NEW
+        // layout, exactly like a real app would see them.
+        inputSources.switchTo(targetLayout)
+        let plan = TextReplacementPlan(
+            originalLength: length, replacement: replacement, trailing: trailing,
+            trailingAlreadyOnScreen: trailingAlreadyOnScreen
+        )
+        // Clamped to what's actually on screen — exactly what a real text
+        // field does once there's nothing left to delete. A backspace count
+        // that's too high WITHIN the existing text (the interesting bug
+        // class) still eats into whatever precedes the word, same as live.
+        let backspaces = min(plan.backspaceCount, screen.count)
+        screen.removeLast(backspaces)
+        screen += plan.payload
+        completion(.success)
+    }
+
+    func cancelCurrentReplacement() {}
+
+    /// Called by `KeyboardMonitorHarness.press` for a physical keystroke that
+    /// was NOT suppressed by a firing correction — i.e. what a real app
+    /// would have rendered on its own, outside any backspace/retype
+    /// transaction.
+    func appendPhysicalChar(_ text: String) {
+        screen += text
+    }
+}
+
+/// Drives a real `KeyboardMonitor` with synthetic CGEvents. No XCTest, no
+/// Accessibility API, no real focused app — `screen` is the only "display".
+final class KeyboardMonitorHarness {
+    let prefs = PreferencesService()
+    let exceptions = ExceptionsService()
+    let replacer: FakeTextReplacer
+    let monitor: KeyboardMonitor
+    private let inputSources: InputSourceManager
+
+    var screen: String { replacer.screen }
+
+    init(
+        dictionary: WordDictionary, inputSources: InputSourceManager,
+        secureInputDetector: SecureInputDetector = SecureInputDetector(secureCheck: { false }, axProbe: { false })
+    ) {
+        self.inputSources = inputSources
+        let replacer = FakeTextReplacer(inputSources: inputSources)
+        self.replacer = replacer
+        let detector = LanguageDetector(
+            dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs
+        )
+        let analyzer = InstantCorrectionAnalyzer(dictionary: dictionary)
+        let perApp = PerAppLayoutService(inputSourceManager: inputSources, prefsService: prefs)
+        monitor = KeyboardMonitor(
+            languageDetector: detector, textReplacer: replacer,
+            statsService: StatisticsService(), prefsService: prefs,
+            exceptionsService: exceptions, yoficatorService: YoficatorService(),
+            switchUndoManager: SwitchUndoManager(), perAppLayoutService: perApp,
+            instantCorrectionAnalyzer: analyzer,
+            // The real IsSecureEventInputEnabled() is a GLOBAL OS flag, not
+            // scoped to this test process — forcing it off here is what
+            // makes this harness deterministic regardless of whatever's
+            // actually focused on the machine running the tests. `axProbe`
+            // is also forced off so this headless harness never dispatches a
+            // real AX call to whatever happens to be focused on the machine
+            // running the tests.
+            secureInputDetector: secureInputDetector
+        )
+    }
+
+    /// Simulate one physical keydown. Mirrors `eventTapCallback`: run the
+    /// same analysis `handleEvent` does, then only render the character if
+    /// the tap wouldn't have suppressed it — a firing correction suppresses
+    /// the just-typed trigger letter and retypes it itself as part of its
+    /// own payload (RC-1 in KeyboardMonitor.swift), so it must NOT also land
+    /// on screen via the normal path.
+    func press(_ keycode: UInt16, flags: CGEventFlags = []) {
+        let rendered = inputSources.currentLayout.flatMap {
+            inputSources.characterForKeycode(keycode, layout: $0, flags: flags)
+        }
+        guard let event = Self.makeKeyDown(keycode: keycode, flags: flags) else { return }
+        let proxy = OpaquePointer(UnsafeMutableRawPointer(bitPattern: 1)!)
+        monitor.handleEvent(proxy, type: .keyDown, event: event)
+        let suppressed = monitor.consumeSuppressCurrentEvent()
+        if !suppressed, let rendered {
+            replacer.appendPhysicalChar(rendered)
+        }
+    }
+
+    func press(_ stroke: BufferedKeystroke) { press(stroke.keycode, flags: stroke.flags) }
+    func type(_ strokes: [BufferedKeystroke]) { strokes.forEach { press($0) } }
+
+    private static func makeKeyDown(keycode: UInt16, flags: CGEventFlags) -> CGEvent? {
+        let source = CGEventSource(stateID: .hidSystemState)
+        guard let event = CGEvent(keyboardEventSource: source, virtualKey: keycode, keyDown: true) else {
+            return nil
+        }
+        event.flags = flags
+        return event
+    }
+}
+
+/// Snapshots the exact UserDefaults keys these tests flip, plus the Mac's
+/// real active input source, and restores both unconditionally — same
+/// hygiene as `PreferencesServiceTests` above, extended to the layout:
+/// `KeyboardMonitor` reads `InputSourceManager.currentLayout` live from the
+/// OS with no injection seam, so exercising real ru/en typing means actually
+/// switching it for the duration of these tests.
+private final class KeyboardMonitorTestEnvironment {
+    private let inputSources: InputSourceManager
+    private let originalLayoutID: String?
+    private let defaults = UserDefaults.standard
+    private let originalValues: [(key: String, value: Any?)]
+
+    init(inputSources: InputSourceManager) {
+        self.inputSources = inputSources
+        originalLayoutID = inputSources.currentLayout?.id
+        let prefix = AppIdentity.keyPrefix
+        let keys = [
+            prefix + "autoEnabled", prefix + "instantCorrection", prefix + "yoficator",
+            prefix + "activeLayoutIDs", prefix + "wordExceptions", prefix + "appExceptions",
+            prefix + "autoLearned",
+        ]
+        originalValues = keys.map { ($0, UserDefaults.standard.object(forKey: $0)) }
+    }
+
+    func restore() {
+        for (key, value) in originalValues {
+            if let value {
+                defaults.set(value, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+        if let originalLayoutID, let layout = inputSources.layout(withID: originalLayoutID) {
+            inputSources.switchTo(layout)
+        }
+    }
+}
+
+enum KeyboardMonitorIntegrationTests {
+    static func run() {
+        TestRunner.section("KeyboardMonitor integration — headless typed-sequence → screen (no GUI)")
+
+        guard LicenseService.shared.isEntitled else {
+            TestRunner.skip(
+                "KeyboardMonitor integration harness requires an entitled LicenseService.shared "
+                    + "(Double Shift and auto-correct are both license-gated)"
+            )
+            return
+        }
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the KeyboardMonitor integration harness")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+
+        let environment = KeyboardMonitorTestEnvironment(inputSources: inputSources)
+        defer { environment.restore() }
+
+        func harness(autoSwitch: Bool) -> KeyboardMonitorHarness {
+            let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
+            h.prefs.isAutoSwitchEnabled = autoSwitch
+            h.prefs.isInstantCorrectionEnabled = true
+            h.prefs.isYoficatorEnabled = false
+            h.prefs.activeLayoutIDs = [enLayout.id, ruLayout.id]
+            h.exceptions.appExceptions = []
+            h.exceptions.wordExceptions = []
+            h.exceptions.autoLearned = [:]
+            return h
+        }
+
+        // --- "/exit" — the reported ".yexit" defect, task minimum -----------
+        // Double Shift with auto-switch OFF: this is exactly how the live bug
+        // was hit — Terminal.app is in ExceptionsService's default app-
+        // exception list, so manual Double Shift is the ONLY correction path
+        // available there, never the automatic ones.
+        TestRunner.section("Double Shift folds a leading symbol — \"/exit\" (live \".yexit\" defect)")
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(autoSwitch: false)
+            h.press(44) // "/" → "." under ru
+            if let exit = InstantCorrectionFixtures.keystrokes(for: "exit", reverse: enReverse) {
+                h.type(exit)
+                TestRunner.assertEqual(
+                    h.screen, ".учше",
+                    "sanity: on-screen text before Double Shift matches the live debug.log verbatim"
+                )
+                TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "Double Shift reports a conversion")
+                TestRunner.assertEqual(
+                    h.screen, "/exit",
+                    "fix: leading '/' converts together with the word — no dropped symbol, no extra character"
+                )
+            } else {
+                TestRunner.assertTrue(false, "'exit': EN fixture can type every character")
+            }
+        }
+
+        // --- "$GRAF", "/model" — same fold-in via the automatic paths -------
+        TestRunner.section("Auto-correct folds a leading symbol — \"/model\", \"$GRAF\"")
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(autoSwitch: true)
+            h.press(44) // "/"
+            if let model = InstantCorrectionFixtures.keystrokes(for: "model", reverse: enReverse) {
+                h.type(model)
+                TestRunner.assertEqual(
+                    h.screen, "/model",
+                    "'/model' converts with the leading '/' intact (Ghostty 03.08.2026 regression, integration level)"
+                )
+            } else {
+                TestRunner.assertTrue(false, "'model': EN fixture can type every character")
+            }
+        }
+        inputSources.switchTo(ruLayout)
+        do {
+            // Named case is "$GRAF" (CLAUDE.md citation); reproduced here as
+            // "$HELLO" — "graf" itself is too short/uncommon a word for the
+            // dictionary/spellchecker to confidently score at either the
+            // instant or the boundary threshold (same substitution
+            // LeadingSymbolRunGuardTests already documents above for the
+            // exact same citation), which would make this a scoring-
+            // calibration test rather than a leading-symbol-fold-in test.
+            // "hello" is one of the suite's proven golden words.
+            let h = harness(autoSwitch: true)
+            h.press(21, flags: .maskShift) // shift+4 → ";" under ru
+            if let hello = InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse) {
+                for stroke in hello { h.press(stroke.keycode, flags: .maskShift) } // HELLO, all-caps
+                h.press(49) // trailing space — flushes the boundary path if instant didn't already fire
+                TestRunner.assertEqual(
+                    h.screen, "$HELLO ",
+                    "'$HELLO' converts with the leading '$' intact ('$GRAF'-style leading-symbol citation)"
+                )
+            } else {
+                TestRunner.assertTrue(false, "'hello': EN fixture can type every character")
+            }
+        }
+
+        // --- «марже»-class direction/drift bug, integration level -----------
+        // Named regression is «марже» (CLAUDE.md); reproduced here with
+        // «привет» instead — «марже» contains "ж", which physically sits on
+        // the ";" key, itself a real EN word-boundary trigger
+        // (InputBuffer.cyrillicOnlyLetterCodes) — typing it while EN is
+        // active would legitimately split the buffer mid-word regardless of
+        // this bug, which is a separate, pre-existing interaction outside
+        // this fix's scope (documented in the final report). «привет» avoids
+        // that letter entirely while exercising the exact same primitive
+        // (`swapTarget` resolving direction from the CAPTURED typed layout,
+        // never "whatever's active now") that `MarzheDoubleShiftRegressionTests`
+        // already pins at the unit level.
+        TestRunner.section("Double Shift history survives an active-layout drift — «марже»-class bug, integration level")
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: false)
+            if let privet = InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse) {
+                h.type(privet)
+                h.press(49) // space — completes the word into history, buffer clears
+                TestRunner.assertTrue(
+                    !h.screen.contains("привет"),
+                    "sanity: EN-active typing renders «привет»'s physical keys as Latin garbage"
+                )
+
+                // Active layout drifts to ru BETWEEN word completion and the
+                // Double Shift press — direction must resolve from the
+                // CAPTURED typed layout (en), never "whatever's active now".
+                inputSources.switchTo(ruLayout)
+
+                TestRunner.assertTrue(
+                    h.monitor.swapLastWordInBuffer(), "Double Shift reports a conversion from history"
+                )
+                TestRunner.assertEqual(
+                    h.screen, "привет ",
+                    "fix: direction resolves from the layout the word was TYPED on, not the drifted active layout"
+                )
+            } else {
+                TestRunner.assertTrue(false, "«привет»: ru fixture can type every character")
+            }
+        }
+
+        // --- Toggle: two presses return the original, a third converts again
+        TestRunner.section("Double Shift toggle — two presses return the original, a third converts again")
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(autoSwitch: false)
+            if let helloAsRu = InstantCorrectionFixtures.keystrokes(for: "руддщ", reverse: ruReverse) {
+                h.type(helloAsRu)
+                TestRunner.assertEqual(h.screen, "руддщ", "sanity: on-screen text before any Double Shift press")
+
+                TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "1st press reports a conversion")
+                TestRunner.assertEqual(h.screen, "hello", "1st press: ru→en gives 'hello'")
+
+                TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "2nd press reports a conversion")
+                TestRunner.assertEqual(h.screen, "руддщ", "2nd press: converts BACK to the original on-screen text")
+
+                TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "3rd press reports a conversion")
+                TestRunner.assertEqual(h.screen, "hello", "3rd press: converts again — one press per result, never stuck")
+            } else {
+                TestRunner.assertTrue(false, "'руддщ': ru fixture can type every character")
+            }
+        }
+
+        // --- Live typing: spaces not eaten, words not glued -----------------
+        TestRunner.section("Live typing — spaces are not eaten, words are not glued (\"и самое главное\")")
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(autoSwitch: true) // correctly-typed ru words — must never fire
+            let phrase = "и самое главное"
+            var typedOK = true
+            for ch in phrase {
+                if ch == " " {
+                    h.press(49)
+                } else if let kc = ruReverse[ch] {
+                    h.press(kc)
+                } else {
+                    typedOK = false
+                }
+            }
+            TestRunner.assertTrue(typedOK, "sanity: every character of the phrase has a ru fixture mapping")
+            TestRunner.assertEqual(
+                h.screen, phrase, "spaces preserved, words not glued, no false-positive correction mid-phrase"
+            )
+            TestRunner.assertEqual(h.replacer.invocationCount, 0, "no correction ever fired on correctly-typed text")
+        }
+
+        // --- Guards: shell/code punctuation and correctly-typed words -------
+        TestRunner.section("Guards — correctly-typed text and shell/code punctuation never trigger a correction")
+
+        func assertNoCorrection(
+            _ label: String, layout: KeyboardLayout, expectedScreen: String,
+            _ typeIt: (KeyboardMonitorHarness) -> Void
+        ) {
+            inputSources.switchTo(layout)
+            let h = harness(autoSwitch: true)
+            typeIt(h)
+            TestRunner.assertEqual(
+                h.replacer.invocationCount, 0, "\(label): never triggers a backspace/retype transaction"
+            )
+            TestRunner.assertEqual(h.screen, expectedScreen, "\(label): on-screen text is exactly what was typed")
+        }
+
+        assertNoCorrection("#tag", layout: enLayout, expectedScreen: "#tag ") { h in
+            h.press(20, flags: .maskShift) // "#"
+            if let tag = InstantCorrectionFixtures.keystrokes(for: "tag", reverse: enReverse) { h.type(tag) }
+            h.press(49)
+        }
+        assertNoCorrection("@name", layout: enLayout, expectedScreen: "@name ") { h in
+            h.press(19, flags: .maskShift) // "@"
+            if let name = InstantCorrectionFixtures.keystrokes(for: "name", reverse: enReverse) { h.type(name) }
+            h.press(49)
+        }
+        assertNoCorrection("./script", layout: enLayout, expectedScreen: "./script ") { h in
+            h.press(47) // "." — EN word boundary (punctuation), not a leading symbol; still safe
+            h.press(44) // "/"
+            if let script = InstantCorrectionFixtures.keystrokes(for: "script", reverse: enReverse) { h.type(script) }
+            h.press(49)
+        }
+        assertNoCorrection("$PATH", layout: enLayout, expectedScreen: "$PATH ") { h in
+            h.press(21, flags: .maskShift) // "$"
+            if let path = InstantCorrectionFixtures.keystrokes(for: "path", reverse: enReverse) {
+                for stroke in path { h.press(stroke.keycode, flags: .maskShift) } // PATH, all-caps
+            }
+            h.press(49)
+        }
+        assertNoCorrection("git commit -m", layout: enLayout, expectedScreen: "git commit -m") { h in
+            if let git = InstantCorrectionFixtures.keystrokes(for: "git", reverse: enReverse) { h.type(git) }
+            h.press(49)
+            if let commit = InstantCorrectionFixtures.keystrokes(for: "commit", reverse: enReverse) { h.type(commit) }
+            h.press(49)
+            h.press(27) // "-"
+            if let mKey = enReverse["m"] { h.press(mKey) }
+        }
+        assertNoCorrection("100$", layout: enLayout, expectedScreen: "100$") { h in
+            h.press(18) // "1"
+            h.press(29) // "0"
+            h.press(29) // "0"
+            h.press(21, flags: .maskShift) // "$"
+        }
+        assertNoCorrection("№1", layout: ruLayout, expectedScreen: "№1") { h in
+            h.press(20, flags: .maskShift) // "№" under ru
+            h.press(18) // "1"
+        }
+        assertNoCorrection("correctly-typed EN word", layout: enLayout, expectedScreen: "hello ") { h in
+            if let hello = InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse) { h.type(hello) }
+            h.press(49)
+        }
+        assertNoCorrection("correctly-typed RU word", layout: ruLayout, expectedScreen: "привет ") { h in
+            if let privet = InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse) { h.type(privet) }
+            h.press(49)
+        }
+    }
+}
+
+// MARK: - Avalanche circuit breaker (CLAUDE.md "avalanche" incident: a single
+// mistyped Russian word cascaded into ~10 layout switches and 4 Double Shift
+// firings inside one second, visible on screen as a mangled `завершftm`).
+
+enum CorrectionAvalancheGuardTests {
+    static func run() {
+        TestRunner.section("CorrectionAvalancheGuard — pure threshold logic")
+        var breaker = CorrectionAvalancheGuard(limit: 3)
+        TestRunner.assertTrue(breaker.canFire, "starts able to fire")
+        breaker.recordFired()
+        TestRunner.assertTrue(breaker.canFire, "1 consecutive fire is still under the limit")
+        breaker.recordFired()
+        TestRunner.assertTrue(breaker.canFire, "2 consecutive fires are still under the limit")
+        breaker.recordFired()
+        TestRunner.assertTrue(!breaker.canFire, "3 consecutive fires with no physical input trips the guard")
+        breaker.registerPhysicalEvent()
+        TestRunner.assertTrue(breaker.canFire, "a genuine physical event resets the fuse")
+    }
+}
+
+enum QueueReplacementActiveTests {
+    static func run() {
+        TestRunner.section("KeyboardMonitor.queueIfReplacementActive — flagsChanged is never queued for replay")
+
+        let inputSources = InputSourceManager()
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
+
+        func makeEvent(virtualKey: CGKeyCode, type: CGEventType) -> CGEvent? {
+            let source = CGEventSource(stateID: .hidSystemState)
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true) else {
+                return nil
+            }
+            event.type = type
+            return event
+        }
+
+        h.monitor.isPaused = true
+        defer { h.monitor.isPaused = false }
+
+        // Root fix for the avalanche: a real Shift transition captured
+        // during an active replacement must NOT be queued for a later,
+        // squashed-timing replay — that replay is exactly what fed
+        // HotkeyManager's Shift-tap gesture detector a false double-tap.
+        if let flagsEvent = makeEvent(virtualKey: 56, type: .flagsChanged) {
+            TestRunner.assertTrue(
+                !h.monitor.queueIfReplacementActive(flagsEvent),
+                "a Shift transition during an active pause is NOT queued — avalanche fix"
+            )
+        } else {
+            TestRunner.assertTrue(false, "flagsChanged fixture event constructs")
+        }
+
+        // Real letters typed during the pause must still be queued and
+        // replayed later (pre-existing, unrelated behavior — must survive).
+        if let keyEvent = makeEvent(virtualKey: 0, type: .keyDown) {
+            TestRunner.assertTrue(
+                h.monitor.queueIfReplacementActive(keyEvent),
+                "a letter keydown during an active pause is still queued for later replay"
+            )
+        } else {
+            TestRunner.assertTrue(false, "keyDown fixture event constructs")
+        }
+    }
+}
+
+enum AvalancheGuardWiringTests {
+    static func run() {
+        TestRunner.section("KeyboardMonitor — avalanche guard is wired into the real correction path")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts required for the avalanche guard wiring test")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+
+        let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
+        h.prefs.isAutoSwitchEnabled = true
+        h.prefs.isInstantCorrectionEnabled = true
+        h.prefs.activeLayoutIDs = [enLayout.id, ruLayout.id]
+        inputSources.switchTo(enLayout)
+
+        TestRunner.assertEqual(
+            h.monitor.avalancheGuard.consecutiveWithoutPhysicalInput, 0, "guard starts clean"
+        )
+
+        guard let strokes = InstantCorrectionFixtures.keystrokes(for: "ghbdtn", reverse: enReverse) else {
+            TestRunner.assertTrue(false, "'ghbdtn': EN fixture can type every character")
+            return
+        }
+
+        var fired = false
+        for stroke in strokes {
+            h.press(stroke.keycode, flags: stroke.flags)
+            if h.replacer.invocationCount >= 1 { fired = true; break }
+        }
+        TestRunner.assertTrue(fired, "sanity: instant correction actually fired somewhere in the word")
+        TestRunner.assertEqual(
+            h.monitor.avalancheGuard.consecutiveWithoutPhysicalInput, 1,
+            "firing a correction records exactly one avalanche-guard hit (checked immediately after it fires,"
+                + " before any later keystroke can reset it)"
+        )
+
+        // A genuine next physical letter is proof of life — normal typing
+        // never trips the breaker.
+        if let aKey = enReverse["a"] { h.press(aKey) }
+        TestRunner.assertEqual(
+            h.monitor.avalancheGuard.consecutiveWithoutPhysicalInput, 0,
+            "a real physical keystroke after the correction resets the avalanche guard"
+        )
+    }
+}
+
+enum HotPathStructuralGuardTests {
+    static func run() {
+        TestRunner.section(
+            "Hot path structural guard — handleEvent for an ordinary letter never runs AX/replacement work"
+        )
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }) else {
+            TestRunner.skip("EN layout required for the hot-path structural guard")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+
+        // A fake gated on a semaphore, exactly like `SecureInputAXTierTests`
+        // below — if this were ever reached SYNCHRONOUSLY from the hot path,
+        // `h.press` itself would block on it (bounded to 2s, never a true
+        // hang, but the elapsed-time assertion fails unmistakably). A plain
+        // "call counter checked right after" would be a race, not a proof:
+        // `.async` dispatches to a REAL OS thread that can run concurrently
+        // and finish before the calling thread even reaches the assertion.
+        let axGate = DispatchSemaphore(value: 0)
+        let spySecureDetector = SecureInputDetector(
+            secureCheck: { false },
+            axProbe: {
+                _ = axGate.wait(timeout: .now() + 2.0)
+                return false
+            }
+        )
+
+        let h = KeyboardMonitorHarness(
+            dictionary: dictionary, inputSources: inputSources, secureInputDetector: spySecureDetector
+        )
+        h.prefs.isAutoSwitchEnabled = true
+        h.prefs.isInstantCorrectionEnabled = true
+        inputSources.switchTo(enLayout)
+
+        // A single, ordinary, correctly-typed letter — the overwhelmingly
+        // common case: every keystroke of normal typing before a word gets
+        // anywhere near a correction decision.
+        let start = CFAbsoluteTimeGetCurrent()
+        h.press(0) // "a"
+        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        axGate.signal() // release the background probe so it doesn't leak into later tests
+
+        TestRunner.assertTrue(
+            elapsed < 0.05,
+            "the secure-input AX probe is never invoked synchronously from the hot path"
+                + " (took \(Int(elapsed * 1000))ms; would be ~2000ms if blocked on the gated fake)"
+        )
+        TestRunner.assertEqual(
+            h.replacer.invocationCount, 0,
+            "an ordinary letter never starts a text-replacement transaction"
+                + " (AX writes / clipboard / sound only ever run from inside a replacement's completion)"
+        )
+    }
+}
+
+enum SecureInputAXTierTests {
+    static func run() {
+        TestRunner.section("SecureInputDetector — the AX tier never blocks isSecureInput")
+
+        // Gated (not unconditional) so a genuine wiring regression fails
+        // fast with a clear assertion instead of hanging the whole suite.
+        let axGate = DispatchSemaphore(value: 0)
+        let detector = SecureInputDetector(
+            secureCheck: { false },
+            axProbe: {
+                _ = axGate.wait(timeout: .now() + 2.0)
+                return true
+            }
+        )
+
+        let start = CFAbsoluteTimeGetCurrent()
+        let result = detector.isSecureInput
+        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        axGate.signal() // release the background probe so it doesn't leak into later tests
+
+        TestRunner.assertTrue(!result, "first access returns before the (still gated) AX probe ever resolves")
+        TestRunner.assertTrue(
+            elapsed < 0.05,
+            "isSecureInput returns immediately — the AX probe runs off-thread, never inline"
+                + " (took \(Int(elapsed * 1000))ms)"
+        )
+    }
+}
+
+enum CallbackDurationThresholdTests {
+    static func run() {
+        TestRunner.section("KeyboardMonitor.shouldWarnSlowCallback — pure threshold")
+        TestRunner.assertTrue(
+            !KeyboardMonitor.shouldWarnSlowCallback(0.005, threshold: 0.015),
+            "a 5ms callback is well under the 15ms budget"
+        )
+        TestRunner.assertTrue(
+            KeyboardMonitor.shouldWarnSlowCallback(0.020, threshold: 0.015),
+            "a 20ms callback exceeds the 15ms budget and should log a warning"
+        )
+        TestRunner.assertTrue(
+            !KeyboardMonitor.shouldWarnSlowCallback(0.015, threshold: 0.015),
+            "exactly at the threshold does not warn (strictly greater-than)"
+        )
+    }
+}
+
+enum TapTimeoutCounterTests {
+    static func run() {
+        TestRunner.section("KeyboardMonitor — tapDisabledByTimeout increments an observable counter")
+        let inputSources = InputSourceManager()
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
+
+        guard let event = CGEvent(
+            keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: 0, keyDown: true
+        ) else {
+            TestRunner.assertTrue(false, "fixture event constructs")
+            return
+        }
+        let proxy = OpaquePointer(UnsafeMutableRawPointer(bitPattern: 1)!)
+
+        TestRunner.assertEqual(h.monitor.tapTimeoutDisableCount, 0, "counter starts at 0")
+        h.monitor.handleEvent(proxy, type: .tapDisabledByTimeout, event: event)
+        TestRunner.assertEqual(h.monitor.tapTimeoutDisableCount, 1, "one timeout-disable event increments the counter")
+        h.monitor.handleEvent(proxy, type: .tapDisabledByTimeout, event: event)
+        TestRunner.assertEqual(h.monitor.tapTimeoutDisableCount, 2, "counter accumulates across repeated events")
+    }
+}
+
+enum SwitchBlockReasonTests {
+    static func run() {
+        TestRunner.section("SwitchBlockReason — resolves the single status-bar/menu/tooltip reason")
+
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil
+            ),
+            .none,
+            "everything working → no reason, no line in the menu"
+        )
+        TestRunner.assertNil(
+            SwitchBlockReason.resolve(
+                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil
+            ).title,
+            "'.none' has no title — absence of a line, never a reassuring filler"
+        )
+
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .secureInput, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: "Safari"
+            ),
+            .secureInput(appName: "Safari"),
+            "secure input with a known app name is reported as its own case"
+        )
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .secureInput, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: "Safari"
+            ).title,
+            "Пароль в Safari — переключение приостановлено",
+            "known app name is folded into the line"
+        )
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .secureInput, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil
+            ).title,
+            "Ввод пароля — переключение приостановлено",
+            "unknown app name falls back to the generic wording — never a guessed name"
+        )
+        TestRunner.assertTrue(
+            SwitchBlockReason.resolve(
+                health: .secureInput, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil
+            ).blocksSwitching,
+            "secure input blocks switching"
+        )
+
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .missingPermissions, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil
+            ).title,
+            "Нет разрешения Универсального доступа",
+            "missing permissions wins over every other check"
+        )
+
+        for downHealth: EventTapHealth in [.starting, .unavailable, .stopped] {
+            TestRunner.assertEqual(
+                SwitchBlockReason.resolve(
+                    health: downHealth, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil
+                ).title,
+                "Перехват клавиш остановлен",
+                "\(downHealth) health reads as 'interception stopped'"
+            )
+        }
+
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .running, isAutoSwitchEnabled: false, isEntitled: true, secureInputAppName: nil
+            ).title,
+            "Автопереключение выключено",
+            "healthy tap but auto-switch off"
+        )
+
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .running, isAutoSwitchEnabled: true, isEntitled: false, secureInputAppName: nil
+            ).title,
+            "Подписка истекла",
+            "healthy tap, auto-switch on, but license lapsed"
+        )
+
+        // Priority: health problems outrank auto-switch/license even when
+        // BOTH are also off/expired — the user should see the more urgent,
+        // actionable cause first, not whichever check happens to run last.
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .missingPermissions, isAutoSwitchEnabled: false, isEntitled: false, secureInputAppName: nil
+            ).title,
+            "Нет разрешения Универсального доступа",
+            "missing permissions outranks auto-switch-off AND expired license together"
+        )
+    }
+}
+
+enum SoundServiceToggleCueTests {
+    static func run() {
+        TestRunner.section("SoundService.toggleCue — pure resolver for the auto-switch on/off cue")
+
+        guard let onCue = SoundService.toggleCue(enabled: true, isSoundEnabled: true, storedName: "Glass") else {
+            TestRunner.assertTrue(false, "ON cue resolves when sound is enabled")
+            return
+        }
+        TestRunner.assertEqual(onCue.name, "Glass", "ON reuses the owner's chosen layout-switch timbre")
+        TestRunner.assertEqual(onCue.volume, 1.0, "ON plays at full volume")
+
+        guard let offCue = SoundService.toggleCue(enabled: false, isSoundEnabled: true, storedName: "Glass") else {
+            TestRunner.assertTrue(false, "OFF cue resolves when sound is enabled")
+            return
+        }
+        TestRunner.assertEqual(offCue.name, "Glass", "OFF is the SAME timbre as ON, not a different sound")
+        TestRunner.assertEqual(offCue.volume, 0.45, "OFF plays quieter than ON — reads as softer, not an alert")
+
+        TestRunner.assertNil(
+            SoundService.toggleCue(enabled: true, isSoundEnabled: false, storedName: "Glass"),
+            "master sound gate off silences the toggle cue entirely"
+        )
+        TestRunner.assertNil(
+            SoundService.toggleCue(enabled: false, isSoundEnabled: false, storedName: "Glass"),
+            "master sound gate off silences OFF too"
+        )
+        TestRunner.assertNil(
+            SoundService.toggleCue(enabled: true, isSoundEnabled: true, storedName: SoundService.noSoundName),
+            "'Без звука' selected → toggle stays silent even with sound enabled"
+        )
+
+        guard let fallbackCue = SoundService.toggleCue(
+            enabled: true, isSoundEnabled: true, storedName: "TotallyBogusSoundName"
+        ) else {
+            TestRunner.assertTrue(false, "an unrecognized stored name still resolves via the safe fallback")
+            return
+        }
+        TestRunner.assertEqual(fallbackCue.name, "Pop", "corrupted/stale stored name falls back to Pop, not a crash")
+    }
+}
+
+enum DockIconPolicyTests {
+    static func run() {
+        TestRunner.section("DockIconPolicy — reference-counted Dock icon across Settings/Exceptions/About/License/onboarding")
+
+        var policy = DockIconPolicy()
+        TestRunner.assertEqual(policy.openWindowCount, 0, "starts with nothing open")
+
+        TestRunner.assertTrue(policy.windowOpened(), "the FIRST window to open should show the Dock icon")
+        TestRunner.assertEqual(policy.openWindowCount, 1, "count after first open")
+
+        TestRunner.assertTrue(!policy.windowOpened(), "a second concurrently open window must NOT re-trigger showing the icon")
+        TestRunner.assertEqual(policy.openWindowCount, 2, "count after second open")
+
+        TestRunner.assertTrue(!policy.windowClosed(), "closing one of two open windows must NOT hide the icon yet")
+        TestRunner.assertEqual(policy.openWindowCount, 1, "one window still open")
+
+        TestRunner.assertTrue(policy.windowClosed(), "closing the LAST open window should hide the Dock icon")
+        TestRunner.assertEqual(policy.openWindowCount, 0, "count back to zero")
+
+        TestRunner.assertTrue(!policy.windowClosed(), "closing with nothing open is a safe no-op, not a negative count")
+        TestRunner.assertEqual(policy.openWindowCount, 0, "count never goes negative")
+
+        // Re-open after fully closing — must behave exactly like the very
+        // first open (regression guard: a stale count from a earlier close
+        // 5-window session should never suppress the icon on the next open).
+        TestRunner.assertTrue(policy.windowOpened(), "re-opening after a full close shows the icon again")
     }
 }

@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var yoficatorService: YoficatorService!
     private var perAppLayoutService: PerAppLayoutService!
     private var switchUndoManager: SwitchUndoManager!
-    private var onboardingWindow: NSWindow?
+    private var onboardingController: OnboardingWindowController?
     private var healthTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -75,6 +75,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             perAppLayoutService: perAppLayoutService
         )
 
+        // Status-bar escape hatch: onboarding can always be re-opened, so a
+        // closed (or previously buried) window is never a dead end.
+        statusBar.onOpenPermissions = { [weak self] in self?.showOnboardingWindow() }
+
         let perms = PermissionsService()
         let onboardingSeenKey = AppIdentity.keyPrefix + "onboardingSeen"
         let seen = UserDefaults.standard.bool(forKey: onboardingSeenKey)
@@ -115,32 +119,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The controller is retained for the whole app lifetime — the window is
+    /// only ever hidden, never dropped, so it can be re-presented from the
+    /// status-bar menu without a restart.
     private func presentOnboarding() {
-        if onboardingWindow != nil { onboardingWindow?.makeKeyAndOrderFront(nil); return }
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 380),
-            styleMask: [.titled, .closable],
-            backing: .buffered, defer: false
-        )
-        window.title = AppIdentity.displayName
-        window.center()
-        window.isReleasedWhenClosed = false
-
-        let view = OnboardingView(onContinue: { [weak self] in
-            UserDefaults.standard.set(true, forKey: AppIdentity.keyPrefix + "onboardingSeen")
-            self?.keyboardMonitor.refreshHealth()
-            self?.onboardingWindow?.close()
-            self?.onboardingWindow = nil
-        })
-        window.contentView = NSHostingView(rootView: view.gammaThemedRoot())
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        onboardingWindow = window
+        if onboardingController == nil {
+            onboardingController = OnboardingWindowController(
+                interceptionRunning: { [weak self] in
+                    guard let health = self?.keyboardMonitor?.health else { return false }
+                    return health == .running || health == .secureInput
+                },
+                onFinished: { [weak self] in
+                    self?.keyboardMonitor?.refreshHealth()
+                }
+            )
+        }
+        onboardingController?.present()
     }
 
+    /// 0.5s (was 1.0s) so a secure-input transition (`KeyboardMonitor.health`
+    /// flips `.running` <-> `.secureInput`) shows up in the status-bar
+    /// badge/menu line within the ~500ms the owner asked for. Reuses this
+    /// existing timer instead of adding a second poll: `refreshHealth()`
+    /// already calls `secureInputDetector.isSecureInput` (fast, no-IPC tier —
+    /// see SecureInputDetector), and `health`'s `didSet` already posts
+    /// `.eventTapHealthChanged`, which `StatusBarController` is already
+    /// subscribed to — no new notification needed either.
     private func startHealthPolling() {
         healthTimer?.invalidate()
-        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.keyboardMonitor?.refreshHealth()
         }
         RunLoop.main.add(timer, forMode: .common)

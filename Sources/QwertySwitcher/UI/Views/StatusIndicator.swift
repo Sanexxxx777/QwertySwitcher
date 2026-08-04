@@ -1,19 +1,20 @@
 import SwiftUI
 import AppKit
 
-/// Shows a large icon in the top-right corner of the screen (like Caramba)
-/// ✅ when auto-switch is ON, ❌ when OFF
+/// Compact confirmation chip under the menu bar: green check when auto-switch turns ON,
+/// red cross when it turns OFF. Owner asked to keep the red cross (it reads as "off",
+/// not as an error) — only the size was reduced, the semantics stay.
 final class StatusIndicatorController {
     static let shared = StatusIndicatorController()
     private var indicatorWindow: NSWindow?
     private var hideTimer: DispatchWorkItem?
 
     func showEnabled() {
-        show(icon: "checkmark.circle.fill", color: .green)
+        show(icon: "checkmark.circle.fill", color: Color(red: 0.20, green: 0.78, blue: 0.35))
     }
 
     func showDisabled() {
-        show(icon: "xmark.circle.fill", color: .red)
+        show(icon: "xmark.circle.fill", color: Color(red: 0.94, green: 0.33, blue: 0.31))
     }
 
     private func show(icon: String, color: Color) {
@@ -26,7 +27,7 @@ final class StatusIndicatorController {
         hideTimer?.cancel()
 
         let hostingView = NSHostingView(rootView: StatusBubble(icon: icon, color: color))
-        let size = NSSize(width: 64, height: 64)
+        let size = NSSize(width: 34, height: 34)
         hostingView.frame = NSRect(origin: .zero, size: size)
 
         let mouseLocation = NSEvent.mouseLocation
@@ -35,8 +36,8 @@ final class StatusIndicatorController {
         }
         let visibleFrame = screen.visibleFrame
         let origin = NSPoint(
-            x: visibleFrame.maxX - size.width - 20,
-            y: visibleFrame.maxY - size.height - 20
+            x: visibleFrame.maxX - size.width - 12,
+            y: visibleFrame.maxY - size.height - 8
         )
 
         if let window = indicatorWindow {
@@ -82,7 +83,7 @@ final class StatusIndicatorController {
             })
         }
         hideTimer = hideWork
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: hideWork)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1, execute: hideWork)
     }
 }
 
@@ -95,13 +96,17 @@ struct StatusBubble: View {
 
     var body: some View {
         Image(systemName: icon)
-            .font(.system(size: 40, weight: .medium))
-            .foregroundColor(color)
-            .frame(width: 60, height: 60)
+            .font(.system(size: 18, weight: .medium))
+            .foregroundStyle(color.opacity(0.92))
+            .frame(width: 30, height: 30)
             .background(
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(.ultraThinMaterial)
-                    .shadow(color: .black.opacity(0.2), radius: 10, y: 4)
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(.regularMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .stroke(Color.primary.opacity(0.10), lineWidth: 0.5)
+                    )
+                    .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
             )
             .scaleEffect(scale)
             .onAppear {

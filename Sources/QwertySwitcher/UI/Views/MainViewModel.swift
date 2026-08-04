@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 final class MainViewModel: ObservableObject {
     private let statsService: StatisticsService
@@ -6,6 +7,8 @@ final class MainViewModel: ObservableObject {
     private let inputSourceManager: InputSourceManager
     private let perAppLayoutService: PerAppLayoutService
     private let keyboardMonitor: KeyboardMonitor
+    private let autoStartService: AutoStartService
+    private let permissionsService = PermissionsService()
     var onOpenAbout: (() -> Void)?
     var onOpenExceptions: (() -> Void)?
     var onOpenLicense: (() -> Void)?
@@ -33,6 +36,12 @@ final class MainViewModel: ObservableObject {
     @Published var isSoundEnabled: Bool {
         didSet { prefsService.isSoundEnabled = isSoundEnabled }
     }
+    @Published var isLayoutSoundEnabled: Bool {
+        didSet { prefsService.isLayoutSoundEnabled = isLayoutSoundEnabled }
+    }
+    @Published var layoutSoundName: String {
+        didSet { prefsService.layoutSoundName = layoutSoundName }
+    }
     @Published var isSingleShiftEnabled: Bool {
         didSet { prefsService.isSingleShiftEnabled = isSingleShiftEnabled }
     }
@@ -45,8 +54,18 @@ final class MainViewModel: ObservableObject {
     @Published var isInstantCorrectionEnabled: Bool {
         didSet { prefsService.isInstantCorrectionEnabled = isInstantCorrectionEnabled }
     }
+    @Published var isVerboseLogEnabled: Bool {
+        didSet { prefsService.isVerboseLogEnabled = isVerboseLogEnabled }
+    }
     @Published var isPerAppLayoutEnabled: Bool {
         didSet { perAppLayoutService.isEnabled = isPerAppLayoutEnabled }
+    }
+    @Published var isAutoStartEnabled: Bool {
+        didSet {
+            guard isAutoStartEnabled != autoStartService.isEnabled else { return }
+            try? autoStartService.setEnabled(isAutoStartEnabled)
+            isAutoStartEnabled = autoStartService.isEnabled
+        }
     }
     @Published var themePreference: ThemePreference {
         didSet {
@@ -69,26 +88,72 @@ final class MainViewModel: ObservableObject {
         inputSourceManager.supportedLayouts.filter { $0.isRussian }
     }
 
+    /// True only when the event tap can't run because Accessibility or Input
+    /// Monitoring was revoked after launch — the one case the in-window
+    /// status can't self-heal without sending the user to System Settings.
+    var needsPermissionRepair: Bool { eventTapHealth == .missingPermissions }
+
+    /// Same sequencing as onboarding: prompt first, System Settings only as the
+    /// fallback. Firing both at once put two foreign windows in front of ours.
+    func openPermissionRepair() {
+        switch OnboardingStateMachine.pendingPermission(for: permissionsStatus) {
+        case .accessibility:
+            permissionsService.requestAccessibilityThenSettings()
+        case .inputMonitoring:
+            permissionsService.requestInputMonitoringThenSettings()
+        case nil:
+            break
+        }
+    }
+
+    private var permissionsStatus: OnboardingStatus {
+        OnboardingStatus(
+            hasAccessibility: permissionsService.hasAccessibility,
+            hasInputMonitoring: permissionsService.hasInputMonitoring,
+            isInterceptionRunning: eventTapHealth == .running || eventTapHealth == .secureInput
+        )
+    }
+
+    /// Last ~20 lines of the debug log, for the in-window log preview.
+    var logTail: String {
+        let lines = DebugLog.shared.currentContents.split(separator: "\n", omittingEmptySubsequences: true)
+        return lines.suffix(20).joined(separator: "\n")
+    }
+
+    func openLogFile() {
+        NSWorkspace.shared.open(DebugLog.shared.fileURL)
+    }
+
+    func revealLogFolder() {
+        NSWorkspace.shared.activateFileViewerSelecting([DebugLog.shared.fileURL])
+    }
+
     init(statsService: StatisticsService, prefsService: PreferencesService,
          inputSourceManager: InputSourceManager,
          perAppLayoutService: PerAppLayoutService,
-         keyboardMonitor: KeyboardMonitor) {
+         keyboardMonitor: KeyboardMonitor,
+         autoStartService: AutoStartService) {
         self.statsService = statsService
         self.prefsService = prefsService
         self.inputSourceManager = inputSourceManager
         self.perAppLayoutService = perAppLayoutService
         self.keyboardMonitor = keyboardMonitor
+        self.autoStartService = autoStartService
 
         self.isAutoSwitchEnabled = prefsService.isAutoSwitchEnabled
         self.isSplitShiftEnabled = prefsService.isSplitShiftEnabled
         self.isPasteNoFormatEnabled = prefsService.isPasteNoFormatEnabled
         self.isYoficatorEnabled = prefsService.isYoficatorEnabled
         self.isSoundEnabled = prefsService.isSoundEnabled
+        self.isLayoutSoundEnabled = prefsService.isLayoutSoundEnabled
+        self.layoutSoundName = prefsService.layoutSoundName
         self.isSingleShiftEnabled = prefsService.isSingleShiftEnabled
         self.isDoubleShiftEnabled = prefsService.isDoubleShiftEnabled
         self.isCapsLockSwitchEnabled = prefsService.isCapsLockSwitchEnabled
         self.isInstantCorrectionEnabled = prefsService.isInstantCorrectionEnabled
+        self.isVerboseLogEnabled = prefsService.isVerboseLogEnabled
         self.isPerAppLayoutEnabled = perAppLayoutService.isEnabled
+        self.isAutoStartEnabled = autoStartService.isEnabled
         self.themePreference = prefsService.themePreference
         let activeLayouts = inputSourceManager.resolvedActiveLayouts(
             preferredIDs: prefsService.activeLayoutIDs
@@ -142,6 +207,12 @@ final class MainViewModel: ObservableObject {
         guard ids.count == 2 else { return }
         prefsService.activeLayoutIDs = ids
         NotificationCenter.default.post(name: .activeLayoutsChanged, object: nil)
+    }
+
+    /// Plays the currently selected layout sound so the owner can audition
+    /// choices in Settings without needing to trigger a real layout switch.
+    func previewLayoutSound() {
+        SoundService.shared.previewLayoutSound(named: layoutSoundName)
     }
 
     func resetStats() {

@@ -39,7 +39,7 @@ final class KeyboardMonitor {
     private var mouseMonitor: Any?
     private let buffer = InputBuffer()
     private let languageDetector: LanguageDetector
-    private let textReplacer: TextReplacer
+    private let textReplacer: TextReplacing
     private let statsService: StatisticsService
     private let prefsService: PreferencesService
     private let exceptionsService: ExceptionsService
@@ -48,7 +48,7 @@ final class KeyboardMonitor {
     private let perAppLayoutService: PerAppLayoutService
     private let instantCorrectionAnalyzer: InstantCorrectionAnalyzer
     private var instantCorrectionGate = InstantCorrectionGate()
-    private let secureInputDetector = SecureInputDetector()
+    private let secureInputDetector: SecureInputDetector
     private let permissionsService = PermissionsService()
     var hotkeyManager: HotkeyManager?
     private(set) var isRunning = false
@@ -61,6 +61,26 @@ final class KeyboardMonitor {
     var isPaused = false
     private var pendingUserEvents = PendingUserEventQueue<QueuedUserEvent>()
     private var invalidateAfterReplacement = false
+
+    // Avalanche circuit breaker (see CorrectionAvalancheGuard) — applies only
+    // to the two fully-automatic correction entry points (instant + word
+    // boundary). Double Shift is intentionally NOT gated by either of these:
+    // it fires only from an individually-timed physical Shift-tap gesture,
+    // and rapid manual re-presses (toggle back and forth on the same word)
+    // are an existing, tested feature with no artificial delay.
+    // internal(set) so KeyboardMonitorHarness-based tests can observe that
+    // the guard is actually wired into the real correction path (not just
+    // exercise the pure struct in isolation).
+    private(set) var avalancheGuard = CorrectionAvalancheGuard()
+    private var autoCorrectionCooldownUntil: CFAbsoluteTime = 0
+    private let autoCorrectionCooldownInterval: CFAbsoluteTime = 0.2
+
+    /// Count of `.tapDisabledByTimeout` events seen this run — a live-log
+    /// counter (task: "защита от повторения") so a regression shows up as a
+    /// rising number, not just individual log lines a human has to notice.
+    private(set) var tapTimeoutDisableCount = 0
+
+    private let callbackWarnThreshold: CFAbsoluteTime = 0.015 // 15ms
     // Set synchronously while handling a keydown we've decided to suppress
     // (its trigger races with our own backspaces — RC-1). Consumed exactly
     // once by the event tap callback right after `handleEvent` returns.
@@ -75,7 +95,18 @@ final class KeyboardMonitor {
     // Last completed word (for Double Shift fallback after space).
     // When user types "ghbdtn " and then hits Double Shift, the main buffer is
     // already empty — we pull keycodes from here instead.
-    private var lastCompletedWord: (keystrokes: [BufferedKeystroke], trailing: String)?
+    // `typedLayout` is the layout that was ACTUALLY active while these
+    // keycodes were typed/produced — captured at the moment this tuple is
+    // written, never re-derived from "whatever is active now" when Double
+    // Shift is eventually pressed (this history has no TTL, so the active
+    // layout can easily have drifted by then — see CLAUDE.md "марже" bug).
+    private var lastCompletedWord: (
+        keystrokes: [BufferedKeystroke], trailing: String, typedLayout: KeyboardLayout,
+        // Layout-dependent symbols typed right before this word (e.g. "/" in
+        // "/exit"), captured alongside so Double Shift's history fallback
+        // can fold them into the SAME transaction — see `pendingLeadingSymbols`.
+        leadingSymbols: [BufferedKeystroke]
+    )?
 
     // Layout-dependent symbols typed with an empty letter buffer (leading
     // "$"/"#"/"@"/"/" etc., e.g. "$GRAF", "/model") belong to whichever word
@@ -90,12 +121,19 @@ final class KeyboardMonitor {
 
     private let spotlightBundleID = "com.apple.Spotlight"
 
-    init(languageDetector: LanguageDetector, textReplacer: TextReplacer,
+    init(languageDetector: LanguageDetector, textReplacer: TextReplacing,
          statsService: StatisticsService, prefsService: PreferencesService,
          exceptionsService: ExceptionsService, yoficatorService: YoficatorService,
          switchUndoManager: SwitchUndoManager, perAppLayoutService: PerAppLayoutService,
-         instantCorrectionAnalyzer: InstantCorrectionAnalyzer) {
+         instantCorrectionAnalyzer: InstantCorrectionAnalyzer,
+         // Defaults to the real system check — only the headless integration
+         // harness in TestRunner.swift overrides it, to stay deterministic
+         // regardless of whatever secure-input state the Mac running the
+         // tests happens to be in (IsSecureEventInputEnabled is a GLOBAL OS
+         // flag, unrelated to this test process).
+         secureInputDetector: SecureInputDetector = SecureInputDetector()) {
         self.languageDetector = languageDetector
+        self.secureInputDetector = secureInputDetector
         self.textReplacer = textReplacer
         self.statsService = statsService
         self.prefsService = prefsService
@@ -121,7 +159,7 @@ final class KeyboardMonitor {
     }
 
     @objc private func appDidActivate() {
-        invalidateEditingContext()
+        invalidateEditingContext(reason: "app-activated")
     }
 
     @objc private func layoutDidChange(_ notification: Notification) {
@@ -132,6 +170,7 @@ final class KeyboardMonitor {
         // context exactly as before (v0.2.0 feature).
         let selfInitiated = (notification.userInfo?[InputSourceManager.selfInitiatedKey] as? Bool) ?? false
         guard !selfInitiated else { return }
+        logContextWipe("layout-changed-externally")
         buffer.clear()
         pendingLeadingSymbols.removeAll()
         lastCompletedWord = nil
@@ -186,7 +225,7 @@ final class KeyboardMonitor {
                 matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
             ) { [weak self] _ in
                 DispatchQueue.main.async {
-                    self?.invalidateEditingContext()
+                    self?.invalidateEditingContext(reason: "mouse-click")
                 }
             }
         }
@@ -231,16 +270,35 @@ final class KeyboardMonitor {
 
     // MARK: - Event Handling
 
-    fileprivate func queueIfReplacementActive(_ event: CGEvent) -> Bool {
+    /// Internal (not fileprivate) so the headless test harness in
+    /// TestRunner.swift can exercise the exact queue/skip contract directly.
+    func queueIfReplacementActive(_ event: CGEvent) -> Bool {
         guard isPaused, !SyntheticEventMarker.shouldBypass(event) else { return false }
+        // Modifier transitions (Shift/Cmd/Option/CapsLock) are deliberately
+        // NEVER queued for replay — root cause of the "avalanche" incident
+        // (CLAUDE.md): a real Shift down/up captured here and replayed later,
+        // all at once right as the pause ends, arrives at
+        // `HotkeyManager.handleFlagsChanged` with squashed, non-human timing.
+        // Its Shift-tap gesture detector times taps in real wall-clock terms
+        // — fed a replayed burst it can register a false Double Shift, which
+        // fires another correction, whose own pause queues the NEXT physical
+        // shift transition, and so on. Each queued keyDown/keyUp already
+        // carries its own flags snapshot (`QueuedUserEvent.flags`), so the
+        // target app doesn't need a correctly-ordered flagsChanged replay to
+        // render correctly — letting real modifier transitions pass through
+        // live (unsuppressed, analyzed with their true timing) costs nothing
+        // and removes the fuse.
+        guard event.type != .flagsChanged else { return false }
         pendingUserEvents.enqueue(QueuedUserEvent(type: event.type, event: event))
         return true
     }
 
     /// Read-and-reset the trigger-suppression flag. Called by the event tap
     /// callback exactly once, right after `handleEvent` returns, so it never
-    /// leaks into an unrelated later event.
-    fileprivate func consumeSuppressCurrentEvent() -> Bool {
+    /// leaks into an unrelated later event. Internal (not fileprivate) so the
+    /// headless integration-test harness in TestRunner.swift can replicate
+    /// the same tap-callback contract without a real CGEventTap.
+    func consumeSuppressCurrentEvent() -> Bool {
         defer { suppressCurrentEvent = false }
         return suppressCurrentEvent
     }
@@ -262,11 +320,16 @@ final class KeyboardMonitor {
             && switchUndoManager.canUndo
     }
 
-    fileprivate func handleEvent(_ proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) {
+    /// Internal (not fileprivate) so the headless integration-test harness in
+    /// TestRunner.swift can feed synthetic CGEvents directly — same code path
+    /// the real CGEventTap callback uses, minus the tap plumbing itself.
+    func handleEvent(_ proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if type == .tapDisabledByTimeout { tapTimeoutDisableCount += 1 }
             DebugLog.shared.log(
                 "KM",
                 "event tap disabled (\(type == .tapDisabledByTimeout ? "timeout" : "userInput")) — re-enabling"
+                    + (type == .tapDisabledByTimeout ? " count=\(tapTimeoutDisableCount)" : "")
             )
             if let tap = eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
@@ -283,6 +346,15 @@ final class KeyboardMonitor {
         // analyzed exactly like live typing (RC-2: a replayed space must still
         // clear the buffer at a word boundary instead of bypassing analysis).
         if SyntheticEventMarker.route(event) == .ours { return }
+
+        // Proof of life for the avalanche circuit breaker: a genuinely
+        // physical event (not one we replayed from the pause queue) resets
+        // the "consecutive auto-fires with no human action" counter. Placed
+        // before any branch that can fire a correction, so it always applies
+        // regardless of which path below eventually runs.
+        if !SyntheticEventMarker.isReplayedUserEvent(event) {
+            avalancheGuard.registerPhysicalEvent()
+        }
 
         if type == .flagsChanged {
             hotkeyManager?.handleFlagsChanged(event)
@@ -332,15 +404,24 @@ final class KeyboardMonitor {
         // Stale buffer eviction — user paused typing too long, old keys don't belong to current word
         let now = CFAbsoluteTimeGetCurrent()
         if (!buffer.isEmpty || !pendingLeadingSymbols.isEmpty) && (now - lastKeyTime) > staleBufferTimeout {
+            logContextWipe("stale-\(Int((now - lastKeyTime).rounded()))s")
             buffer.clear()
             pendingLeadingSymbols.removeAll()
         }
         lastKeyTime = now
 
+        // isSpotlight ONLY gates auto-correction below (canAutoCorrect) — it
+        // never blocks buffering into `buffer`/`lastCompletedWord`, so Double
+        // Shift's buffer/history path already works in Spotlight regardless
+        // of this flag. No written rationale for the skip was found (git
+        // history goes back only to the squashed backup commit, no comment)
+        // — investigated 04.08.2026. Left in place rather than risking
+        // interference with Spotlight's live incremental search without a
+        // real GUI test of that specific behavior.
         let isSpotlight = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == spotlightBundleID
         if InputBuffer.isModifierActive(flags) {
             if InputBuffer.shouldInvalidateEditingContext(forModifiedFlags: flags) {
-                invalidateEditingContext()
+                invalidateEditingContext(reason: "modifier-shortcut")
             }
             return
         }
@@ -427,6 +508,7 @@ final class KeyboardMonitor {
                 triggerEvent: event
             )
         } else {
+            logContextWipe("navigation-key-\(keycode)")
             switchUndoManager.invalidate()
             autoLearnTracker.cancel()
             buffer.clear()
@@ -457,8 +539,13 @@ final class KeyboardMonitor {
 
         if replacementStarted {
             lastCompletedWord = nil
-        } else if keepForManualSwitch, !captured.isEmpty, let trailing {
-            lastCompletedWord = (captured, trailing)
+        } else if keepForManualSwitch, !captured.isEmpty, let trailing,
+                  let typedLayout = languageDetector.inputSourceManager.currentLayout {
+            // Captured NOW, right as the word completes — this IS the layout
+            // it was typed on (any layout change mid-word would already have
+            // cleared `buffer` via `layoutDidChange`). `pendingLeadingSymbols`
+            // is read here, BEFORE it's cleared below.
+            lastCompletedWord = (captured, trailing, typedLayout, pendingLeadingSymbols)
         } else {
             lastCompletedWord = nil
         }
@@ -506,7 +593,10 @@ final class KeyboardMonitor {
             if let yo = yoficatorService.yoficate(correctedWord) { correctedWord = yo }
         }
 
+        guard canFireAutoCorrection(branch: "instant correction") else { return }
+
         isPaused = true
+        avalancheGuard.recordFired()
         instantCorrectionGate.markCorrected()
         // Same leading-symbol fold-in as the boundary path (processCurrentWord):
         // a "$"/"#"/"@"/"/" typed right before this word is on screen in the
@@ -532,7 +622,8 @@ final class KeyboardMonitor {
             length: length,
             replacement: runReplacement,
             targetLayout: result.layout,
-            trailing: nil
+            trailing: nil,
+            trailingAlreadyOnScreen: true
         ) { [weak self] outcome in
             guard let self else { return }
             switch outcome {
@@ -553,7 +644,7 @@ final class KeyboardMonitor {
                     )
                 }
                 self.statsService.recordAutoSwitch()
-                SoundService.shared.playSwitch(prefsService: self.prefsService)
+                SoundService.shared.playCorrection(prefsService: self.prefsService)
                 NotificationCenter.default.post(name: .statsUpdated, object: nil)
                 DebugLog.shared.log(
                     "KM",
@@ -570,12 +661,48 @@ final class KeyboardMonitor {
         }
     }
 
-    private func invalidateEditingContext() {
+    /// Shared circuit-breaker gate for the two fully-automatic correction
+    /// entry points (instant + word boundary) — NOT used by Double Shift,
+    /// see `avalancheGuard`'s doc comment. Checks the post-replacement
+    /// cooldown first (quiet — expected to routinely apply right after any
+    /// correction while typing fast) and the avalanche counter second (logs
+    /// loudly — tripping it is always an anomaly, never normal typing).
+    private func canFireAutoCorrection(branch: String) -> Bool {
+        guard CFAbsoluteTimeGetCurrent() >= autoCorrectionCooldownUntil else { return false }
+        guard avalancheGuard.canFire else {
+            DebugLog.shared.log(
+                "KM",
+                "ALARM: correction avalanche guard tripped"
+                    + " (\(avalancheGuard.consecutiveWithoutPhysicalInput) auto-fires with no physical input)"
+                    + " — suppressing \(branch)"
+            )
+            return false
+        }
+        return true
+    }
+
+    /// Every wipe of the typed-word model is logged when it actually discards
+    /// something. Without this the model can silently fall behind the screen
+    /// and the next correction backspaces the wrong number of characters —
+    /// and the log gives no way to tell which of the wipe points did it (this
+    /// cost us a whole diagnosis round on the "./compact" report: the buffer
+    /// held 4 characters while 5+ were on screen, and nothing said why).
+    private func logContextWipe(_ reason: String) {
+        guard !buffer.isEmpty || !pendingLeadingSymbols.isEmpty || lastCompletedWord != nil else { return }
+        DebugLog.shared.log(
+            "KM",
+            "buffer wiped: reason=\(reason) len=\(buffer.currentWord().count)"
+                + " lead=\(pendingLeadingSymbols.count) history=\(lastCompletedWord == nil ? 0 : 1)"
+        )
+    }
+
+    private func invalidateEditingContext(reason: String = "unspecified") {
         if isPaused {
             invalidateAfterReplacement = true
             textReplacer.cancelCurrentReplacement()
             return
         }
+        logContextWipe(reason)
         buffer.clear()
         pendingLeadingSymbols.removeAll()
         lastCompletedWord = nil
@@ -592,74 +719,111 @@ final class KeyboardMonitor {
         guard !isPaused, LicenseService.shared.isEntitled else { return false }
         var keystrokes = buffer.currentWord()
         var trailing: String? = nil
+        // Layout-dependent symbol(s) typed right before this word (e.g. "/"
+        // in "/exit", "$" in "$GRAF") — tracked separately from `keystrokes`
+        // exactly like the boundary/instant-correction paths, and folded
+        // into the SAME transaction below instead of being silently left
+        // un-converted (CLAUDE.md ".yexit" bug: this path used to ignore
+        // `pendingLeadingSymbols` entirely).
+        var leadingSymbols = pendingLeadingSymbols
         var source = "buffer"
+        // The word must be scored against the layout it was ACTUALLY typed
+        // on, never "whatever is active right now": for a word still live in
+        // `buffer` that IS the layout active right now (no drift possible —
+        // any layout change clears the buffer), but for a word pulled from
+        // `lastCompletedWord` history (no TTL) the active layout can easily
+        // have drifted since typing — see CLAUDE.md "марже" bug.
+        var typedLayout = languageDetector.inputSourceManager.currentLayout
 
         // Fallback: buffer was cleared by a trailing space/punct — use the
         // history slot we captured at the word boundary. No TTL: as long as
         // the word hasn't been replaced by a new one, Double Shift must work.
         // History is invalidated only when a new word starts or after a
         // successful conversion (line below this function).
-        if keystrokes.count < 2 {
+        // Only an EMPTY buffer falls back to history. A single live keystroke
+        // is a word the user is looking at right now ("b" → "и"), and it must
+        // win over an older history slot — owner hit exactly this: five Double
+        // Shifts on a lone "b" did nothing (log 07:49:54-57, all five
+        // "no selection/buffer/history/caret word").
+        if keystrokes.isEmpty {
             if let last = lastCompletedWord, last.keystrokes.count >= 2 {
                 keystrokes = last.keystrokes
                 trailing = last.trailing
+                typedLayout = last.typedLayout
+                leadingSymbols = last.leadingSymbols
                 source = "history"
             }
         }
 
-        guard keystrokes.count >= 2 else { return false }
-
-        let layouts = languageDetector.activeLayouts
-        guard layouts.count >= 2,
-              let currentLayout = languageDetector.inputSourceManager.currentLayout,
-              layouts.contains(where: { $0.id == currentLayout.id }) else { return false }
-
-        // Decide target: if detector finds a valid other layout, use it.
-        // Otherwise fall back to "the other layout" (force swap).
-        var targetLayout: KeyboardLayout
-        var correctedWord: String
-        let result = languageDetector.detect(keystrokes: keystrokes)
-        switch result {
-        case .switchTo(let layout, let word):
-            targetLayout = layout
-            correctedWord = word
-        case .noSwitch:
-            guard let other = layouts.first(where: { $0.id != currentLayout.id }) else { return false }
-            targetLayout = other
-            correctedWord = languageDetector.inputSourceManager.convertKeystrokes(keystrokes, toLayout: other)
-            guard !correctedWord.isEmpty else { return false }
+        // >= 1, not >= 2: single-letter words are ordinary Russian (и, а, в, к,
+        // с, я, о, у). This threshold is lifted for the EXPLICIT Double Shift
+        // gesture only — automatic correction keeps its own, higher bar, where
+        // a false positive would rewrite a command-line flag (`rm -f` → `rm -а`).
+        guard keystrokes.count >= 1, let currentLayout = typedLayout else { return false }
+        // `swapTarget` NEVER sees `leadingSymbols` — only the letter core is
+        // scored, exactly as before this fix, so the calibrated decision is
+        // unaffected by a symbol sitting in front of the word.
+        guard let swap = languageDetector.swapTarget(keystrokes: keystrokes, typedLayout: currentLayout) else {
+            return false
         }
+        let targetLayout = swap.layout
+        let correctedWord = swap.word
 
-        let originalWord = languageDetector.lastConvertedWord(keystrokes: keystrokes) ?? ""
+        let originalWordOnly = languageDetector.lastConvertedWord(keystrokes: keystrokes) ?? ""
+        let leadingOriginalText = leadingSymbols.isEmpty ? ""
+            : languageDetector.inputSourceManager.convertKeystrokes(leadingSymbols, toLayout: currentLayout)
+        let leadingCorrectedText = leadingSymbols.isEmpty ? ""
+            : languageDetector.inputSourceManager.convertKeystrokes(leadingSymbols, toLayout: targetLayout)
+        let runReplacement = leadingCorrectedText + correctedWord
+        let originalWord = leadingOriginalText + originalWordOnly
 
         isPaused = true
-        let length = keystrokes.count
+        let length = leadingSymbols.count + keystrokes.count
 
         textReplacer.replaceCurrentWord(
             length: length,
-            replacement: correctedWord,
+            replacement: runReplacement,
             targetLayout: targetLayout,
-            trailing: trailing
+            trailing: trailing,
+            trailingAlreadyOnScreen: true
         ) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success:
                 self.switchUndoManager.record(
-                    originalKeycodes: keystrokes.map(\.keycode),
+                    originalKeycodes: leadingSymbols.map(\.keycode) + keystrokes.map(\.keycode),
                     originalWord: originalWord,
-                    correctedWord: correctedWord,
+                    correctedWord: runReplacement,
                     trailing: trailing,
                     originalLayoutID: currentLayout.id,
                     targetLayoutID: targetLayout.id
                 )
                 self.buffer.clear()
-                self.lastCompletedWord = nil
+                // Only the LIVE pendingLeadingSymbols run was actually
+                // consumed above when `source == "buffer"` — the history
+                // path reused a snapshot already captured earlier, so it
+                // must not clobber a leading symbol the user may have
+                // started typing for the NEXT word in the meantime.
+                if source == "buffer" {
+                    self.pendingLeadingSymbols.removeAll()
+                }
+                // Re-arm history with the JUST-PRODUCED word (leading symbol
+                // included), tagged with the layout it's now displayed in —
+                // NOT cleared to nil. A second, immediate Double Shift on the
+                // same word finds it here; since the scorer correctly
+                // refuses to switch away from a now-good word, `swapTarget`'s
+                // forced-fallback branch flips it straight back (toggle),
+                // instead of falling through to caret-word/Undo (which used
+                // to make it look like the feature needed 2-3 presses to
+                // "finally" work).
+                self.lastCompletedWord = (keystrokes, trailing ?? "", targetLayout, leadingSymbols)
                 self.statsService.recordOptionSwitch()
-                SoundService.shared.playSwitch(prefsService: self.prefsService)
+                SoundService.shared.playSwitch(targetLanguageCode: targetLayout.languageCode, prefsService: self.prefsService)
                 NotificationCenter.default.post(name: .statsUpdated, object: nil)
                 DebugLog.shared.log(
                     "KM",
-                    "doubleShift via \(source): \(currentLayout.languageCode)→\(targetLayout.languageCode) len=\(length) trail=\(trailing ?? "∅")"
+                    "doubleShift via \(source): \(currentLayout.languageCode)→\(targetLayout.languageCode)"
+                        + " len=\(length) lead=\(leadingSymbols.count) trail=\(trailing ?? "∅")"
                 )
             case .layoutSwitchFailed:
                 DebugLog.shared.log("KM", "doubleShift aborted: layout switch verification failed")
@@ -686,7 +850,7 @@ final class KeyboardMonitor {
         let keystrokes = buffer.currentWord()
         // Require 3+ letters: 2-letter "words" (it/аа/oo) give too many false positives.
         guard keystrokes.count >= 3 else {
-            DebugLog.shared.log("KM", "word too short (len=\(keystrokes.count))")
+            DebugLog.shared.log("KM", "word too short (len=\(keystrokes.count))", level: .verbose)
             return false
         }
 
@@ -695,7 +859,7 @@ final class KeyboardMonitor {
 
         switch result {
         case .noSwitch:
-            DebugLog.shared.log("KM", "detect: noSwitch len=\(keystrokes.count) cur=\(currentLang)")
+            DebugLog.shared.log("KM", "detect: noSwitch len=\(keystrokes.count) cur=\(currentLang)", level: .verbose)
             if prefsService.isYoficatorEnabled {
                 return applyYoficator(keystrokes: keystrokes, trigger: trigger)
             }
@@ -735,12 +899,15 @@ final class KeyboardMonitor {
                 : languageDetector.inputSourceManager.convertKeystrokes(leadingSymbols, toLayout: layout)
             let runReplacement = leadingCorrectedText + correctedWord
 
+            guard canFireAutoCorrection(branch: "boundary correction") else { return false }
+
             // The word itself is already on screen (typed letter-by-letter
             // normally), but the trigger that just completed it (space/
             // punctuation) hasn't been delivered yet — headInsert tap runs
             // before delivery. Suppress it so it can never race our own
             // backspaces (RC-1); it's retyped as part of the payload instead.
             isPaused = true
+            avalancheGuard.recordFired()
             suppressCurrentEvent = true
             pendingUserEvents.enqueueFront(QueuedUserEvent(type: .keyDown, event: triggerEvent))
             textReplacer.replaceCurrentWord(
@@ -771,7 +938,7 @@ final class KeyboardMonitor {
                         )
                     }
                     self.statsService.recordAutoSwitch()
-                    SoundService.shared.playSwitch(prefsService: self.prefsService)
+                    SoundService.shared.playCorrection(prefsService: self.prefsService)
                     NotificationCenter.default.post(name: .statsUpdated, object: nil)
                     DebugLog.shared.log(
                         "KM",
@@ -780,7 +947,7 @@ final class KeyboardMonitor {
                     )
                 case .layoutSwitchFailed:
                     if let trigger {
-                        self.lastCompletedWord = (keystrokes, trigger)
+                        self.lastCompletedWord = (keystrokes, trigger, sourceLayout, leadingSymbols)
                     }
                     DebugLog.shared.log("KM", "correction aborted: layout switch verification failed")
                 case .cancelled:
@@ -802,7 +969,8 @@ final class KeyboardMonitor {
                 length: keystrokes.count,
                 replacement: yo,
                 targetLayout: currentLayout,
-                trailing: trigger
+                trailing: trigger,
+                trailingAlreadyOnScreen: true
             ) { [weak self] result in
                 guard let self else { return }
                 switch result {
@@ -843,7 +1011,8 @@ final class KeyboardMonitor {
             length: correction.correctedWord.count,
             replacement: correction.originalWord,
             targetLayout: originalLayout,
-            trailing: correction.trailing
+            trailing: correction.trailing,
+            trailingAlreadyOnScreen: true
         ) { [weak self] result in
             guard let self else { return }
             switch result {
@@ -851,7 +1020,7 @@ final class KeyboardMonitor {
                 self.buffer.clear()
                 self.lastCompletedWord = nil
                 self.autoLearnTracker.cancel()
-                SoundService.shared.playSwitch(prefsService: self.prefsService)
+                SoundService.shared.playSwitch(targetLanguageCode: originalLayout.languageCode, prefsService: self.prefsService)
                 DebugLog.shared.log("KM", "undo applied with trailing preserved")
             case .layoutSwitchFailed:
                 self.switchUndoManager.record(
@@ -873,14 +1042,56 @@ final class KeyboardMonitor {
 
     private func finishReplacement() {
         isPaused = false
+        // Applies to instant/boundary auto-correction only (see
+        // `canFireAutoCorrection`) — set unconditionally here (every
+        // replacement path funnels through this one function) so even a
+        // manual Double Shift/Undo/Yoficator run imposes the same brief
+        // settling window before the NEXT automatic correction is allowed.
+        autoCorrectionCooldownUntil = CFAbsoluteTimeGetCurrent() + autoCorrectionCooldownInterval
         if invalidateAfterReplacement {
             invalidateAfterReplacement = false
             invalidateEditingContext()
         }
         for queued in pendingUserEvents.drain() {
-            guard let event = queued.makeEvent() else { continue }
+            guard let event = queued.makeEvent() else {
+                // No fallback exists if CGEvent construction itself fails
+                // system-wide — but silently `continue`-ing here used to
+                // drop the character with zero trace. Logging at least turns
+                // an invisible loss into a diagnosable one (task: "терять
+                // символы нельзя" — this is the honest floor when recovery
+                // genuinely isn't possible).
+                DebugLog.shared.log("KM", "WARNING: dropped a queued keystroke — CGEvent construction failed")
+                continue
+            }
             event.post(tap: .cgAnnotatedSessionEventTap)
         }
+    }
+
+    // MARK: - Callback-duration watchdog
+
+    /// Pure threshold decision — extracted so it's directly unit-testable
+    /// without needing to actually stall the real CGEventTap callback (a
+    /// timing test here would be exactly the kind of flaky test the
+    /// structural-guard tests elsewhere in this file are trying to avoid).
+    static func shouldWarnSlowCallback(_ seconds: CFAbsoluteTime, threshold: CFAbsoluteTime) -> Bool {
+        seconds > threshold
+    }
+
+    /// Called by `eventTapCallback` right after every dispatch. Not private
+    /// so `KeyboardMonitorHarness` can exercise the same contract
+    /// deterministically. Logs which event type ran and whether it ended up
+    /// suppressing/replacing anything — the closest to "which branch" we can
+    /// get without instrumenting every internal branch individually.
+    func recordCallbackDuration(
+        _ seconds: CFAbsoluteTime, type: CGEventType, suppressed: Bool
+    ) {
+        guard Self.shouldWarnSlowCallback(seconds, threshold: callbackWarnThreshold) else { return }
+        let ms = Int((seconds * 1000).rounded())
+        DebugLog.shared.log(
+            "KM",
+            "WARNING: slow tap callback \(ms)ms type=\(type.rawValue) suppressed=\(suppressed)"
+                + " — regression risk (macOS disables the tap on repeated timeouts)"
+        )
     }
 }
 
@@ -895,8 +1106,11 @@ private func eventTapCallback(
         return Unmanaged.passUnretained(event)
     }
     if !isDisableNotification && monitor.queueIfReplacementActive(event) { return nil }
+    let callbackStart = CFAbsoluteTimeGetCurrent()
     let suppressHandledShortcut = monitor.handlesShortcut(type: type, event: event)
     monitor.handleEvent(proxy, type: type, event: event)
     let suppressTrigger = monitor.consumeSuppressCurrentEvent()
-    return (suppressHandledShortcut || suppressTrigger) ? nil : Unmanaged.passUnretained(event)
+    let suppressed = suppressHandledShortcut || suppressTrigger
+    monitor.recordCallbackDuration(CFAbsoluteTimeGetCurrent() - callbackStart, type: type, suppressed: suppressed)
+    return suppressed ? nil : Unmanaged.passUnretained(event)
 }

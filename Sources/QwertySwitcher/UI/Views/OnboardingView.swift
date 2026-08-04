@@ -3,9 +3,17 @@ import AppKit
 import Combine
 
 struct OnboardingView: View {
-    @StateObject private var watcher = PermissionsWatcher()
+    /// Owned by OnboardingWindowController, not by the view: the window must
+    /// keep polling even while it is buried under System Settings.
+    @ObservedObject var watcher: PermissionsWatcher
     @Environment(\.appTheme) private var theme
     let onContinue: () -> Void
+    let onGrantAccessibility: () -> Void
+    let onGrantInputMonitoring: () -> Void
+    let onCheckAgain: () -> Void
+    let onRestart: () -> Void
+
+    private var step: OnboardingStep { watcher.step }
 
     var body: some View {
         ZStack {
@@ -44,45 +52,50 @@ struct OnboardingView: View {
                         title: "Универсальный доступ",
                         subtitle: "для перехвата нажатий и исправления текста",
                         granted: watcher.hasAccessibility,
-                        openAction: {
-                            let perms = PermissionsService()
-                            perms.requestAccessibility()
-                            perms.openAccessibilitySettings()
-                        }
+                        openAction: onGrantAccessibility
                     )
 
                     permissionRow(
                         title: "Input Monitoring",
                         subtitle: "для чтения кодов клавиш",
                         granted: watcher.hasInputMonitoring,
-                        openAction: {
-                            let perms = PermissionsService()
-                            perms.requestInputMonitoring()
-                            perms.openInputMonitoringSettings()
-                        }
+                        openAction: onGrantInputMonitoring
                     )
 
-                    HStack(spacing: 8) {
-                        Image(systemName: watcher.hasAll ? "checkmark.seal.fill" : "info.circle")
-                            .foregroundColor(watcher.hasAll ? theme.accentGreen : theme.textSecondary)
-                        Text(watcher.hasAll
-                             ? "Все разрешения на месте — нажми «Далее»"
-                             : "Выдай разрешения — кнопка «Далее» активируется сама")
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: statusIcon)
+                            .foregroundColor(statusColor)
+                        Text(OnboardingStateMachine.hint(for: step))
                             .font(.appText(11))
-                            .foregroundColor(watcher.hasAll ? theme.accentGreen : theme.textSecondary)
+                            .foregroundColor(statusColor)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
                     }
                     .padding(.top, 4)
 
+                    if OnboardingStateMachine.offersRestart(step) {
+                        Text("Перезапуск нужен только в этом случае: разрешения уже стоят, "
+                             + "но система не отдала перехват текущему процессу. "
+                             + "Обычно Qwerty Switcher подхватывает разрешение сам за пару секунд.")
+                            .font(.appText(10))
+                            .foregroundColor(theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
                     Spacer(minLength: 0)
 
-                    HStack {
+                    HStack(spacing: 8) {
+                        AppButton(title: "Проверить снова", style: .ghost, action: onCheckAgain)
+                        if OnboardingStateMachine.offersRestart(step) {
+                            AppButton(title: "Перезапустить приложение", style: .secondary, action: onRestart)
+                        }
                         Spacer()
                         AppButton(
                             title: "Далее",
-                            style: watcher.hasAll ? .primary : .disabled,
+                            style: canFinish ? .primary : .disabled,
                             action: onContinue
                         )
-                        .disabled(!watcher.hasAll)
+                        .disabled(!canFinish)
                     }
                     .padding(.top, 6)
                 }
@@ -90,9 +103,26 @@ struct OnboardingView: View {
                 .padding(.bottom, 20)
             }
         }
-        .frame(width: 480, height: 380)
-        .onAppear { watcher.startPolling() }
-        .onDisappear { watcher.stopPolling() }
+        .frame(width: 480, height: 420)
+    }
+
+    private var canFinish: Bool { OnboardingStateMachine.canFinish(step) }
+
+    private var statusIcon: String {
+        switch step {
+        case .ready:                    return "checkmark.seal.fill"
+        case .stalled:                  return "exclamationmark.triangle.fill"
+        case .verifying:                return "arrow.triangle.2.circlepath"
+        default:                        return "info.circle"
+        }
+    }
+
+    private var statusColor: Color {
+        switch step {
+        case .ready:   return theme.accentGreen
+        case .stalled: return theme.accent
+        default:       return theme.textSecondary
+        }
     }
 
     private func permissionRow(title: String, subtitle: String, granted: Bool, openAction: @escaping () -> Void) -> some View {
@@ -137,20 +167,47 @@ struct OnboardingView: View {
 final class PermissionsWatcher: ObservableObject {
     @Published var hasAccessibility: Bool = false
     @Published var hasInputMonitoring: Bool = false
+    @Published var isInterceptionRunning: Bool = false
     @Published var isPolling: Bool = false
+    /// Published rather than computed: the `.verifying` → `.stalled` edge is
+    /// driven by elapsed time alone, so nothing else would re-render the view
+    /// when it flips. Assigned only on change — no per-second redraws.
+    @Published private(set) var step: OnboardingStep = .grantAccessibility
 
     private var timer: Timer?
     private let service = PermissionsService()
+    private let interceptionRunning: () -> Bool
+    /// When both grants were first observed — feeds the `.verifying` → `.stalled`
+    /// transition so "перезапустить" only appears when it would actually help.
+    private var allGrantedAt: Date?
+
+    init(interceptionRunning: @escaping () -> Bool = { false }) {
+        self.interceptionRunning = interceptionRunning
+    }
 
     var hasAll: Bool { hasAccessibility && hasInputMonitoring }
 
+    var status: OnboardingStatus {
+        OnboardingStatus(
+            hasAccessibility: hasAccessibility,
+            hasInputMonitoring: hasInputMonitoring,
+            isInterceptionRunning: isInterceptionRunning,
+            secondsSinceAllGranted: allGrantedAt.map { Date().timeIntervalSince($0) }
+        )
+    }
+
     func startPolling() {
         refresh()
+        guard timer == nil else { return }
         isPolling = true
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        // `.common` mode, like AppDelegate.startHealthPolling: a `.default`-mode
+        // timer freezes during menu tracking, live resize and modal panels —
+        // exactly the moments a permission grant lands.
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.refresh()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
     func stopPolling() {
@@ -159,11 +216,21 @@ final class PermissionsWatcher: ObservableObject {
         timer = nil
     }
 
-    private func refresh() {
+    /// Public so the "Проверить снова" button can force a read between ticks.
+    func refresh() {
         let a = service.hasAccessibility
         let i = service.hasInputMonitoring
+        let running = interceptionRunning()
         if a != hasAccessibility { hasAccessibility = a }
         if i != hasInputMonitoring { hasInputMonitoring = i }
+        if running != isInterceptionRunning { isInterceptionRunning = running }
+        if a && i {
+            if allGrantedAt == nil { allGrantedAt = Date() }
+        } else {
+            allGrantedAt = nil
+        }
+        let next = OnboardingStateMachine.step(for: status)
+        if next != step { step = next }
     }
 }
 

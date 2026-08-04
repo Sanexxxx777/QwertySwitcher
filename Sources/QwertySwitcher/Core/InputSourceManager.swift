@@ -18,6 +18,42 @@ final class InputSourceManager {
     // fires (observed 2-40ms delay — RC-3).
     private var pendingSelfSwitchID: String?
 
+    // Test isolation (incident 05.08.2026): `switchTo` calls
+    // `TISSelectInputSource`, which changes the Mac's REAL active keyboard
+    // layout process-wide — it isn't scoped to whichever binary called it.
+    // The test suite drives a real `KeyboardMonitor` through dozens of ru/en
+    // switches (`KeyboardMonitorIntegrationTests` and friends), and a live
+    // test run mid-typing corrupted the owner's actual input
+    // (`~/Library/Logs/QwertySwitcher/debug.log`, 07:50:23–07:50:29 — "даже"
+    // typed as "дfже"). Tied directly to the `--test` launch argument
+    // (already how `main.swift` picks the headless test path) rather than to
+    // an env var someone could forget to export — a plain `--test` run is
+    // ALWAYS safe by default, with no cooperation required from
+    // `Scripts/test.sh`. While simulated, `switchTo` records the target in
+    // `simulatedLayoutID` instead of calling TIS, and `currentLayout` reads
+    // that simulated value back — so the whole detect/correct/verify flow
+    // behaves exactly as it always did (same read-after-write it relies on),
+    // just without ever touching the real system layout. A normal (non
+    // `--test`) launch is completely unaffected — production always
+    // switches for real.
+    private static var isTestBinary: Bool {
+        CommandLine.arguments.contains("--test")
+    }
+    /// Explicit, rare escape hatch for a manual full-fidelity run that
+    /// deliberately wants the real TIS integration exercised — OFF by
+    /// default, and `TestRunner.run()` prints a loud warning when it's set.
+    private static var realLayoutSwitchOptedIn: Bool {
+        ProcessInfo.processInfo.environment["QSW_ALLOW_REAL_LAYOUT_SWITCH"] == "1"
+    }
+    private static var layoutSwitchingIsSimulated: Bool {
+        isTestBinary && !realLayoutSwitchOptedIn
+    }
+    /// Read by `TestRunner.run()` to print the warning banner mentioned above.
+    static var isTestBinaryWithRealLayoutSwitchEnabled: Bool {
+        isTestBinary && realLayoutSwitchOptedIn
+    }
+    private var simulatedLayoutID: String?
+
     init() {
         reloadLayouts()
         DistributedNotificationCenter.default().addObserver(
@@ -33,6 +69,9 @@ final class InputSourceManager {
     }
 
     var currentLayout: KeyboardLayout? {
+        if Self.layoutSwitchingIsSimulated, let simulatedLayoutID {
+            return layoutsByID[simulatedLayoutID]
+        }
         guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
               let id = getSourceID(source) else { return nil }
         return layoutsByID[id]
@@ -75,6 +114,10 @@ final class InputSourceManager {
 
     @discardableResult
     func switchTo(_ layout: KeyboardLayout) -> Bool {
+        if Self.layoutSwitchingIsSimulated {
+            simulatedLayoutID = layout.id
+            return true
+        }
         pendingSelfSwitchID = layout.id
         let status = TISSelectInputSource(layout.source)
         if status != noErr {

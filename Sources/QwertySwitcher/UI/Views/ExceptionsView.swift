@@ -148,10 +148,13 @@ struct ExceptionsView: View {
 
     private var autoLearnedTab: some View {
         VStack(spacing: 8) {
-            HStack {
+            HStack(spacing: 4) {
                 Text("Запомненные исправления:")
                     .font(.caption)
                     .foregroundColor(theme.textSecondary)
+                HelpIcon(text: "Слово попадает сюда автоматически: если ты стираешь наше "
+                    + "исправление backspace'ом и вводишь заново то же самое, Qwerty Switcher "
+                    + "больше не будет его трогать.")
                 Spacer()
                 if !viewModel.autoLearned.isEmpty {
                     Button("Очистить") { withAnimation { viewModel.clearAutoLearned() } }
