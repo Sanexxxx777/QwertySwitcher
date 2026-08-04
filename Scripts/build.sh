@@ -104,6 +104,7 @@ if [ -d "$PROJECT_DIR/Resources/Fonts" ]; then
     cp "$PROJECT_DIR/Resources/Fonts/"*.ttf "$APP_BUNDLE/Contents/Resources/Fonts/" 2>/dev/null || true
 fi
 
+
 # ── 3. Code sign ──
 echo "[3/4] Code signing ($MODE)..."
 

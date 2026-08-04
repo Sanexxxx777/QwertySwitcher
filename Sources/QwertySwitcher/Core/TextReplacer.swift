@@ -18,6 +18,19 @@ struct TextReplacementPlan: Equatable {
     var payload: String { replacement + (trailing ?? "") }
 }
 
+/// Abstraction around "send backspaces + retype text to the focused app" —
+/// the only side-effecting boundary between KeyboardMonitor's correction
+/// logic and the live system (real CGEvent posting vs. a deterministic
+/// in-memory "screen buffer" model used by the integration test harness in
+/// TestRunner.swift). `TextReplacer` conforms via the extension below with
+/// no behavior change; production code paths are untouched.
+protocol TextReplacing: AnyObject {
+    func replaceCurrentWord(length: Int, replacement: String, targetLayout: KeyboardLayout,
+                            trailing: String?, trailingAlreadyOnScreen: Bool,
+                            completion: @escaping (TextReplacer.Result) -> Void)
+    func cancelCurrentReplacement()
+}
+
 final class ReplacementCancellationToken {
     private let lock = NSLock()
     private var cancelled = false
@@ -121,6 +134,7 @@ final class TextReplacer {
 
     // MARK: - Private
 
+
     private func complete(
         _ result: Result,
         cancellation: ReplacementCancellationToken,
@@ -180,3 +194,5 @@ final class TextReplacer {
         return !cancellation.isCancelled
     }
 }
+
+extension TextReplacer: TextReplacing {}

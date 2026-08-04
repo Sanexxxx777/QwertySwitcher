@@ -98,14 +98,21 @@ final class InstantCorrectionAnalyzer {
     // MARK: - Scoring (Dictionary(+SpellCheck confirm) / bundled-Prefix + N-gram + Frequency)
 
     private func wordLevelScore(_ lowered: String, language: String) -> Int {
-        // `isSpellCheckerValid` is deliberately NOT used here: macOS's
-        // checkSpelling is unreliable for short, unrecognized tokens — it
-        // accepts nonsense like "fdef"/"zzzz"/"bbbb" as correctly-spelled
+        // `isSpellCheckerValid`/`contains`'s spellcheck confirmation are
+        // deliberately NOT used here — for two independent reasons. (1)
+        // macOS's checkSpelling is unreliable for short, unrecognized tokens
+        // — it accepts nonsense like "fdef"/"zzzz"/"bbbb" as correctly-spelled
         // English (verified empirically), which would make instant
-        // correction misfire on any mid-word text that happens to type
-        // those letters. `contains` (bloom + spellcheck together) and the
-        // bundled-dictionary prefix index are both deterministic.
-        if dictionary.contains(lowered, language: language) {
+        // correction misfire on any mid-word text that happens to type those
+        // letters. (2) `evaluate` runs on EVERY buffered keystroke once the
+        // word reaches `minLength` — calling `NSSpellChecker.checkSpelling`
+        // synchronously from there (as `contains` used to) put a 100+ms-worst-
+        // case IPC call on essentially every letter of ordinary typing,
+        // which is what disabled the event tap and dropped keystrokes
+        // (CLAUDE.md perf audit). `mightContain` (bloom-only) and the
+        // bundled-dictionary prefix index are both deterministic AND
+        // in-memory-only — safe for this hot path.
+        if dictionary.mightContain(lowered, language: language) {
             return 80 + min(20, lowered.count * 2) // complete, confirmed word
         }
         if dictionary.isPrefixOfBundledWord(lowered, language: language) {

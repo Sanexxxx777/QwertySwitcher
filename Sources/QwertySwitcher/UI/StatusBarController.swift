@@ -11,11 +11,15 @@ final class StatusBarController {
     private let inputSourceManager: InputSourceManager
     private let perAppLayoutService: PerAppLayoutService
     private let autoStartService = AutoStartService()
-    private let permissionsService = PermissionsService()
     private var mainWindow: NSWindow?
     private var exceptionsWindow: NSWindow?
     private var aboutWindow: NSWindow?
     private var licenseWindow: NSWindow?
+    /// Set by AppDelegate. The one guaranteed way back to onboarding after the
+    /// window was closed — without it a dismissed onboarding is lost until the
+    /// app is restarted (the app is `.accessory`, so there is no Dock/Cmd+Tab
+    /// entry to click).
+    var onOpenPermissions: (() -> Void)?
 
     init(statsService: StatisticsService, prefsService: PreferencesService,
          exceptionsService: ExceptionsService, keyboardMonitor: KeyboardMonitor,
@@ -67,59 +71,97 @@ final class StatusBarController {
     private func updateStatusIcon() {
         guard let button = statusItem.button else { return }
         let languageCode = (inputSourceManager.currentLayout?.languageCode ?? "?").uppercased()
-        let licensed = LicenseService.shared.isEntitled
         let code = keyboardMonitor.health == .running ? languageCode : "!"
-        let paused = !prefsService.isAutoSwitchEnabled || keyboardMonitor.health != .running || !licensed
-        button.image = Self.makeStatusImage(label: code, paused: paused)
+        let reason = currentBlockReason()
+        button.image = Self.makeStatusImage(label: code, reason: reason)
         button.imagePosition = .imageOnly
         button.title = ""
-        if keyboardMonitor.health != .running {
-            button.toolTip = "\(AppIdentity.displayName) · \(keyboardMonitor.health.title)"
-        } else if !licensed {
-            button.toolTip = "\(AppIdentity.displayName) · подписка истекла — активируйте ключ"
+        if let title = reason.title {
+            button.toolTip = "\(AppIdentity.displayName) · \(title)"
         } else {
-            button.toolTip = paused
-                ? "\(AppIdentity.displayName) · автопереключение отключено"
-                : "\(AppIdentity.displayName) · \(languageCode) · автопереключение включено"
+            button.toolTip = "\(AppIdentity.displayName) · \(languageCode) · автопереключение включено"
         }
     }
 
-    /// Monochrome template image — rounded rect outline + language code inside.
-    /// `isTemplate = true` tells AppKit to recolor it to match the menu bar
-    /// (white on dark, black on light), matching native menu bar aesthetics.
-    private static func makeStatusImage(label: String, paused: Bool) -> NSImage {
+    /// Single source of truth (see `SwitchBlockReason`) for the badge color,
+    /// the menu's diagnostic line and the tooltip. The app-name refinement
+    /// for secure input is only looked up when actually needed — this runs
+    /// on notification-driven refreshes (≤ every ~500ms via the health
+    /// timer), never from the keystroke hot path.
+    private func currentBlockReason() -> SwitchBlockReason {
+        SwitchBlockReason.resolve(
+            health: keyboardMonitor.health,
+            isAutoSwitchEnabled: prefsService.isAutoSwitchEnabled,
+            isEntitled: LicenseService.shared.isEntitled,
+            secureInputAppName: keyboardMonitor.health == .secureInput ? secureInputAppName() : nil
+        )
+    }
+
+    /// Best-effort label for whichever app is holding secure input —
+    /// approximated as the frontmost app, since `IsSecureEventInputEnabled()`
+    /// is a session-wide WindowServer flag that in practice is only ever set
+    /// by the app owning the currently focused secure field. Never guessed
+    /// beyond that: if there's no frontmost app, the menu line falls back to
+    /// the generic "Ввод пароля" wording (`SwitchBlockReason.title`, nil case).
+    private func secureInputAppName() -> String? {
+        NSWorkspace.shared.frontmostApplication?.localizedName
+    }
+
+    /// Composite (non-template) image: a "keycap" chip with the language
+    /// code punched out as negative space, plus a fixed-color status dot in
+    /// the bottom-right corner. NOT a template image on purpose — template
+    /// rendering strips color and keeps only alpha, which would make the
+    /// green/red dot invisible (it would be recolored to match the menu bar
+    /// like everything else). Instead the keycap itself is filled with
+    /// `NSColor.labelColor` — a dynamic system color that AppKit re-resolves
+    /// every time this drawing handler runs, so it still tracks light/dark
+    /// menu bar without `isTemplate`.
+    private static func makeStatusImage(label: String, reason: SwitchBlockReason) -> NSImage {
         let size = NSSize(width: 26, height: 18)
-        let image = NSImage(size: size)
-        image.lockFocus()
+        return NSImage(size: size, flipped: false) { rect in
+            let inset: CGFloat = 1
+            let bodyRect = NSRect(x: inset, y: inset,
+                                  width: rect.width - 2 * inset,
+                                  height: rect.height - 2 * inset)
+            let badge = NSBezierPath(roundedRect: bodyRect, xRadius: 5, yRadius: 5)
+            NSColor.labelColor.setFill()
+            badge.fill()
 
-        // For template images only the alpha channel matters — colors will be
-        // replaced by the system at render time. We draw in opaque black.
-        NSColor.black.setStroke()
-        NSColor.black.setFill()
+            let fontSize: CGFloat = label.count <= 2 ? 10.5 : 9
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: fontSize, weight: .bold),
+                .foregroundColor: NSColor.labelColor,
+                .kern: 0.3,
+            ]
+            let attr = NSAttributedString(string: label, attributes: attrs)
+            let textSize = attr.size()
+            let origin = NSPoint(x: (rect.width - textSize.width) / 2,
+                                 y: (rect.height - textSize.height) / 2 - 0.5)
+            NSGraphicsContext.current?.compositingOperation = .destinationOut
+            attr.draw(at: origin)
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
 
-        let inset: CGFloat = paused ? 2.5 : 1.0
-        let rect = NSRect(x: inset + 0.5, y: 1.5,
-                          width: size.width - 2 * inset - 1,
-                          height: size.height - 3)
-        let path = NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4)
-        path.lineWidth = paused ? 1.0 : 1.3
-        path.stroke()
+            // Status dot, bottom-right. A slightly larger "halo" is punched
+            // out first (destinationOut, same technique as the letter cutout
+            // above) so the dot always separates from the keycap by exposing
+            // the real menu bar behind it — that works in light/dark/
+            // highlighted menu bar alike, unlike hard-coding a background color.
+            let dotDiameter: CGFloat = 6
+            let haloDiameter: CGFloat = dotDiameter + 1.5
+            let center = NSPoint(x: rect.width - dotDiameter / 2 - 1, y: dotDiameter / 2 + 1)
+            let haloRect = NSRect(x: center.x - haloDiameter / 2, y: center.y - haloDiameter / 2,
+                                  width: haloDiameter, height: haloDiameter)
+            NSGraphicsContext.current?.compositingOperation = .destinationOut
+            NSBezierPath(ovalIn: haloRect).fill()
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
 
-        let fontSize: CGFloat = label.count <= 2 ? 10 : 9
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: fontSize, weight: .heavy),
-            .foregroundColor: NSColor.black,
-            .kern: 0.4,
-        ]
-        let attr = NSAttributedString(string: label, attributes: attrs)
-        let textSize = attr.size()
-        let origin = NSPoint(x: (size.width - textSize.width) / 2,
-                             y: (size.height - textSize.height) / 2 - 0.5)
-        attr.draw(at: origin)
+            let dotRect = NSRect(x: center.x - dotDiameter / 2, y: center.y - dotDiameter / 2,
+                                 width: dotDiameter, height: dotDiameter)
+            (reason.blocksSwitching ? NSColor.systemRed : NSColor.systemGreen).setFill()
+            NSBezierPath(ovalIn: dotRect).fill()
 
-        image.unlockFocus()
-        image.isTemplate = true   // system adapts to menu bar color
-        return image
+            return true
+        }
     }
 
     @objc private func layoutChanged() {
@@ -132,74 +174,38 @@ final class StatusBarController {
         rebuildMenu()
     }
 
+    /// Deliberately minimal (03.08.2026 → panel-ification): everything that
+    /// used to be a menu item (permissions repair, per-app layout, license,
+    /// exceptions, autostart, logs) now lives inside the settings window
+    /// itself — see MainView. The menu keeps only what you need without
+    /// opening that window: jump to it, pause/resume, quit.
     private func rebuildMenu() {
         let menu = NSMenu()
 
-        // Диагностика (состояние перехвата/разрешений) убрана из меню 03.08.2026 —
-        // видна в главном окне (StatusPill в MainView). Тут остаётся только action-пункт
-        // на случай реальной проблемы.
-        var hasLeadingItems = false
-        if !permissionsService.hasAccessibility || !permissionsService.hasInputMonitoring {
-            let repairItem = NSMenuItem(
-                title: "Настроить разрешения…",
-                action: #selector(openPermissions),
-                keyEquivalent: ""
-            )
-            repairItem.target = self
-            menu.addItem(repairItem)
-            hasLeadingItems = true
-        }
-        if hasLeadingItems {
+        // Grey, non-clickable diagnostic line — only present while switching
+        // is actually blocked (SwitchBlockReason.title is nil otherwise, see
+        // п.2). `isEnabled = false` is what gives NSMenuItem its greyed-out,
+        // unclickable rendering for free.
+        if let reason = currentBlockReason().title {
+            let reasonItem = NSMenuItem(title: reason, action: nil, keyEquivalent: "")
+            reasonItem.isEnabled = false
+            menu.addItem(reasonItem)
             menu.addItem(NSMenuItem.separator())
         }
 
-        let autoSwitchItem = NSMenuItem(
-            title: "Автопереключение",
-            action: #selector(toggleAutoSwitch(_:)),
-            keyEquivalent: ""
-        )
-        autoSwitchItem.target = self
-        autoSwitchItem.state = prefsService.isAutoSwitchEnabled ? .on : .off
-        menu.addItem(autoSwitchItem)
-
-        let perAppItem = NSMenuItem(
-            title: "Раскладка для каждого приложения",
-            action: #selector(togglePerAppLayout(_:)),
-            keyEquivalent: ""
-        )
-        perAppItem.target = self
-        perAppItem.state = perAppLayoutService.isEnabled ? .on : .off
-        menu.addItem(perAppItem)
-
-        let settingsItem = NSMenuItem(title: "Настройки", action: #selector(openSettings), keyEquivalent: ",")
+        let settingsItem = NSMenuItem(title: "Настройки…", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        let licenseTitle = LicenseService.shared.isEntitled
-            ? "Лицензия…"
-            : "⚠ Подписка истекла — Активировать…"
-        let licenseItem = NSMenuItem(title: licenseTitle, action: #selector(openLicense), keyEquivalent: "")
-        licenseItem.target = self
-        menu.addItem(licenseItem)
+        let pauseTitle = prefsService.isAutoSwitchEnabled ? "Пауза" : "Возобновить"
+        let pauseItem = NSMenuItem(title: pauseTitle, action: #selector(toggleAutoSwitch(_:)), keyEquivalent: "")
+        pauseItem.target = self
+        menu.addItem(pauseItem)
 
-        let exceptionsItem = NSMenuItem(title: "Исключения", action: #selector(openExceptions), keyEquivalent: "")
-        exceptionsItem.target = self
-        menu.addItem(exceptionsItem)
-
-        let autoStartItem = NSMenuItem(title: "Автозапуск", action: #selector(toggleAutoStart(_:)), keyEquivalent: "")
-        autoStartItem.target = self
-        autoStartItem.state = autoStartService.isEnabled ? .on : .off
-        menu.addItem(autoStartItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        let showLogItem = NSMenuItem(title: "Показать логи", action: #selector(openLogs), keyEquivalent: "")
-        showLogItem.target = self
-        menu.addItem(showLogItem)
-
-        let revealLogItem = NSMenuItem(title: "Открыть папку логов", action: #selector(revealLogsInFinder), keyEquivalent: "")
-        revealLogItem.target = self
-        menu.addItem(revealLogItem)
+        let permissionsItem = NSMenuItem(title: "Настройка разрешений…",
+                                         action: #selector(openPermissions), keyEquivalent: "")
+        permissionsItem.target = self
+        menu.addItem(permissionsItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -208,14 +214,6 @@ final class StatusBarController {
         menu.addItem(quitItem)
 
         statusItem.menu = menu
-    }
-
-    @objc private func openLogs() {
-        NSWorkspace.shared.open(DebugLog.shared.fileURL)
-    }
-
-    @objc private func revealLogsInFinder() {
-        NSWorkspace.shared.activateFileViewerSelecting([DebugLog.shared.fileURL])
     }
 
     @objc private func refreshMenu() {
@@ -235,7 +233,8 @@ final class StatusBarController {
             prefsService: prefsService,
             inputSourceManager: inputSourceManager,
             perAppLayoutService: perAppLayoutService,
-            keyboardMonitor: keyboardMonitor
+            keyboardMonitor: keyboardMonitor,
+            autoStartService: autoStartService
         )
         vm.onOpenAbout = { [weak self] in self?.openAbout() }
         vm.onOpenExceptions = { [weak self] in self?.openExceptions() }
@@ -250,6 +249,7 @@ final class StatusBarController {
         window.contentView = NSHostingView(rootView: MainView(viewModel: vm).gammaThemedRoot())
         window.center()
         window.isReleasedWhenClosed = false
+        trackWindowForDockIcon(window)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         mainWindow = window
@@ -272,6 +272,7 @@ final class StatusBarController {
         window.contentView = NSHostingView(rootView: ExceptionsView(viewModel: vm).gammaThemedRoot())
         window.center()
         window.isReleasedWhenClosed = false
+        trackWindowForDockIcon(window)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         exceptionsWindow = window
@@ -296,6 +297,7 @@ final class StatusBarController {
         )
         window.center()
         window.isReleasedWhenClosed = false
+        trackWindowForDockIcon(window)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         aboutWindow = window
@@ -317,9 +319,29 @@ final class StatusBarController {
         window.contentView = NSHostingView(rootView: LicenseView().gammaThemedRoot())
         window.center()
         window.isReleasedWhenClosed = false
+        trackWindowForDockIcon(window)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         licenseWindow = window
+    }
+
+    /// Registers a freshly-created window with `DockIconController` (Dock
+    /// icon appears while ≥1 tracked window is open) and self-removes the
+    /// close observer the moment the window actually closes — these windows
+    /// (`isReleasedWhenClosed = false`, but re-created from scratch on every
+    /// reopen after a close, see the `openXxx` guards above) would otherwise
+    /// leave one dead observer behind per open/close cycle over a long
+    /// session. Shared by every window this controller creates so the
+    /// Dock-icon bookkeeping lives in exactly one place.
+    private func trackWindowForDockIcon(_ window: NSWindow) {
+        DockIconController.shared.windowOpened()
+        var observer: NSObjectProtocol?
+        observer = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { _ in
+            DockIconController.shared.windowClosed()
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+        }
     }
 
     private func confirmDeleteLocalData() {
@@ -342,30 +364,15 @@ final class StatusBarController {
         }
     }
 
-    @objc private func toggleAutoStart(_ sender: NSMenuItem) {
-        autoStartService.toggle()
-        sender.state = autoStartService.isEnabled ? .on : .off
-    }
-
     @objc private func toggleAutoSwitch(_ sender: NSMenuItem) {
         prefsService.isAutoSwitchEnabled.toggle()
+        // Title ("Пауза"/"Возобновить") is recomputed by rebuildMenu(), which
+        // the .autoSwitchToggled observer already triggers via refreshMenu().
         NotificationCenter.default.post(name: .autoSwitchToggled, object: nil)
-        sender.state = prefsService.isAutoSwitchEnabled ? .on : .off
-    }
-
-    @objc private func togglePerAppLayout(_ sender: NSMenuItem) {
-        perAppLayoutService.isEnabled.toggle()
-        sender.state = perAppLayoutService.isEnabled ? .on : .off
     }
 
     @objc private func openPermissions() {
-        if !permissionsService.hasAccessibility {
-            permissionsService.requestAccessibility()
-            permissionsService.openAccessibilitySettings()
-        } else if !permissionsService.hasInputMonitoring {
-            permissionsService.requestInputMonitoring()
-            permissionsService.openInputMonitoringSettings()
-        }
+        onOpenPermissions?()
     }
 
     @objc private func quit() {

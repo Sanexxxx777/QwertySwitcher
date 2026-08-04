@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import CryptoKit
+import Security
 
 // MARK: - Payload & canonicalization
 
@@ -115,18 +116,96 @@ protocol LicenseStateStore {
     func save(_ state: LicenseState)
 }
 
-final class KeychainLicenseStore: LicenseStateStore {
+/// Reads/deletes the pre-0.4.4 Keychain-stored license state exactly once,
+/// during migration into `FileLicenseStore`. `kSecUseAuthenticationUISkip` is
+/// mandatory on both calls: self-signed builds get a new CDHash on every
+/// rebuild, so macOS treats the ACL as belonging to a new app and would
+/// otherwise show a password prompt on every single read — skipping just
+/// means "fail silently instead of prompting", exactly what a best-effort
+/// one-shot migration needs.
+protocol LegacyLicenseKeychainReader {
+    func readSilently() -> LicenseState?
+    func deleteSilently()
+}
+
+final class SystemLegacyLicenseKeychainReader: LegacyLicenseKeychainReader {
     private let service = AppIdentity.bundleIdentifier + ".license"
     private let account = "state"
 
+    func readSilently() -> LicenseState? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
+        ]
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data
+        else { return nil }
+        return try? JSONDecoder().decode(LicenseState.self, from: data)
+    }
+
+    func deleteSilently() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+}
+
+/// Production license store since 0.4.4 — replaces Keychain entirely (see
+/// CLAUDE.md "Убрать диалоги Keychain"). The payload is Ed25519-signed by the
+/// server (can't be forged locally, only deleted) and carries no secrets, so
+/// a plain 0600 file loses nothing over Keychain while sidestepping the
+/// CDHash-ACL prompt for self-signed builds. Migrates the old Keychain entry
+/// once, on first launch after upgrade, then never touches Security.framework
+/// again — this is the last SecItem* call anywhere in the license path.
+final class FileLicenseStore: LicenseStateStore {
+    private let fm: FileManager
+    private let url: URL
+    private let legacyReader: LegacyLicenseKeychainReader
+
+    init(
+        directory: URL = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent(AppIdentity.compactName, isDirectory: true),
+        legacyReader: LegacyLicenseKeychainReader = SystemLegacyLicenseKeychainReader(),
+        fileManager: FileManager = .default
+    ) {
+        self.fm = fileManager
+        self.legacyReader = legacyReader
+        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        self.url = directory.appendingPathComponent("license.json")
+        migrateFromKeychainIfNeeded()
+    }
+
     func load() -> LicenseState? {
-        guard let data = KeychainStore.read(service: service, account: account) else { return nil }
+        guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(LicenseState.self, from: data)
     }
 
     func save(_ state: LicenseState) {
         guard let data = try? JSONEncoder().encode(state) else { return }
-        KeychainStore.write(data, service: service, account: account)
+        do {
+            try data.write(to: url, options: .atomic)
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch {
+            DebugLog.shared.log("LIC", "failed to persist license state to disk")
+        }
+    }
+
+    /// Guarded so an already-migrated install never touches Keychain again.
+    private func migrateFromKeychainIfNeeded() {
+        guard !fm.fileExists(atPath: url.path) else { return }
+        guard let legacy = legacyReader.readSilently() else { return }
+        save(legacy)
+        legacyReader.deleteSilently()
     }
 }
 
@@ -228,6 +307,12 @@ final class LicenseService: ObservableObject {
     private static let graceSeconds: Int64 = 14 * 24 * 3600
     private static let rollbackToleranceSeconds: Int64 = 3600
     private static let checkInInterval: TimeInterval = 12 * 3600
+    /// Anti-tamper for the offline-only path: UserDefaults, separate from
+    /// `store`, marks the first time this hwid was ever seen — so deleting
+    /// the license file/state alone (with no network) can't restart the
+    /// provisional trial. The server stays authoritative; this only bounds
+    /// what an offline-only attacker can get by wiping local state.
+    private static let firstSeenKeyPrefix = AppIdentity.keyPrefix + "licenseFirstSeen."
 
     enum ServerError: Equatable {
         case invalidKey
@@ -251,6 +336,7 @@ final class LicenseService: ObservableObject {
     @Published private(set) var isEntitled: Bool = false {
         didSet {
             guard isEntitled != oldValue else { return }
+            DebugLog.shared.log("LIC", "entitlement \(oldValue) → \(isEntitled)")
             NotificationCenter.default.post(name: .licenseStatusChanged, object: nil)
         }
     }
@@ -274,7 +360,7 @@ final class LicenseService: ObservableObject {
     init(
         clock: LicenseClock = SystemClock(),
         transport: LicenseTransport = URLSessionLicenseTransport(),
-        store: LicenseStateStore = KeychainLicenseStore(),
+        store: LicenseStateStore = FileLicenseStore(),
         hwid: String = DeviceIdentity.hardwareUUID(),
         appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev",
         publicKeyHex: String = LicenseService.embeddedPublicKeyHex
@@ -286,6 +372,7 @@ final class LicenseService: ObservableObject {
         self.appVersion = appVersion
         self.publicKeyHex = publicKeyHex
         self.state = store.load()
+        recordFirstSeenIfNeeded(now: clock.now())
         recomputeEntitlement()
     }
 
@@ -373,7 +460,14 @@ final class LicenseService: ObservableObject {
     private func handleServerResult(_ result: ServerResult) {
         switch result {
         case .success(let payload, let sig):
-            _ = applyServerResponse(payload: payload, sigHex: sig)
+            if applyServerResponse(payload: payload, sigHex: sig) {
+                // Positive evidence a check-in actually succeeded — the
+                // failure path already logs every unreachable attempt, but a
+                // healthy check-in was previously invisible in the log.
+                DebugLog.shared.log("LIC", "check-in ok plan=\(payload.plan) daysLeft=\(daysRemaining)")
+            } else {
+                DebugLog.shared.log("LIC", "check-in response failed verification")
+            }
         case .failure(let error):
             DebugLog.shared.log("LIC", "check-in unreachable: \(error)")
             applyOfflineResult()
@@ -398,15 +492,48 @@ final class LicenseService: ObservableObject {
     }
 
     /// Server unreachable: applies grace/rollback rules to cached state, and
-    /// provisions a local 14-day trial on a first-ever offline launch.
+    /// provisions a local 14-day trial anchored at `firstSeenTimestamp` — a
+    /// genuinely first-ever launch anchors at `now`; a launch that lost its
+    /// local state (file deleted) anchors at the original first-seen time
+    /// instead, so it can't get a second free trial while offline.
     func applyOfflineResult() {
         let now = clock.now()
         if state == nil {
-            let trial = LicenseState.provisionalTrial(hwid: hwid, now: now)
+            let anchor = firstSeenTimestamp(defaultingTo: now)
+            let trial = LicenseState.provisionalTrial(hwid: hwid, now: anchor)
             state = trial
             store.save(trial)
+            if anchor == now {
+                DebugLog.shared.log("LIC", "offline first launch — provisional trial started")
+            } else {
+                DebugLog.shared.log("LIC", "offline + no local state — trial restored from first-seen anchor, not restarted")
+            }
+        } else if let cached = state, cached.sig != nil, !cached.provisional {
+            // Positive evidence for the offline-grace window itself — the
+            // server being unreachable is already logged above; this makes
+            // "still inside grace" vs "grace ran out" visible without having
+            // to reason about it from lastCheckUnix by hand.
+            let graceLeftDays = (Self.graceSeconds - (now - cached.lastCheckUnix)) / 86_400
+            if graceLeftDays >= 0 {
+                DebugLog.shared.log("LIC", "offline grace: \(graceLeftDays)d left before entitlement lapses")
+            } else {
+                DebugLog.shared.log("LIC", "offline grace expired \(-graceLeftDays)d ago")
+            }
         }
         recomputeEntitlement()
+    }
+
+    private func recordFirstSeenIfNeeded(now: Int64) {
+        let key = Self.firstSeenKeyPrefix + hwid
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: key) == nil else { return }
+        defaults.set(Int(now), forKey: key)
+    }
+
+    private func firstSeenTimestamp(defaultingTo now: Int64) -> Int64 {
+        let key = Self.firstSeenKeyPrefix + hwid
+        guard let stored = UserDefaults.standard.object(forKey: key) as? Int else { return now }
+        return Int64(stored)
     }
 
     private func recomputeEntitlement() {

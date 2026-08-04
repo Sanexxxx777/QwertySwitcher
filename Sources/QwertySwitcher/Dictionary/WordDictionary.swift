@@ -39,13 +39,21 @@ final class WordDictionary {
 
     /// Exact check via BloomFilter + SpellChecker confirmation
     /// BloomFilter has ~1% false positive, SpellChecker confirms
+    ///
+    /// ⚠️NOT safe to call from the CGEventTap callback / any per-keystroke hot
+    /// path — `isSpellCheckerValid` below can block for 100+ms (macOS
+    /// spell-checking IPC). `LanguageDetector`/`InstantCorrectionAnalyzer`
+    /// use `mightContain` (bloom-only) instead for exactly this reason (see
+    /// CLAUDE.md perf audit). Kept here for any future non-hot-path caller.
     func contains(_ word: String, language: String) -> Bool {
         guard mightContain(word, language: language) else { return false }
         // Confirm with system spell checker (eliminates false positives)
         return isSpellCheckerValid(word, language: language)
     }
 
-    /// Independent system-dictionary fallback for words absent from our bundle.
+    /// Independent system-dictionary fallback for words absent from our
+    /// bundle. ⚠️Calls `NSSpellChecker.checkSpelling` synchronously — see the
+    /// hot-path warning on `contains` above, same caller restriction applies.
     func isSpellCheckerValid(_ word: String, language: String) -> Bool {
         let lang: String
         switch language {

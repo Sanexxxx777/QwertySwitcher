@@ -28,13 +28,30 @@ Scripts/build.sh        — сборка .app bundle
 ## Build, Test & Run
 ```bash
 swift build                     # debug (0.1s cached)
-./Scripts/test.sh               # 111 проверок via --test mode (+ 1 GUI SKIP)
+./Scripts/test.sh               # Swift-сьют via --test + контракты Tests/ReleaseScripts/*.sh
 ./Scripts/build.sh              # release .app текущей архитектуры
+./Scripts/install.sh            # обновить /Applications БЕЗ сброса TCC (см. секцию ниже)
 ./Scripts/make-dmg.sh           # universal (arm64+x86_64) .app + DMG для distribution
 ```
 
+## 🔴 Обновление установленной копии — ТОЛЬКО `./Scripts/install.sh` (инвариант, 04.08.2026)
+
+Ручное копирование в `/Applications` сбрасывало Accessibility/Input Monitoring. Две независимые причины, обе лечатся одним `rsync -a --delete` внутри `install.sh`:
+1. **`rm -rf "/Applications/Qwerty Switcher.app"` перед копированием = деинсталляция для macOS.** Исчезновение каталога → tccd удаляет строку в TCC.db (ключ = bundle id + csreq, НЕ CDHash). Доказано A/B на этом Маке: пересозданный каталог → `perms accessibility=false`; тот же каталог обновлён на месте с ДРУГИМ CDHash → `perms accessibility=true`. ⇒ каталог-назначение обязан пережить обновление.
+2. **`ditto src dst` поверх существующего бандла МЕРЖИТ, не удаляет.** Один файл-сирота от прошлого релиза внутри `Contents/` ломает печать ресурсов → приложение перестаёт удовлетворять своему Designated Requirement → tccd не матчит сохранённый csreq → разрешения спрашиваются заново. ⇒ копия обязана подчищать (`--delete`).
+3. **Сохранённый csreq НАЗЫВАЕТ signing identity** (`identifier "tech.sasha.qwertyswitch" and certificate leaf = H"a80cd00f…"` — это leaf-хэш сертификата «SashaSwitcher Developer» из login-keychain). Сборка с ДРУГОЙ identity сбрасывает гранты, даже если каталог и его inode целы. Главный реальный путь сюда: `build.sh` при отсутствии сертификата в связке молча падает в ad-hoc (`build.sh:117-124`, DR становится cdhash-based и меняется каждую пересборку). ⚠️`codesign --verify` такое НЕ ловит в принципе — он проверяет бандл против DR, вшитого в его же подпись, поэтому ad-hoc сборка честно «satisfies its Designated Requirement». ⇒ identity источника сверяется с установленной копией отдельным гейтом ДО синка (`install.sh` шаг [2/5], отказ = exit 7, ничего не тронуто). Осознанная смена identity — `--allow-identity-change`, и тогда скрипт прямо пишет, что разрешения будут запрошены заново.
+
+```bash
+./Scripts/build.sh && ./Scripts/install.sh     # единственный правильный путь
+```
+`install.sh` идемпотентен: гасит только процесс, запущенный из целевого бандла (ДО подмены файлов — иначе новый код не подхватится), обновляет содержимое на месте, и **блокирующим гейтом** гоняет `codesign --verify --deep --strict` по установленной копии. Провал гейта = разрешения будут потеряны, установку не считать успешной. В выводе печатается inode до/после — совпал = гранты целы.
+
+**Граница покрытия (не расширять заявление):** `install.sh` — путь разработчика на ЭТОЙ машине. Пользовательское обновление из DMG (перетаскивание с «Заменить») удаляет каталог бандла руками Finder'а = причина №1 в чистом виде, гранты слетают, и install.sh тут ни при чём. Смягчение — не установщик, а онбординг: окно «Добро пожаловать» + пункт меню «Настройка разрешений…» (`OnboardingWindowController`), плюс п.4 в `ПРОЧТИ_МЕНЯ.txt` внутри DMG. Полное решение = in-app updater, его НЕТ. Также вся сохранность висит на leaf-хэше одного self-signed сертификата в login-keychain: потеря связки или переход на Developer ID (Stage 2) = гарантированный сброс у всех, у кого стоит текущая сборка.
+
+**Don't:** `ditto`/`cp -R`/`rm -rf` по `/Applications/Qwerty Switcher.app` руками; гоняться за стабильным CDHash (csreq содержит `identifier` + `certificate leaf`, CDHash в нём нет — но identity есть, см. причину №3, поэтому менять её нельзя). Контракт установщика — `Tests/ReleaseScripts/install_contract.sh`, гоняется из `test.sh`.
+
 ## Канон имён и путей (стандарт 03.08.2026 — НЕ плодить копии)
-- **Установленная копия ОДНА: `/Applications/Qwerty Switcher.app`** — после `build.sh` обновлять её через `ditto "build/Qwerty Switcher.app" "/Applications/Qwerty Switcher.app"`, НЕ запускать из build/.
+- **Установленная копия ОДНА: `/Applications/Qwerty Switcher.app`** — обновлять ТОЛЬКО через `./Scripts/install.sh` (см. секцию выше), НЕ запускать из build/.
 - `build` — симлинк на `build.noindex/` (Spotlight не индексирует сборки; лечит расплод «Qwerty Switcher.previous-*» в поиске). Не переименовывать обратно.
 - Previous-копия сборки/DMG хранится РОВНО одна: `build/previous/` (скрипты сами ротируют). Таймстампованных `.previous-*` больше не существует — их появление = регресс скриптов.
 - Публичное имя `Qwerty Switcher`, bundle `tech.sasha.qwertyswitch` (AppIdentity.swift — единственный источник). Внутренний модуль/binary переименован из `SashaSwitcher` в `QwertySwitcher` 03.08.2026; signing identity осталась "SashaSwitcher Developer" — НЕ переименовывать: смена identity сбросит TCC-разрешения.
@@ -49,7 +66,10 @@ Menu → "Показать логи" / "Открыть папку логов".
 - Minimum word length 3 (avoids false positives on 2-letter particles)
 - Liquid Glass UI (NFA design system, dark only — auto appearance)
 - Per-app layout memory, exceptions (word + app + auto-learn with per-entry delete), Ёфикатор
-- Onboarding window — shown on first launch, auto-detects granted permissions via Timer polling; user confirms via "Далее"
+- Onboarding window — живёт всю сессию в `OnboardingWindowController` (сильная ссылка из AppDelegate). `.floating` + `[.canJoinAllSpaces, .stationary]` + `orderFrontRegardless()` на каждой активации + `.regular` activation policy на время онбординга: без этого окно уходило ПОД System Settings и было недостижимо (app = accessory, нет Dock/Cmd+Tab). Возврат из меню статус-бара «Настройка разрешений…». Опрос TCC — таймер в `.common` mode, не глохнет на onDisappear. Кнопки «Проверить снова» и «Перезапустить приложение» (последняя только в шаге `.stalled`). Логика шагов — `Services/OnboardingState.swift` (чистая, покрыта тестами)
+- ⚠️**Перезапуск после выдачи разрешения НЕ нужен** и в UI так не писать: гранты подхватываются в том же процессе (`AppDelegate.startHealthPolling` → `KeyboardMonitor.refreshHealth`, доказано в debug.log — `perms accessibility=false` → `[KM] event tap started` через 30с, тот же PID). Алерт macOS «Завершить и открыть снова» → «Позже». Restart предлагается ТОЛЬКО когда оба гранта есть, а перехват не поднялся дольше `restartGraceSeconds`
+- ⚠️Не звать `request*()` и `open*Settings()` подряд — это поднимает ДВЕ чужие поверхности поверх нашего окна. Порядок: `PermissionsService.request*ThenSettings()` (промпт → через 0.7с System Settings только если не помогло → колбэк возвращает наше окно вперёд). Второй путь того же кода — `MainViewModel.openPermissionRepair()`
+- ⚠️Input Monitoring — производная от Accessibility: отдельной строки `kTCCServiceListenEvent` для `tech.sasha.qwertyswitch` в TCC.db нет вообще, `CGPreflightListenEventAccess()` возвращает true за счёт Accessibility. Поэтому сначала просим Accessibility, и оба флага всегда меняются синхронно
 - Secure input detection, Spotlight skip, 300ms self-capture cooldown
 - Context reset on layout change (manual or by bot)
 - Privacy: 100% local, 0 telemetry, audit on launch
