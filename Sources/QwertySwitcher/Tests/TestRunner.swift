@@ -824,9 +824,15 @@ enum CaretWordExtractorTests {
             CaretWordExtractor.wordBeforeCaret(text: "hello", caretUTF16Offset: 0),
             "caret at the very start has no word before it"
         )
-        TestRunner.assertNil(
-            CaretWordExtractor.wordBeforeCaret(text: "a", caretUTF16Offset: 1),
-            "single-character word is below the 2-char floor (matches the buffer/history path)"
+        // Single letters are ordinary words in Russian (и, а, в, к, с, я, о, у)
+        // and the owner hit this directly: five Double Shifts on a lone "b"
+        // did nothing (log 07:49:54-57). The floor was lowered to 1 for the
+        // EXPLICIT gesture only — automatic correction keeps its own, higher
+        // bar, where a false positive would rewrite a shell flag (`rm -f`).
+        TestRunner.assertEqual(
+            CaretWordExtractor.wordBeforeCaret(text: "a", caretUTF16Offset: 1)?.word,
+            "a",
+            "single-character word IS convertible via the explicit Double Shift path"
         )
     }
 }
@@ -2255,6 +2261,50 @@ enum KeyboardMonitorIntegrationTests {
                 )
             } else {
                 TestRunner.assertTrue(false, "'exit': EN fixture can type every character")
+            }
+        }
+
+        // --- lone "b" → "и" — the 05.08.2026 report ------------------------
+        // Owner pressed Double Shift five times on a single latin "b" in
+        // Ghostty and nothing happened (log 07:49:54-57, five consecutive
+        // "no selection/buffer/history/caret word"). Cause: every path had a
+        // 2-character floor. Single letters are ordinary Russian words.
+        TestRunner.section("Double Shift converts a SINGLE-letter word — lone \"b\" → \"и\"")
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: false)
+            h.press(11) // "b" under en → "и" under ru
+            TestRunner.assertEqual(h.screen, "b", "sanity: a lone latin letter is on screen")
+            TestRunner.assertTrue(
+                h.monitor.swapLastWordInBuffer(),
+                "Double Shift reports a conversion for a one-letter word"
+            )
+            TestRunner.assertEqual(
+                h.screen, "и",
+                "fix: the single letter converts instead of being silently skipped"
+            )
+        }
+
+        // A one-letter LIVE buffer must win over an older history slot —
+        // otherwise the fix above would convert the previous word instead of
+        // the letter the user is actually looking at.
+        // The block above ends with the layout switched to ru (that is what a
+        // conversion does) — reset it, or "hello" gets typed as "руддщ".
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: false)
+            if let hello = InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse) {
+                h.type(hello)
+                h.press(49) // space — "hello" moves into the history slot
+                h.press(11) // "b" — a new, one-character live buffer
+                TestRunner.assertEqual(h.screen, "hello b", "sanity: both words are on screen before the swap")
+                TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "conversion happens")
+                TestRunner.assertEqual(
+                    h.screen, "hello и",
+                    "the live one-letter buffer is converted, the history word is left alone"
+                )
+            } else {
+                TestRunner.assertTrue(false, "'hello': EN fixture can type every character")
             }
         }
 
