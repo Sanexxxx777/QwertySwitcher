@@ -498,6 +498,17 @@ final class KeyboardMonitor {
                 // after it — track it instead of treating it as the trailing
                 // of an empty (uncorrectable) word, where it was structurally
                 // unreachable for correction ("$GRAF", "/model").
+                //
+                // The history slot dies here, exactly like it does on the
+                // letter path above. Double Shift's history fallback rewrites
+                // text at the CARET, so it is only sound while the caret still
+                // sits right after that word — one digit typed since, and the
+                // backspaces eat the wrong characters. Owner hit this typing
+                // "на 300$": Double Shift converted the stale "на" and retyped
+                // it at the caret, producing "на 30yf" (log 08:26:04,
+                // "doubleShift via history: ru→en len=2", with lead=4 digits
+                // already sitting in front of it).
+                lastCompletedWord = nil
                 pendingLeadingSymbols.append(BufferedKeystroke(keycode: keycode, flags: flags))
                 return
             }
