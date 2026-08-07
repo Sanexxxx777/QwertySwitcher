@@ -2101,6 +2101,10 @@ final class KeyboardMonitorHarness {
     private let inputSources: InputSourceManager
 
     var screen: String { replacer.screen }
+    /// How many replacements the monitor actually attempted — the only way to
+    /// assert "it left correct text alone" rather than "it happened to put the
+    /// same characters back".
+    var invocationCount: Int { replacer.invocationCount }
 
     init(
         dictionary: WordDictionary, inputSources: InputSourceManager,
@@ -2262,6 +2266,77 @@ enum KeyboardMonitorIntegrationTests {
             } else {
                 TestRunner.assertTrue(false, "'exit': EN fixture can type every character")
             }
+        }
+
+        // --- symbol keys that are letters in Russian -------------------------
+        // 39.6% of Russian words >=3 letters contain at least one of б ю х ж ё
+        // э ъ, which live on `,` `.` `[` `;` `` ` `` `'` `]`. Those keys used to
+        // close the word on the spot, so the head got corrected alone and the
+        // tail started a new word: "до так;е" (owner, 05.08).
+        TestRunner.section("Symbol keys stay inside the word — \"также\", \"колбаса\"")
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: true)
+            if let takzhe = InstantCorrectionFixtures.keystrokes(for: "также", reverse: ruReverse) {
+                h.type(takzhe)
+                h.press(49) // space — the real boundary, where the decision belongs
+                TestRunner.assertEqual(
+                    h.screen, "также ",
+                    "fix: the whole word converts — red was \"так;е \", corrected at the ';' key"
+                )
+            } else {
+                TestRunner.assertTrue(false, "'также': RU fixture can type every character")
+            }
+        }
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: true)
+            if let kolbasa = InstantCorrectionFixtures.keystrokes(for: "колбаса", reverse: ruReverse) {
+                h.type(kolbasa)
+                h.press(49)
+                TestRunner.assertEqual(
+                    h.screen, "колбаса ",
+                    "fix: 'б' (the ',' key) no longer splits the word after the dictionary word 'кол'"
+                )
+            } else {
+                TestRunner.assertTrue(false, "'колбаса': RU fixture can type every character")
+            }
+        }
+
+        // --- English must not become Russian ---------------------------------
+        // The above is only safe because the detector scores the LETTER CORE and
+        // reads a trailing ambiguous key both ways. Without that, "key." renders
+        // as the real Russian word "луню" and wins unopposed — and with the old
+        // contextBias of 15 (larger than the 10-point collision gap) a preceding
+        // Russian word was enough to open the gate on its own.
+        TestRunner.section("English survives the symbol run — \"key.\", \"bye.\", \"next.\"")
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(autoSwitch: true)
+            // Prime the context with a Russian word, the worst case for English.
+            if let privet = InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse) {
+                h.type(privet)
+                h.press(49)
+            }
+            inputSources.switchTo(enLayout)
+            let h2 = harness(autoSwitch: true)
+            for word in ["key", "bye", "next"] {
+                if let strokes = InstantCorrectionFixtures.keystrokes(for: word, reverse: enReverse) {
+                    h2.type(strokes)
+                    h2.press(47) // "." — a letter (ю) in Russian
+                    h2.press(49)
+                } else {
+                    TestRunner.assertTrue(false, "'\(word)': EN fixture can type every character")
+                }
+            }
+            TestRunner.assertEqual(
+                h2.screen, "key. bye. next. ",
+                "correctly typed English with trailing punctuation is left alone"
+            )
+            TestRunner.assertEqual(
+                h2.invocationCount, 0,
+                "not a single replacement was attempted on correct English"
+            )
         }
 
         // --- lone "b" → "и" — the 05.08.2026 report ------------------------
