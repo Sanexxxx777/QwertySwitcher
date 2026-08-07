@@ -62,6 +62,19 @@ final class KeyboardMonitor {
     private var pendingUserEvents = PendingUserEventQueue<QueuedUserEvent>()
     private var invalidateAfterReplacement = false
 
+    /// Everything printable typed since the last real break — letters, digits
+    /// and symbols alike, in the order they were pressed. Only Double Shift
+    /// reads it, and only when the run contains something the dictionary
+    /// cannot judge.
+    ///
+    /// `buffer` is deliberately letters-only: automatic correction has to score
+    /// a word, and "7ю6с" is not a word. But the user pressing Double Shift on
+    /// "7ю6с" is not asking for a judgement — they are pointing at what is on
+    /// screen and saying "this, in the other alphabet" (`7.6s`). That gesture
+    /// needs the raw run, so it gets its own track instead of bending the
+    /// scoring buffer into something it was never meant to hold.
+    private var runKeystrokes: [BufferedKeystroke] = []
+
     // Avalanche circuit breaker (see CorrectionAvalancheGuard) — applies only
     // to the two fully-automatic correction entry points (instant + word
     // boundary). Double Shift is intentionally NOT gated by either of these:
@@ -177,6 +190,7 @@ final class KeyboardMonitor {
         logContextWipe("layout-changed-externally")
         buffer.clear()
         pendingLeadingSymbols.removeAll()
+        runKeystrokes.removeAll()
         lastCompletedWord = nil
         instantCorrectionGate.reset()
         languageDetector.resetContext()
@@ -451,6 +465,7 @@ final class KeyboardMonitor {
         }
 
         if InputBuffer.isWordBoundary(keycode) {
+            runKeystrokes.removeAll()
             let correctable = InputBuffer.isCorrectableBoundary(keycode)
             handleWordBoundary(
                 trailing: correctable ? " " : nil,
@@ -459,6 +474,12 @@ final class KeyboardMonitor {
                 triggerEvent: event
             )
             return
+        }
+
+        // Recorded before the branches below, so the run keeps every printable
+        // keystroke regardless of how the scoring buffer chooses to slice it.
+        if InputBuffer.isLetterKey(keycode) || InputBuffer.isNumberOrSpecial(keycode) {
+            runKeystrokes.append(BufferedKeystroke(keycode: keycode, flags: flags))
         }
 
         // Context-aware punctuation: e.g. `.` `,` `;` `'` produce real letters in
@@ -552,6 +573,7 @@ final class KeyboardMonitor {
             autoLearnTracker.cancel()
             buffer.clear()
             pendingLeadingSymbols.removeAll()
+            runKeystrokes.removeAll()
             lastCompletedWord = nil
         }
     }
@@ -689,7 +711,12 @@ final class KeyboardMonitor {
                     "KM",
                     "instant correction: \(currentLayout.languageCode)→\(result.layout.languageCode)"
                         + " len=\(length) lead=\(leadingSymbols.count)"
-                        + " bs=\(length) pay=\(runReplacement.count)"
+                        // net = characters the screen gains or loses on balance:
+                        // retyped − erased − the one keystroke we suppressed (it
+                        // never reached the screen, so it is part of the payload
+                        // without ever having been backspaced over). Anything but
+                        // 0 means the text silently changed length.
+                        + " net=\(runReplacement.count - length - 1)"
                 )
             case .layoutSwitchFailed:
                 self.instantCorrectionGate.reset()
@@ -745,6 +772,7 @@ final class KeyboardMonitor {
         logContextWipe(reason)
         buffer.clear()
         pendingLeadingSymbols.removeAll()
+        runKeystrokes.removeAll()
         lastCompletedWord = nil
         autoLearnTracker.cancel()
         switchUndoManager.invalidate()
@@ -752,11 +780,82 @@ final class KeyboardMonitor {
         languageDetector.resetContext()
     }
 
+    /// Double Shift on a run the dictionary cannot judge: convert it key for
+    /// key, no scoring at all. Two live cases this exists for:
+    ///
+    /// - `7ю6с` (meant `7.6s`) — the digits slice it into three fragments none
+    ///   of which is a word, so the scoring path had nothing to offer and the
+    ///   gesture did nothing at all (log 09:07:51–09:08:08, three presses, all
+    ///   "no selection/buffer/history/caret word").
+    /// - `пgmail` — the scoring buffer held 5 keystrokes while 6 characters
+    ///   were on screen, so the conversion erased five and left the stray
+    ///   first one behind (log 09:11:30, `len=5 bs=5 pay=5`). `runKeystrokes`
+    ///   is filled before any of the branches that slice `buffer`, so it does
+    ///   not drift the same way.
+    ///
+    /// Deliberately limited to runs containing a non-letter: for a pure word
+    /// the scored path picks the target layout intelligently, and that
+    /// calibration is left exactly as it was.
+    private func convertWholeRun() -> Bool {
+        let run = runKeystrokes
+        guard run.count >= 2,
+              run.contains(where: { !InputBuffer.isLetterKey($0.keycode) }),
+              let currentLayout = languageDetector.inputSourceManager.currentLayout,
+              let targetLayout = languageDetector.activeLayouts.first(where: { $0.id != currentLayout.id })
+        else { return false }
+
+        let onScreen = languageDetector.inputSourceManager.convertKeystrokes(run, toLayout: currentLayout)
+        let converted = languageDetector.inputSourceManager.convertKeystrokes(run, toLayout: targetLayout)
+        guard !onScreen.isEmpty, converted != onScreen else { return false }
+
+        isPaused = true
+        textReplacer.replaceCurrentWord(
+            length: onScreen.count,
+            replacement: converted,
+            targetLayout: targetLayout,
+            trailing: nil,
+            trailingAlreadyOnScreen: true
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.switchUndoManager.record(
+                    originalKeycodes: run.map(\.keycode),
+                    originalWord: onScreen,
+                    correctedWord: converted,
+                    trailing: nil,
+                    originalLayoutID: currentLayout.id,
+                    targetLayoutID: targetLayout.id
+                )
+                self.buffer.clear()
+                self.pendingLeadingSymbols.removeAll()
+                self.lastCompletedWord = nil
+                self.statsService.recordOptionSwitch()
+                SoundService.shared.playSwitch(
+                    targetLanguageCode: targetLayout.languageCode, prefsService: self.prefsService
+                )
+                NotificationCenter.default.post(name: .statsUpdated, object: nil)
+                DebugLog.shared.log(
+                    "KM",
+                    "doubleShift via run: \(currentLayout.languageCode)→\(targetLayout.languageCode)"
+                        + " keys=\(run.count) net=\(converted.count - onScreen.count)"
+                )
+            case .layoutSwitchFailed:
+                DebugLog.shared.log("KM", "doubleShift run aborted: layout switch verification failed")
+            case .cancelled:
+                DebugLog.shared.log("KM", "doubleShift run cancelled: editing context changed")
+            }
+            self.finishReplacement()
+        }
+        return true
+    }
+
     /// Try to swap the last word currently sitting in the input buffer.
     /// Returns true if a correction was applied. Called from Double Shift hotkey.
     @discardableResult
     func swapLastWordInBuffer() -> Bool {
         guard !isPaused, LicenseService.shared.isEntitled else { return false }
+        if convertWholeRun() { return true }
         var keystrokes = buffer.currentWord()
         var trailing: String? = nil
         // Layout-dependent symbol(s) typed right before this word (e.g. "/"
@@ -864,8 +963,10 @@ final class KeyboardMonitor {
                     "KM",
                     "doubleShift via \(source): \(currentLayout.languageCode)→\(targetLayout.languageCode)"
                         + " len=\(length) lead=\(leadingSymbols.count) trail=\(trailing ?? "∅")"
-                        + " bs=\(length + (trailing?.count ?? 0))"
-                        + " pay=\(runReplacement.count + (trailing?.count ?? 0))"
+                        // Nothing is suppressed on this path — Double Shift is
+                        // invoked after the trailing character already landed —
+                        // so retyped and erased must simply match.
+                        + " net=\(runReplacement.count - length)"
                 )
             case .layoutSwitchFailed:
                 DebugLog.shared.log("KM", "doubleShift aborted: layout switch verification failed")
@@ -986,13 +1087,13 @@ final class KeyboardMonitor {
                         "KM",
                         "correction: \(sourceLayout.languageCode)→\(layout.languageCode)"
                             + " len=\(runLength) lead=\(leadingSymbols.count) trig=\(trigger ?? "∅")"
-                            // bs/pay = characters erased vs characters retyped.
-                            // They must match, and when they don't the text
-                            // silently gains or loses exactly that many
-                            // characters. Logged as bare counts (no content)
-                            // so a report like "a letter went missing" is one
-                            // glance to diagnose instead of a round of guesses.
-                            + " bs=\(runLength) pay=\(runReplacement.count + (trigger?.count ?? 0))"
+                            // See the instant path: retyped − erased − the
+                            // suppressed trigger. Must be 0; any other value is
+                            // exactly how many characters the text silently
+                            // gained or lost. Bare counts, never content — so a
+                            // report like "a letter went missing" is one glance
+                            // to diagnose instead of a round of guesses.
+                            + " net=\(runReplacement.count + (trigger?.count ?? 0) - runLength - 1)"
                     )
                 case .layoutSwitchFailed:
                     if let trigger {

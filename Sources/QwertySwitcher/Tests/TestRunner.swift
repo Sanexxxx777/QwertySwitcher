@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import CryptoKit
+import AppKit
 
 /// Lightweight test runner — no XCTest required.
 /// Invoked via `swift run QwertySwitcher --test` or `./Scripts/test.sh`.
@@ -61,6 +62,7 @@ enum TestRunner {
         AvalancheGuardWiringTests.run()
         HotPathStructuralGuardTests.run()
         ReplacementAtomicityGuardTests.run()
+        StatusInkContrastTests.run()
         SecureInputAXTierTests.run()
         CallbackDurationThresholdTests.run()
         TapTimeoutCounterTests.run()
@@ -2412,6 +2414,36 @@ enum KeyboardMonitorIntegrationTests {
             }
         }
 
+        // --- "7ю6с" → "7.6s" — a run the dictionary cannot judge -------------
+        // Owner typed "7.6s" with the Russian layout active, got "7ю6с", and
+        // pressed Double Shift three times with nothing happening at all (log
+        // 09:07:51–09:08:08, every press "no selection/buffer/history/caret
+        // word"). The digits slice the run into three fragments — "ю", "с" —
+        // none of which is a word, so the scored path had nothing to work
+        // with. An explicit gesture is not a request for a judgement.
+        TestRunner.section("Double Shift converts a whole run with digits — «7ю6с» → «7.6c»")
+        do {
+            guard let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+                TestRunner.skip("RU layout required")
+                return
+            }
+            inputSources.switchTo(ruLayout)
+            let h = harness(autoSwitch: false)
+            h.press(26) // 7
+            h.press(47) // "." in en, "ю" in ru
+            h.press(22) // 6
+            h.press(8)  // "c" in en, "с" in ru
+            TestRunner.assertEqual(h.screen, "7ю6с", "sanity: the run is on screen in the wrong alphabet")
+            TestRunner.assertTrue(
+                h.monitor.swapLastWordInBuffer(),
+                "Double Shift reports a conversion for a digits-and-letters run"
+            )
+            TestRunner.assertEqual(
+                h.screen, "7.6c",
+                "the WHOLE run converts key-for-key, digits kept, nothing left behind"
+            )
+        }
+
         // --- "на 300$" — history must not outlive the caret ------------------
         // Double Shift's history fallback rewrites text AT THE CARET. Owner
         // typed "на" + space + "300$" and pressed Double Shift: the stale "на"
@@ -2849,6 +2881,55 @@ enum ReplacementAtomicityGuardTests {
                 "\(function) does not re-check cancellation inside its loop"
                     + " (a mid-loop bail erases text and never retypes it)"
             )
+        }
+    }
+}
+
+/// The status colors carry meaning ("Работает" green, "Заблокировано" red), so
+/// they are read, not merely glanced at — WCAG AA text level, 4.5:1, in BOTH
+/// appearances. Straight `NSColor.systemGreen` measures 2.22:1 on a light
+/// window and was shipped that way; this is the check that makes that a test
+/// failure instead of a bug report.
+enum StatusInkContrastTests {
+    static func run() {
+        TestRunner.section("StatusInk — measured contrast, both appearances")
+
+        let inks: [(String, NSColor)] = [
+            ("green", StatusInk.greenNS), ("amber", StatusInk.amberNS), ("red", StatusInk.redNS)
+        ]
+        for (appearanceName, appearance, surfaces) in [
+            ("light", NSAppearance.Name.aqua, StatusInk.lightSurfaces),
+            ("dark", NSAppearance.Name.darkAqua, StatusInk.darkSurfaces)
+        ] {
+            guard let look = NSAppearance(named: appearance) else {
+                TestRunner.skip("appearance \(appearanceName) unavailable")
+                continue
+            }
+            look.performAsCurrentDrawingAppearance {
+                for (name, ink) in inks {
+                    let ratios = surfaces.compactMap { Contrast.ratio(ink, $0) }
+                    guard ratios.count == surfaces.count, let worst = ratios.min() else {
+                        TestRunner.assertTrue(false, "\(name)/\(appearanceName): color not convertible to sRGB")
+                        continue
+                    }
+                    TestRunner.assertTrue(
+                        worst >= 4.5,
+                        "\(name) on \(appearanceName): worst surface \(String(format: "%.2f", worst)):1 ≥ 4.5:1"
+                    )
+                }
+            }
+        }
+
+        // Sanity anchors for the formula itself — if these drift, the ratios
+        // above are measuring nothing.
+        if let blackOnWhite = Contrast.ratio(.black, .white) {
+            TestRunner.assertTrue(
+                abs(blackOnWhite - 21.0) < 0.01,
+                "black on white is 21:1 (got \(String(format: "%.2f", blackOnWhite)))"
+            )
+        }
+        if let same = Contrast.ratio(.white, .white) {
+            TestRunner.assertTrue(abs(same - 1.0) < 0.01, "a color against itself is 1:1")
         }
     }
 }
