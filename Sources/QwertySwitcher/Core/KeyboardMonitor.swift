@@ -119,6 +119,10 @@ final class KeyboardMonitor {
     // out of scope for now — see Fix report.
     private var pendingLeadingSymbols: [BufferedKeystroke] = []
 
+    /// Set while the current run holds a key that is a letter in one alphabet
+    /// and punctuation in the other — see `InputBuffer.isAlphabetAmbiguous`.
+    private var runHasAmbiguousKey = false
+
     private let spotlightBundleID = "com.apple.Spotlight"
 
     init(languageDetector: LanguageDetector, textReplacer: TextReplacing,
@@ -462,7 +466,18 @@ final class KeyboardMonitor {
         // word boundary only when current layout is Latin.
         let currentLayout = languageDetector.inputSourceManager.currentLayout
         let currentLang = currentLayout?.languageCode
-        if InputBuffer.isPunctuationIn(keycode: keycode, languageCode: currentLang, flags: flags) {
+        // These keys carry a LETTER in the other alphabet (`;`=ж `,`=б `.`=ю
+        // `[`=х `]`=ъ `'`=э `` ` ``=ё), and 39.6% of Russian words ≥3 letters
+        // contain at least one of them — measured on the bundled dictionary.
+        // Closing the word here decided, irreversibly and at the moment of the
+        // keystroke, something only the FOLLOWING characters can settle: "так;"
+        // got corrected on its own and "е" landed in the next word ("до так;е",
+        // owner 05.08). So the key now joins the run and the decision is
+        // deferred to the real boundary, where `LanguageDetector.projections`
+        // weighs both readings against the dictionary.
+        let punctuationRunsOn = InputBuffer.isLetterKey(keycode)
+        if !punctuationRunsOn,
+           InputBuffer.isPunctuationIn(keycode: keycode, languageCode: currentLang, flags: flags) {
             let punctChar = currentLayout.flatMap {
                 languageDetector.inputSourceManager.characterForKeycode(
                     keycode, layout: $0, flags: flags
@@ -484,10 +499,20 @@ final class KeyboardMonitor {
             autoLearnTracker.registerNonDeletion()
             if buffer.isEmpty {
                 lastCompletedWord = nil
+                runHasAmbiguousKey = false
                 instantCorrectionGate.startNewWord()
             }
+            if InputBuffer.isAlphabetAmbiguous(keycode) { runHasAmbiguousKey = true }
             buffer.append(keycode, flags: flags)
-            if canAutoCorrect && prefsService.isInstantCorrectionEnabled && !instantCorrectionGate.wasCorrected {
+            // Instant correction fires MID-word, before the evidence is in. It
+            // has its own, looser scorer, so once alphabet-ambiguous keys were
+            // allowed to stay in the run it started rewriting correct English:
+            // "key." reads as the Russian word "луню" and got replaced while
+            // still being typed. Runs containing such a key wait for the real
+            // word boundary, where the full projection logic applies. Pure
+            // letter runs behave exactly as they did before.
+            if canAutoCorrect && prefsService.isInstantCorrectionEnabled
+                && !instantCorrectionGate.wasCorrected && !runHasAmbiguousKey {
                 tryInstantCorrection(triggerEvent: event)
             }
         } else if InputBuffer.isNumberOrSpecial(keycode) {

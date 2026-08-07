@@ -9,7 +9,20 @@ final class LanguageDetector {
     private let wordFrequency = WordFrequency()
 
     private var previousWordLanguage: String?
-    private let contextBias = 15
+    /// Was 15 — LARGER than the `collisionGap` below, which meant the language
+    /// of the previous word alone could manufacture a "clear winner" out of a
+    /// tie. Harmless while words were letters-only; once punctuation joined the
+    /// run it became an English-corrupting bug: "key." renders as the real
+    /// Russian word "луню", scoring 88 against English's 91 — a 3-point gap the
+    /// collision gate holds — until +15 of context bias pushes it to 103 and
+    /// the gate opens. Context is a hint, so it must never on its own clear the
+    /// bar that exists to demand a decisive win.
+    private let contextBias = 5
+    private let collisionGap = 10
+    /// Margin required to overrule text that is already a valid word in the
+    /// user's current layout. Deliberately far above `collisionGap`: the two
+    /// outcomes are not equally bad.
+    private let incumbentGap = 25
 
     private static let skipPatterns: [NSRegularExpression] = {
         let patterns = [
@@ -62,20 +75,31 @@ final class LanguageDetector {
         var candidates: [(layout: KeyboardLayout, word: String, score: Int, inDictionary: Bool)] = []
 
         for layout in layouts {
-            let word = inputSourceManager.convertKeystrokes(keystrokes, toLayout: layout)
-            guard !word.isEmpty else { continue }
-            if Self.isMixedScript(word) { continue }
+            // A run can hold keys that are punctuation in one alphabet and
+            // letters in the other (`;`=ж, `,`=б, `.`=ю, `[`=х, `]`=ъ, `'`=э).
+            // Score only the LETTER CORE, but replace the whole run — and try
+            // both readings of a trailing ambiguous key, because "ghbdtn." is
+            // "привет" + "." and NOT the non-word "приветю".
+            let readings = projections(keystrokes, to: layout, asTyped: currentText)
+            guard let best = readings.max(by: { scoreWord($0.core, language: layout.languageCode)
+                                                 < scoreWord($1.core, language: layout.languageCode) })
+            else { continue }
+            let word = best.replacement
+            let core = best.core
+            guard !word.isEmpty, !core.isEmpty else { continue }
+            if Self.isMixedScript(core) { continue }
 
-            let dictionaryScore = scoreWord(word, language: layout.languageCode)
+            let dictionaryScore = scoreWord(core, language: layout.languageCode)
             let inDictionary = dictionaryScore > 0
             var score = dictionaryScore
 
-            // N-gram bonus/penalty
-            let ngramScore = ngramAnalyzer.score(word, language: layout.languageCode)
+            // N-gram bonus/penalty — on the core, not the run: a trailing "."
+            // or "," is not evidence about which alphabet the WORD is in.
+            let ngramScore = ngramAnalyzer.score(core, language: layout.languageCode)
             score += ngramScore
 
             // Word frequency bonus
-            score += wordFrequency.bonus(word, language: layout.languageCode)
+            score += wordFrequency.bonus(core, language: layout.languageCode)
 
             // Context bias
             if score > 0, layout.languageCode == previousWordLanguage {
@@ -117,8 +141,23 @@ final class LanguageDetector {
         // never corrupted text (not recoverable without noticing it first).
         guard best.inDictionary else { return .noSwitch }
 
-        // Collision: need clear winner (gap >= 10)
-        if candidates.count >= 2 && (candidates[0].score - candidates[1].score) < 10 {
+        // Collision: need clear winner
+        if candidates.count >= 2 && (candidates[0].score - candidates[1].score) < collisionGap {
+            return .noSwitch
+        }
+
+        // Asymmetric burden of proof. If what the user typed ALREADY reads as a
+        // real word in the language of their current layout, they were almost
+        // certainly typing that word — and overwriting it is the expensive
+        // mistake, while skipping is the cheap one (Double Shift recovers it).
+        // Without this, English words whose latin keys spell a valid Russian
+        // word lose on a few n-gram points: "key." → "луню", "bye." → "иную",
+        // "next." → "тучею" (58 such collisions counted in the bundled
+        // dictionaries). A plain gap can't separate them — both sides are
+        // genuine dictionary hits — so the incumbent gets a wide moat instead.
+        if let incumbent = candidates.first(where: { $0.layout.id == currentLayout.id }),
+           incumbent.inDictionary,
+           best.score - incumbent.score < incumbentGap {
             return .noSwitch
         }
 
@@ -170,6 +209,64 @@ final class LanguageDetector {
     func resetContext() { previousWordLanguage = nil }
 
     // MARK: - Multi-level scoring (Dictionary + SpellCheck + N-grams + Frequency)
+
+    /// One reading of a run under a candidate layout: which part is the word
+    /// (`core`, the only thing worth scoring) and what the whole run becomes on
+    /// screen if this layout wins (`replacement`).
+    private struct Projection {
+        let core: String
+        let replacement: String
+    }
+
+    /// Splits a rendered run into `[leading non-letters][core][trailing non-letters]`.
+    /// Returns nil when the letters are INTERRUPTED by a non-letter — two cores
+    /// mean this is not one word ("model/path", "a;b", "--flag=value"), and
+    /// that single rule is what keeps shell commands safe.
+    private static func core(of rendered: String) -> String? {
+        let core = rendered.drop(while: { !$0.isLetter })
+            .prefix(while: { $0.isLetter })
+        guard !core.isEmpty else { return nil }
+        let rest = rendered.drop(while: { !$0.isLetter }).dropFirst(core.count)
+        guard !rest.contains(where: { $0.isLetter }) else { return nil }
+        return String(core)
+    }
+
+    /// Up to two readings per layout. The second exists because an ambiguous
+    /// trailing key is genuinely ambiguous: typing "ghbdtn." means "привет."
+    /// (a word plus a full stop), not the non-word "приветю" — but typing
+    /// "nfr;t" means "также", where the very same class of key IS a letter.
+    /// Only the dictionary can tell them apart, so we score both and keep the
+    /// better one.
+    private func projections(
+        _ keystrokes: [BufferedKeystroke],
+        to layout: KeyboardLayout,
+        // Rendered ONCE by the caller and passed in: it doesn't depend on the
+        // candidate layout, and every `convertKeystrokes` is a `UCKeyTranslate`
+        // per character. This runs on each word boundary, so the difference
+        // between 5 and 3 renders per word is free to take.
+        asTyped: String
+    ) -> [Projection] {
+        var result: [Projection] = []
+
+        let whole = inputSourceManager.convertKeystrokes(keystrokes, toLayout: layout)
+        if let core = Self.core(of: whole) {
+            result.append(Projection(core: core, replacement: whole))
+        }
+
+        // Trailing keys that the user SAW as punctuation while typing: peel them
+        // off, convert only the head, and leave them exactly as typed.
+        let trailingPunct = asTyped.reversed().prefix(while: { !$0.isLetter }).count
+        if trailingPunct > 0, trailingPunct < keystrokes.count {
+            let head = Array(keystrokes.dropLast(trailingPunct))
+            let tail = String(asTyped.suffix(trailingPunct))
+            let headRendered = inputSourceManager.convertKeystrokes(head, toLayout: layout)
+            if let core = Self.core(of: headRendered) {
+                result.append(Projection(core: core, replacement: headRendered + tail))
+            }
+        }
+
+        return result
+    }
 
     private func scoreWord(_ word: String, language: String) -> Int {
         let lowered = word.lowercased()

@@ -100,6 +100,13 @@ final class InputBuffer {
         50, // ` / Ё
     ]
 
+    /// A key whose meaning genuinely depends on the alphabet: a letter in
+    /// Cyrillic, punctuation in Latin. Callers use this to hold back decisions
+    /// that can only be settled once the rest of the word is known.
+    static func isAlphabetAmbiguous(_ keycode: UInt16) -> Bool {
+        cyrillicOnlyLetterCodes.contains(keycode)
+    }
+
     /// Returns true if this keycode should be treated as a word-boundary / punctuation
     /// given the currently active layout's language code (e.g. "en", "ru").
     ///

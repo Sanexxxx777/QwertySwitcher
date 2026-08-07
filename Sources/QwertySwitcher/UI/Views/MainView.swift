@@ -308,17 +308,10 @@ struct MainView: View {
                 .padding(.horizontal, 20)
                 .padding(.top, 20)
 
-            Picker("", selection: $selectedTab) {
-                ForEach(MainTab.allCases) { tab in
-                    Text(tab.label).tag(tab)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .tint(theme.accent)
-            .padding(.horizontal, 20)
-            .padding(.top, 14)
-            .padding(.bottom, 12)
+            KeycapTabBar(items: MainTab.allCases, label: \.label, selection: $selectedTab)
+                .padding(.horizontal, Space.xl)
+                .padding(.top, Space.md)
+                .padding(.bottom, Space.sm + 2)
 
             Group {
                 switch selectedTab {
@@ -378,9 +371,16 @@ struct MainView: View {
                     Image(systemName: heroIcon)
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(heroColor)
+                    // The status WORD stays in ink, never in the status color.
+                    // Owner's verdict on the previous pass: "зелёный текст не
+                    // читается" — systemGreen on a light window background is
+                    // ~1.7:1, far under the 4.5:1 WCAG AA floor for body text.
+                    // Color still carries the state, but through the mark next
+                    // to it, where a low-contrast hue is legitimate (a glyph
+                    // isn't read letter by letter) and where it reads faster.
                     Text(heroWord)
                         .font(.appText(19, weight: .semibold))
-                        .foregroundStyle(heroColor)
+                        .foregroundStyle(theme.textPrimary)
                 }
                 Text("Определяет язык и исправляет раскладку во время набора")
                     .font(.appText(11))
@@ -401,7 +401,16 @@ struct MainView: View {
         // Decorative only — background painting never changes this VStack's own
         // reported size, so the window doesn't grow a single point for it.
         .background(alignment: .topTrailing) {
-            StatusEchoMotif(tint: heroColor)
+            // Was two blurred blobs at 6-9% opacity, which the owner read as a
+            // rendering artifact rather than a decision — at that blur a shape
+            // stops being a shape. Now the app's own mark: a key and its
+            // mirror, the thing this app literally does.
+            MirrorKeycapMark(
+                tint: heroColor,
+                ink: theme.textPrimary,
+                muted: !viewModel.isAutoSwitchEnabled
+            )
+            .padding(.trailing, 2)
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: viewModel.eventTapHealth)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: viewModel.isAutoSwitchEnabled)
