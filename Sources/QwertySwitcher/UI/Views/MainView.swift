@@ -65,6 +65,13 @@ struct AppTheme {
     let border: Color
     let borderActive: Color
 
+    /// Recessed well behind the selected-tab "keycap". Selection reads by
+    /// elevation instead of a tinted rectangle: the thumb uses `bgCard`, this
+    /// sits under it, and the two only separate if this tone is distinct from
+    /// BOTH the window background and the card — hence the blend below rather
+    /// than reusing an existing color.
+    let trackFill: Color
+
     /// Muted palette tone for the OFF state of toggles — never plain gray.
     let toggleOffTint: Color
 
@@ -105,6 +112,9 @@ struct AppTheme {
         NSColor.controlAccentColor.blended(withFraction: 0.35, of: .black) ?? .controlAccentColor)
     private static let sysAccentLight = Color(nsColor:
         NSColor.controlAccentColor.blended(withFraction: 0.35, of: .white) ?? .controlAccentColor)
+    private static let sysTrack = Color(nsColor:
+        NSColor.windowBackgroundColor.blended(withFraction: 0.55, of: .separatorColor)
+            ?? .windowBackgroundColor)
     private static let sysGreen = Color(nsColor: .systemGreen)
     private static let sysAmber = Color(nsColor: .systemOrange)
     private static let sysRed = Color(nsColor: .systemRed)
@@ -126,6 +136,7 @@ struct AppTheme {
         accentRed: sysRed,
         border: sysSeparator,
         borderActive: sysBorderActive,
+        trackFill: sysTrack,
         toggleOffTint: sysAccent.opacity(0.32)
     )
 
@@ -146,6 +157,7 @@ struct AppTheme {
         accentRed: sysRed,
         border: sysSeparator,
         borderActive: sysBorderActive,
+        trackFill: sysTrack,
         // Was 0.16 in the first pass — measured too pale against the light card fill,
         // so raised the floor here. Still applies verbatim now that the base accent is
         // dynamic: this is an opacity offset on top of it, not a hue choice.
