@@ -17,6 +17,15 @@ final class InputSourceManager {
     // already set no matter how quickly the distributed notification below
     // fires (observed 2-40ms delay — RC-3).
     private var pendingSelfSwitchID: String?
+    /// Layout the last *accepted* change notification reported. macOS delivers
+    /// `kTISNotifySelectedKeyboardInputSourceChanged` more than once for a
+    /// single switch (observed pairs 1–3ms apart in debug.log, e.g.
+    /// `07:36:24.072 (self)` + `07:36:24.074`), and only the first one could
+    /// match `pendingSelfSwitchID` — the duplicate was reported as an EXTERNAL
+    /// switch, which wipes the typed-word context right after our own
+    /// correction. That wipe is what made Double Shift answer "no
+    /// buffer/history" moments after a correction.
+    private var lastObservedLayoutID: String?
 
     // Test isolation (incident 05.08.2026): `switchTo` calls
     // `TISSelectInputSource`, which changes the Mac's REAL active keyboard
@@ -56,6 +65,7 @@ final class InputSourceManager {
 
     init() {
         reloadLayouts()
+        lastObservedLayoutID = currentLayout?.id
         DistributedNotificationCenter.default().addObserver(
             self,
             selector: #selector(inputSourceChanged),
@@ -263,12 +273,18 @@ final class InputSourceManager {
 
     @objc private func inputSourceChanged() {
         reloadLayouts()
+        let newID = currentLayout?.id
+        let verdict = Self.classifyChange(
+            previousLayoutID: lastObservedLayoutID,
+            newLayoutID: newID,
+            pendingSelfSwitchID: pendingSelfSwitchID
+        )
+        guard case .changed(let selfInitiated) = verdict else { return }
+
+        lastObservedLayoutID = newID
+        pendingSelfSwitchID = nil
         let layoutName = currentLayout?.name ?? "?"
         let lang = currentLayout?.languageCode ?? "?"
-        let selfInitiated = Self.isSelfInitiated(
-            pendingSelfSwitchID: pendingSelfSwitchID, newLayoutID: currentLayout?.id
-        )
-        pendingSelfSwitchID = nil
         DebugLog.shared.log(
             "IS", "layout changed → \(lang):\(layoutName)\(selfInitiated ? " (self)" : "")"
         )
@@ -278,9 +294,19 @@ final class InputSourceManager {
         )
     }
 
-    /// Pure decision extracted for testability: was this input-source-changed
-    /// notification caused by our own pending `switchTo` call?
-    static func isSelfInitiated(pendingSelfSwitchID: String?, newLayoutID: String?) -> Bool {
-        pendingSelfSwitchID != nil && pendingSelfSwitchID == newLayoutID
+    enum LayoutChangeVerdict: Equatable {
+        /// A repeat notification for the layout that is already active. Not a
+        /// switch at all — must not reach `KeyboardMonitor`, which treats every
+        /// external switch as "the user moved somewhere else, drop the context".
+        case duplicate
+        case changed(selfInitiated: Bool)
+    }
+
+    /// Pure decision extracted for testability: what does this
+    /// input-source-changed notification actually mean?
+    static func classifyChange(previousLayoutID: String?, newLayoutID: String?,
+                               pendingSelfSwitchID: String?) -> LayoutChangeVerdict {
+        if let newID = newLayoutID, newID == previousLayoutID { return .duplicate }
+        return .changed(selfInitiated: pendingSelfSwitchID != nil && pendingSelfSwitchID == newLayoutID)
     }
 }
