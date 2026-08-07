@@ -689,6 +689,7 @@ final class KeyboardMonitor {
                     "KM",
                     "instant correction: \(currentLayout.languageCode)→\(result.layout.languageCode)"
                         + " len=\(length) lead=\(leadingSymbols.count)"
+                        + " bs=\(length) pay=\(runReplacement.count)"
                 )
             case .layoutSwitchFailed:
                 self.instantCorrectionGate.reset()
@@ -863,6 +864,8 @@ final class KeyboardMonitor {
                     "KM",
                     "doubleShift via \(source): \(currentLayout.languageCode)→\(targetLayout.languageCode)"
                         + " len=\(length) lead=\(leadingSymbols.count) trail=\(trailing ?? "∅")"
+                        + " bs=\(length + (trailing?.count ?? 0))"
+                        + " pay=\(runReplacement.count + (trailing?.count ?? 0))"
                 )
             case .layoutSwitchFailed:
                 DebugLog.shared.log("KM", "doubleShift aborted: layout switch verification failed")
@@ -983,6 +986,13 @@ final class KeyboardMonitor {
                         "KM",
                         "correction: \(sourceLayout.languageCode)→\(layout.languageCode)"
                             + " len=\(runLength) lead=\(leadingSymbols.count) trig=\(trigger ?? "∅")"
+                            // bs/pay = characters erased vs characters retyped.
+                            // They must match, and when they don't the text
+                            // silently gains or loses exactly that many
+                            // characters. Logged as bare counts (no content)
+                            // so a report like "a letter went missing" is one
+                            // glance to diagnose instead of a round of guesses.
+                            + " bs=\(runLength) pay=\(runReplacement.count + (trigger?.count ?? 0))"
                     )
                 case .layoutSwitchFailed:
                     if let trigger {

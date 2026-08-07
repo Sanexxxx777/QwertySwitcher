@@ -148,13 +148,19 @@ final class TextReplacer {
         }
     }
 
+    /// Point of no return: cancellation is honoured only BEFORE the first
+    /// backspace goes out. Once even one character has been erased, the
+    /// transaction must finish — bailing halfway erased the user's text and
+    /// never retyped it, which loses characters permanently. Everything slow
+    /// (the layout switch and its verification retries) happens before this,
+    /// so the useful cancellation window is untouched.
     private func sendBackspaces(
         count: Int,
         cancellation: ReplacementCancellationToken
     ) -> Bool {
+        guard !cancellation.isCancelled else { return false }
         let src = CGEventSource(stateID: .hidSystemState)
         for _ in 0..<count {
-            guard !cancellation.isCancelled else { return false }
             if let kd = CGEvent(keyboardEventSource: src, virtualKey: 51, keyDown: true),
                let ku = CGEvent(keyboardEventSource: src, virtualKey: 51, keyDown: false) {
                 SyntheticEventMarker.mark(kd)
@@ -164,20 +170,22 @@ final class TextReplacer {
             }
             usleep(keystrokeDelay)
         }
-        return !cancellation.isCancelled
+        return true
     }
 
     /// Type string character-by-character via Unicode events.
     /// Per-char (not batched) is required for Electron/web apps — Telegram, Discord,
     /// VSCode, Slack drop multi-char Unicode payloads silently, leaving us with
     /// "text deleted but nothing typed" after backspaces fire.
+    /// Never bails out midway for the same reason as `sendBackspaces`: by the
+    /// time this runs the original text is already gone from the screen, so an
+    /// early return would leave the user with a hole where their word was.
     private func typeStringFast(
         _ text: String,
         cancellation: ReplacementCancellationToken
     ) -> Bool {
         let src = CGEventSource(stateID: .hidSystemState)
         for char in text {
-            guard !cancellation.isCancelled else { return false }
             let utf16 = Array(String(char).utf16)
             if let kd = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true) {
                 SyntheticEventMarker.mark(kd)
@@ -191,7 +199,7 @@ final class TextReplacer {
             }
             usleep(keystrokeDelay)
         }
-        return !cancellation.isCancelled
+        return true
     }
 }
 

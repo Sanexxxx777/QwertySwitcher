@@ -60,6 +60,7 @@ enum TestRunner {
         QueueReplacementActiveTests.run()
         AvalancheGuardWiringTests.run()
         HotPathStructuralGuardTests.run()
+        ReplacementAtomicityGuardTests.run()
         SecureInputAXTierTests.run()
         CallbackDurationThresholdTests.run()
         TapTimeoutCounterTests.run()
@@ -1755,21 +1756,49 @@ enum InstantCorrectionGateSelfSwitchTests {
 enum InputSourceSelfSwitchTests {
     static func run() {
         TestRunner.section("InputSourceManager — self-initiated layout change (Fix 3)")
-        TestRunner.assertTrue(
-            InputSourceManager.isSelfInitiated(
-                pendingSelfSwitchID: "com.apple.keylayout.US", newLayoutID: "com.apple.keylayout.US"
+        let us = "com.apple.keylayout.US"
+        let ru = "com.apple.keylayout.Russian"
+        TestRunner.assertEqual(
+            InputSourceManager.classifyChange(
+                previousLayoutID: ru, newLayoutID: us, pendingSelfSwitchID: us
             ),
+            .changed(selfInitiated: true),
             "a switch matching our own pending request is self-initiated"
         )
-        TestRunner.assertTrue(
-            !InputSourceManager.isSelfInitiated(
-                pendingSelfSwitchID: "com.apple.keylayout.US", newLayoutID: "com.apple.keylayout.Russian"
+        TestRunner.assertEqual(
+            InputSourceManager.classifyChange(
+                previousLayoutID: us, newLayoutID: ru, pendingSelfSwitchID: us
             ),
+            .changed(selfInitiated: false),
             "a manual switch to a DIFFERENT layout than we requested is not self-initiated"
         )
-        TestRunner.assertTrue(
-            !InputSourceManager.isSelfInitiated(pendingSelfSwitchID: nil, newLayoutID: "com.apple.keylayout.US"),
+        TestRunner.assertEqual(
+            InputSourceManager.classifyChange(
+                previousLayoutID: ru, newLayoutID: us, pendingSelfSwitchID: nil
+            ),
+            .changed(selfInitiated: false),
             "with no pending request at all, any switch is manual"
+        )
+
+        // Live evidence, debug.log 08.08.2026 — macOS delivers the change
+        // notification TWICE for one switch (07:36:24.072 "(self)" +
+        // 07:36:24.074 plain). The second one used to be reported as an
+        // external switch and wiped the typed-word context 2ms after our own
+        // correction finished, which is what made Double Shift immediately
+        // answer "no buffer/history — skip".
+        TestRunner.assertEqual(
+            InputSourceManager.classifyChange(
+                previousLayoutID: ru, newLayoutID: ru, pendingSelfSwitchID: nil
+            ),
+            .duplicate,
+            "a repeat notification for the already-active layout is not a switch"
+        )
+        TestRunner.assertEqual(
+            InputSourceManager.classifyChange(
+                previousLayoutID: nil, newLayoutID: us, pendingSelfSwitchID: nil
+            ),
+            .changed(selfInitiated: false),
+            "the very first notification of a session is a real change, not a duplicate"
         )
     }
 }
@@ -2780,6 +2809,47 @@ enum HotPathStructuralGuardTests {
             "an ordinary letter never starts a text-replacement transaction"
                 + " (AX writes / clipboard / sound only ever run from inside a replacement's completion)"
         )
+    }
+}
+
+/// A replacement is a transaction: the moment the first backspace goes out,
+/// the user's word is gone from the screen and only our retype can put it
+/// back. Bailing out of either loop halfway therefore destroys text with no
+/// way to recover it — the worst failure this app can have. Enforced by
+/// reading the source, because the alternative (driving the real
+/// `TextReplacer`) posts live CGEvents into whatever the owner is typing —
+/// exactly the accident that corrupted his input on 05.08.2026.
+enum ReplacementAtomicityGuardTests {
+    static func run() {
+        TestRunner.section("TextReplacer — a started replacement is never abandoned halfway")
+
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()      // Tests/
+            .deletingLastPathComponent()      // QwertySwitcher/
+            .appendingPathComponent("Core/TextReplacer.swift")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            TestRunner.skip("TextReplacer.swift not readable from \(source.path)")
+            return
+        }
+
+        for (function, loopHeader) in [
+            ("sendBackspaces", "for _ in 0..<count {"),
+            ("typeStringFast", "for char in text {")
+        ] {
+            guard let loopStart = text.range(of: loopHeader) else {
+                TestRunner.assertTrue(false, "\(function): loop header not found — test needs updating")
+                continue
+            }
+            // Bound the search to the rest of THIS function: the next
+            // `private func` (or end of file) is a safe terminator here.
+            let rest = String(text[loopStart.upperBound...])
+            let functionBody = rest.range(of: "private func").map { String(rest[..<$0.lowerBound]) } ?? rest
+            TestRunner.assertTrue(
+                !functionBody.contains("isCancelled"),
+                "\(function) does not re-check cancellation inside its loop"
+                    + " (a mid-loop bail erases text and never retypes it)"
+            )
+        }
     }
 }
 
