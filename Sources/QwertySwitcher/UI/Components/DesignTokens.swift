@@ -77,10 +77,10 @@ enum StatusInk {
     /// `blended(withFraction:of:)` here, because that would resolve against whatever
     /// appearance happened to be current when the static was first touched and then
     /// stay frozen at that value for the process's lifetime.
-    private static func pair(light: NSColor, dark: NSColor) -> Color {
-        Color(nsColor: NSColor(name: nil) { appearance in
+    private static func pair(light: NSColor, dark: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
             appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
-        })
+        }
     }
 
     private static func srgb(_ hex: UInt32) -> NSColor {
@@ -90,10 +90,52 @@ enum StatusInk {
                 alpha: 1)
     }
 
-    /// systemGreen darkened 30% for light (4.32:1 on card) / systemGreen dark (8.25:1).
-    static let green = pair(light: srgb(0x248B3E), dark: srgb(0x30D158))
-    /// systemOrange darkened 30% for light (4.29:1) / systemOrange dark (8.11:1).
-    static let amber = pair(light: srgb(0xB26800), dark: srgb(0xFF9F0A))
-    /// systemRed darkened 30% for light (6.46:1) / systemRed dark (4.89:1).
-    static let red = pair(light: srgb(0xB22922), dark: srgb(0xFF453A))
+    /// The two surfaces a status color is ever read against, per appearance:
+    /// the window itself and the lighter/darker card material sitting on it.
+    /// Measured on this machine, then frozen as constants — resolving
+    /// `NSColor.windowBackgroundColor` at test time gives different answers
+    /// depending on whether the process has an NSApplication, which made the
+    /// check depend on how it was run rather than on the colors.
+    static let lightSurfaces: [NSColor] = [srgb(0xECECEC), srgb(0xFFFFFF)]
+    static let darkSurfaces: [NSColor] = [srgb(0x1E1E1E), srgb(0x323232)]
+
+    /// Each value is the smallest shift off the system color that clears
+    /// 4.5:1 against the WORST of its appearance's two surfaces. Chosen by
+    /// solving for the ratio, not by eye — the previous pass was picked
+    /// against a single surface and still failed on the other one.
+    /// systemGreen darkened for light (4.50:1) / systemGreen in dark (6.34:1).
+    static let greenNS = pair(light: srgb(0x207B37), dark: srgb(0x30D158))
+    /// systemOrange darkened for light (4.55:1) / systemOrange in dark (6.24:1).
+    static let amberNS = pair(light: srgb(0x9C5B00), dark: srgb(0xFF9F0A))
+    /// systemRed darkened for light (4.54:1) / lightened for dark (4.52:1).
+    static let redNS = pair(light: srgb(0xC92F26), dark: srgb(0xFF685F))
+
+    static var green: Color { Color(nsColor: greenNS) }
+    static var amber: Color { Color(nsColor: amberNS) }
+    static var red: Color { Color(nsColor: redNS) }
+}
+
+// MARK: - Contrast, as a number
+//
+// "Looks readable" is the judgement that produced the unreadable green headline
+// in the first place. These two functions are the WCAG 2.1 relative-luminance
+// and contrast-ratio formulas verbatim, so the suite can assert the ratio in
+// both appearances instead of anyone eyeballing a screenshot.
+
+enum Contrast {
+    static func relativeLuminance(_ color: NSColor) -> Double? {
+        guard let c = color.usingColorSpace(.sRGB) else { return nil }
+        func linear(_ v: Double) -> Double {
+            v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linear(c.redComponent)
+            + 0.7152 * linear(c.greenComponent)
+            + 0.0722 * linear(c.blueComponent)
+    }
+
+    /// WCAG contrast ratio, 1.0 (identical) … 21.0 (black on white).
+    static func ratio(_ a: NSColor, _ b: NSColor) -> Double? {
+        guard let la = relativeLuminance(a), let lb = relativeLuminance(b) else { return nil }
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+    }
 }

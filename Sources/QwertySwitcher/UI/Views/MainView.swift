@@ -115,9 +115,14 @@ struct AppTheme {
     private static let sysTrack = Color(nsColor:
         NSColor.windowBackgroundColor.blended(withFraction: 0.55, of: .separatorColor)
             ?? .windowBackgroundColor)
-    private static let sysGreen = Color(nsColor: .systemGreen)
-    private static let sysAmber = Color(nsColor: .systemOrange)
-    private static let sysRed = Color(nsColor: .systemRed)
+    // Status colors come from `StatusInk`, not straight from AppKit: plain
+    // `.systemGreen` measures 2.22:1 against a light card — half the 4.5:1 the
+    // text on it needs. `StatusInk` keeps the system value in dark appearance
+    // and darkens it 30% in light, which is the smallest correction that
+    // clears AA. See DesignTokens.swift for the measured ratios.
+    private static let sysGreen = StatusInk.green
+    private static let sysAmber = StatusInk.amber
+    private static let sysRed = StatusInk.red
 
     static let dark = AppTheme(
         isDark: true,
@@ -449,7 +454,7 @@ struct MainView: View {
         VStack(alignment: .leading, spacing: 6) {
             SectionTitle("За всё время")
             ZStack {
-                StatsKeycapWash(tint: theme.accent)
+                KeyRowBand(tint: theme.accent)
                 HStack(spacing: 0) {
                     UsageMetric(value: viewModel.autoSwitchCount, label: "исправлений")
                     metricDivider
@@ -913,63 +918,6 @@ private struct LicenseBadge: View {
         .onHover { isHovered = $0 }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isHovered)
         .help(help ?? "")
-    }
-}
-
-/// Soft, state-tinted echo of the two offset squircles in the app icon (the white
-/// "keycap" glyph plate + its rotated blue shadow-keycap behind it) — the app's own
-/// signature shape, recolored to `heroColor` instead of redrawn from scratch. Pure
-/// vector (`RoundedRectangle` + `.blur`), no bitmap, so it stays crisp at any scale and
-/// costs nothing in bundle size. `.allowsHitTesting(false)` keeps it from stealing
-/// clicks from the header controls it sits behind; it never animates on its own — only
-/// the two `.animation(value:)` calls on `header` move it, exactly once per state
-/// change, and only when Reduce Motion is off.
-private struct StatusEchoMotif: View {
-    let tint: Color
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(tint.opacity(0.20))
-                .frame(width: 42, height: 42)
-                .rotationEffect(.degrees(8))
-                .offset(x: 16, y: -2)
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(tint.opacity(0.32))
-                .frame(width: 34, height: 34)
-                .rotationEffect(.degrees(-7))
-                .offset(x: 40, y: 6)
-        }
-        .frame(width: 110, height: 46, alignment: .top)
-        .blur(radius: 12)
-        .allowsHitTesting(false)
-    }
-}
-
-/// Same squircle language as `StatusEchoMotif`, restated in the app's own accent
-/// instead of a health state — ties the stats card back to the same visual signature
-/// without literally repeating the header's composition. There's no state to react to
-/// here, so it's fully static: no animation, no continuous motion, nothing to cost GPU
-/// while the window just sits open.
-private struct StatsKeycapWash: View {
-    let tint: Color
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(tint.opacity(0.09))
-                .frame(width: 92, height: 56)
-                .rotationEffect(.degrees(-6))
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(tint.opacity(0.06))
-                .frame(width: 66, height: 44)
-                .rotationEffect(.degrees(9))
-                .offset(x: 58, y: 4)
-        }
-        .blur(radius: 10)
-        .allowsHitTesting(false)
-        .frame(maxWidth: .infinity, alignment: .trailing)
-        .padding(.trailing, 24)
     }
 }
 
