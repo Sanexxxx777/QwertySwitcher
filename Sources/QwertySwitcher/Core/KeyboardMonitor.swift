@@ -411,6 +411,7 @@ final class KeyboardMonitor {
         if secureInputDetector.isSecureInput {
             buffer.clear()
             pendingLeadingSymbols.removeAll()
+            runKeystrokes.removeAll()
             lastCompletedWord = nil
             autoLearnTracker.cancel()
             health = .secureInput
@@ -421,10 +422,12 @@ final class KeyboardMonitor {
 
         // Stale buffer eviction — user paused typing too long, old keys don't belong to current word
         let now = CFAbsoluteTimeGetCurrent()
-        if (!buffer.isEmpty || !pendingLeadingSymbols.isEmpty) && (now - lastKeyTime) > staleBufferTimeout {
+        if (!buffer.isEmpty || !pendingLeadingSymbols.isEmpty || !runKeystrokes.isEmpty)
+            && (now - lastKeyTime) > staleBufferTimeout {
             logContextWipe("stale-\(Int((now - lastKeyTime).rounded()))s")
             buffer.clear()
             pendingLeadingSymbols.removeAll()
+            runKeystrokes.removeAll()
         }
         lastKeyTime = now
 
@@ -460,6 +463,7 @@ final class KeyboardMonitor {
             // so drop the run entirely rather than risk an over/under
             // backspace count on a later correction.
             pendingLeadingSymbols.removeAll()
+            runKeystrokes.removeAll()
             autoLearnTracker.registerDeletion()
             return
         }
@@ -797,16 +801,53 @@ final class KeyboardMonitor {
     /// the scored path picks the target layout intelligently, and that
     /// calibration is left exactly as it was.
     private func convertWholeRun() -> Bool {
-        let run = runKeystrokes
-        guard run.count >= 2,
-              run.contains(where: { !InputBuffer.isLetterKey($0.keycode) }),
-              let currentLayout = languageDetector.inputSourceManager.currentLayout,
+        guard let currentLayout = languageDetector.inputSourceManager.currentLayout,
               let targetLayout = languageDetector.activeLayouts.first(where: { $0.id != currentLayout.id })
         else { return false }
 
-        let onScreen = languageDetector.inputSourceManager.convertKeystrokes(run, toLayout: currentLayout)
-        let converted = languageDetector.inputSourceManager.convertKeystrokes(run, toLayout: targetLayout)
-        guard !onScreen.isEmpty, converted != onScreen else { return false }
+        // The screen wins over the model whenever we can read it. Our own
+        // record of what was typed drifts — it did in "пgmail" (5 keystrokes
+        // tracked, 6 characters on screen) and again in "йq1", where the run
+        // was one keystroke short and the conversion left the first character
+        // stranded. Every such bug erases the wrong number of characters, so
+        // measuring the real text is worth an AX round trip on a gesture the
+        // user made deliberately. When AX says nothing (many terminals and
+        // Electron fields), the tracked run is still the best we have.
+        // Nothing typed since the last break: there is no run to convert, and
+        // the history path below handles that case. Checked before the AX call
+        // so an ordinary word conversion never pays for a cross-process round
+        // trip it cannot use.
+        let run = runKeystrokes
+        guard !run.isEmpty else { return false }
+        let modelText = languageDetector.inputSourceManager.convertKeystrokes(run, toLayout: currentLayout)
+        var onScreen = modelText
+        var resynced = false
+        if let element = AXTextSelectionService.focusedElement(),
+           let (text, caret) = AXTextSelectionService.valueAndCaret(element),
+           let actual = CaretWordExtractor.wordBeforeCaret(text: text, caretUTF16Offset: caret),
+           actual.word != modelText {
+            DebugLog.shared.log(
+                "KM", "run resynced from screen: model=\(modelText.count) screen=\(actual.word.count)"
+            )
+            onScreen = actual.word
+            resynced = true
+        }
+
+        guard onScreen.count >= 2, onScreen.contains(where: { !$0.isLetter }) else { return false }
+
+        // Keycodes are the precise source: they render every key correctly,
+        // including the ones outside the letter row ("/" in "/exit", which has
+        // no reverse mapping and would otherwise pass through as the "." it
+        // currently shows). The text converter is the fallback for exactly one
+        // situation — the model disagreed with the screen, so its keycodes
+        // describe something other than what is actually there.
+        let converted = resynced
+            ? LayoutTextConverter.convert(
+                onScreen, from: currentLayout, to: targetLayout,
+                inputSourceManager: languageDetector.inputSourceManager
+              )
+            : languageDetector.inputSourceManager.convertKeystrokes(run, toLayout: targetLayout)
+        guard !converted.isEmpty, converted != onScreen else { return false }
 
         isPaused = true
         textReplacer.replaceCurrentWord(
@@ -838,7 +879,7 @@ final class KeyboardMonitor {
                 DebugLog.shared.log(
                     "KM",
                     "doubleShift via run: \(currentLayout.languageCode)→\(targetLayout.languageCode)"
-                        + " keys=\(run.count) net=\(converted.count - onScreen.count)"
+                        + " len=\(onScreen.count) net=\(converted.count - onScreen.count)"
                 )
             case .layoutSwitchFailed:
                 DebugLog.shared.log("KM", "doubleShift run aborted: layout switch verification failed")
