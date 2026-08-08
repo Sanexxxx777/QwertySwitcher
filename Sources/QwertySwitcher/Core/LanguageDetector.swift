@@ -268,8 +268,26 @@ final class LanguageDetector {
         return result
     }
 
+    /// The complete set of one-letter words, spelled out rather than looked up.
+    /// The Bloom filter cannot be trusted at this length: with ~0.5% false
+    /// positives and an alphabet of only 59 candidates, "б", "ж" and "ъ" would
+    /// eventually pass as words and start rewriting text. The real list is
+    /// short, closed and unambiguous, so it belongs in the code.
+    private static let oneLetterWords: [String: Set<Character>] = [
+        "ru": ["а", "и", "в", "к", "о", "с", "у", "я"],
+        "en": ["a", "i"]
+    ]
+
     private func scoreWord(_ word: String, language: String) -> Int {
         let lowered = word.lowercased()
+        if lowered.count == 1 {
+            guard let letter = lowered.first,
+                  Self.oneLetterWords[language]?.contains(letter) == true else { return 0 }
+            // Below the 84-100 a dictionary hit scores: a one-letter word is
+            // real, but it is also the weakest possible evidence, and it has
+            // to lose to any longer word competing for the same run.
+            return 70
+        }
         guard lowered.count >= 2 else { return 0 }
 
         // BloomFilter-only membership check (pure in-memory, no IPC) — this

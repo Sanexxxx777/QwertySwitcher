@@ -819,7 +819,14 @@ final class KeyboardMonitor {
         // so an ordinary word conversion never pays for a cross-process round
         // trip it cannot use.
         let run = runKeystrokes
-        guard !run.isEmpty else { return false }
+        guard !run.isEmpty else {
+            // Silence here was itself a diagnosis gap: with no line at all,
+            // "the run was empty" looked exactly like "this code never ran"
+            // (owner's «ы1», 20:01:50 — three seconds after a correction, and
+            // nothing in the log said which of the two it was).
+            DebugLog.shared.log("KM", "run check: empty run — nothing typed since the last break")
+            return false
+        }
         let modelText = languageDetector.inputSourceManager.convertKeystrokes(run, toLayout: currentLayout)
         var onScreen = modelText
         var resynced = false
@@ -843,7 +850,14 @@ final class KeyboardMonitor {
                 + " → \(resynced ? "resynced to screen" : "model kept")"
         )
 
-        guard onScreen.count >= 2, onScreen.contains(where: { !$0.isLetter }) else { return false }
+        guard onScreen.count >= 2 else {
+            DebugLog.shared.log("KM", "run check: too short (\(onScreen.count)) — falls through to the scored path")
+            return false
+        }
+        guard onScreen.contains(where: { !$0.isLetter }) else {
+            DebugLog.shared.log("KM", "run check: letters only — falls through to the scored path")
+            return false
+        }
 
         // Keycodes are the precise source: they render every key correctly,
         // including the ones outside the letter row ("/" in "/exit", which has
@@ -1042,8 +1056,21 @@ final class KeyboardMonitor {
             return false
         }
         let keystrokes = buffer.currentWord()
-        // Require 3+ letters: 2-letter "words" (it/аа/oo) give too many false positives.
-        guard keystrokes.count >= 3 else {
+        // Short words are allowed, but ONLY when nothing precedes them on the
+        // line. The floor used to be 3 letters, which meant the single-letter
+        // Russian words — и, в, с, к, я, а, о, у — could never be fixed
+        // automatically at all (owner typed "b", pressed space, nothing
+        // happened). Two guards make one letter safe rather than reckless:
+        //
+        //  - a leading symbol blocks it outright. "rm -f" would otherwise
+        //    become "rm -а", because "а" IS a Russian word and would win the
+        //    scoring fairly. Command-line flags are the single most common
+        //    place a lone letter appears next to a symbol.
+        //  - `detect` already refuses any candidate that isn't in the
+        //    dictionary, so "b" only moves because "и" is a real word, while
+        //    "cd x" stays put ("ч" is not).
+        let shortWordFloor = pendingLeadingSymbols.isEmpty ? 1 : 3
+        guard keystrokes.count >= shortWordFloor else {
             DebugLog.shared.log("KM", "word too short (len=\(keystrokes.count))", level: .verbose)
             return false
         }

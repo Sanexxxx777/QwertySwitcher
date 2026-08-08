@@ -185,6 +185,19 @@ Qwerty Switcher — установка
 Приятного использования!
 README_EOF
 
+# Window dressing: backdrop with the drag arrow, icons placed on it, no
+# toolbar or sidebar. Generated from vectors on every build (Scripts/
+# make-dmg-background.swift) so there is no bitmap in the repo to fall out of
+# date. `.background` is hidden by the leading dot, which is why the recipient
+# sees the artwork and not a folder.
+mkdir -p "$DMG_STAGE/.background"
+if swift "$PROJECT_DIR/Scripts/make-dmg-background.swift" "$DMG_STAGE/.background" >/dev/null 2>&1; then
+    DMG_HAS_BACKGROUND=1
+else
+    echo "  note: background generation failed — building a plain DMG instead"
+    DMG_HAS_BACKGROUND=0
+fi
+
 # ── 5. Build the DMG ──
 echo "[6/6] Creating DMG..."
 if [ -e "$DMG_OUT" ]; then
@@ -194,14 +207,60 @@ if [ -e "$DMG_OUT" ]; then
     mv -f "$DMG_OUT" "$PREVIOUS_DMG"
     echo "  previous DMG preserved at: $PREVIOUS_DMG"
 fi
-if ! diskutil image create from \
+VOLUME_NAME="Qwerty Switcher $VERSION"
+
+if [ "$DMG_HAS_BACKGROUND" = "1" ]; then
+    # Two-step: a writable image to dress the window in, then a compressed
+    # read-only one to ship. The view settings live in the volume's .DS_Store,
+    # so they can only be written while the image is mounted read-write —
+    # building UDZO directly (the old path) is exactly why the window opened
+    # as a bare icon list.
+    TEMP_DMG="$BUILD_DIR/.dmg-staging-rw.dmg"
+    rm -f "$TEMP_DMG"
+    hdiutil create -volname "$VOLUME_NAME" -srcfolder "$DMG_STAGE" \
+        -ov -format UDRW "$TEMP_DMG" >/dev/null
+    MOUNT_POINT="$(hdiutil attach "$TEMP_DMG" -nobrowse -readwrite \
+        | grep -o '/Volumes/.*' | tail -1)"
+
+    if [ -n "$MOUNT_POINT" ]; then
+        # Finder automation needs TCC approval the first time; a refusal must
+        # not fail the build, it just costs the dressing.
+        osascript >/dev/null 2>&1 <<APPLESCRIPT || echo "  note: Finder automation unavailable — window layout not applied"
+tell application "Finder"
+    tell disk "$VOLUME_NAME"
+        open
+        set current view of container window to icon view
+        set toolbar visible of container window to false
+        set statusbar visible of container window to false
+        set the bounds of container window to {200, 140, 840, 540}
+        set viewOptions to the icon view options of container window
+        set arrangement of viewOptions to not arranged
+        set icon size of viewOptions to 128
+        set text size of viewOptions to 13
+        set background picture of viewOptions to file ".background:dmg-background.png"
+        set position of item "Qwerty Switcher.app" of container window to {170, 182}
+        set position of item "Applications" of container window to {470, 182}
+        set position of item "ПРОЧТИ_МЕНЯ.txt" of container window to {320, 330}
+        update without registering applications
+        close
+    end tell
+end tell
+APPLESCRIPT
+        sync
+        hdiutil detach "$MOUNT_POINT" -quiet || hdiutil detach "$MOUNT_POINT" -force -quiet
+    fi
+
+    rm -f "$DMG_OUT"
+    hdiutil convert "$TEMP_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_OUT" >/dev/null
+    rm -f "$TEMP_DMG"
+elif ! diskutil image create from \
     --format UDZO \
-    --volumeName "Qwerty Switcher $VERSION" \
+    --volumeName "$VOLUME_NAME" \
     "$DMG_STAGE" \
     "$DMG_OUT" >/dev/null; then
     echo "  diskutil image create is unavailable; using the legacy hdiutil fallback."
     hdiutil create \
-        -volname "Qwerty Switcher $VERSION" \
+        -volname "$VOLUME_NAME" \
         -srcfolder "$DMG_STAGE" \
         -ov -format UDZO \
         "$DMG_OUT" >/dev/null
