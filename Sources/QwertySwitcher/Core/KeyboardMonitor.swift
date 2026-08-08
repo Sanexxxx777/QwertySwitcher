@@ -759,11 +759,13 @@ final class KeyboardMonitor {
     /// cost us a whole diagnosis round on the "./compact" report: the buffer
     /// held 4 characters while 5+ were on screen, and nothing said why).
     private func logContextWipe(_ reason: String) {
-        guard !buffer.isEmpty || !pendingLeadingSymbols.isEmpty || lastCompletedWord != nil else { return }
+        guard !buffer.isEmpty || !pendingLeadingSymbols.isEmpty
+            || !runKeystrokes.isEmpty || lastCompletedWord != nil else { return }
         DebugLog.shared.log(
             "KM",
             "buffer wiped: reason=\(reason) len=\(buffer.currentWord().count)"
-                + " lead=\(pendingLeadingSymbols.count) history=\(lastCompletedWord == nil ? 0 : 1)"
+                + " lead=\(pendingLeadingSymbols.count) run=\(runKeystrokes.count)"
+                + " history=\(lastCompletedWord == nil ? 0 : 1)"
         )
     }
 
@@ -822,16 +824,25 @@ final class KeyboardMonitor {
         let modelText = languageDetector.inputSourceManager.convertKeystrokes(run, toLayout: currentLayout)
         var onScreen = modelText
         var resynced = false
-        if let element = AXTextSelectionService.focusedElement(),
-           let (text, caret) = AXTextSelectionService.valueAndCaret(element),
-           let actual = CaretWordExtractor.wordBeforeCaret(text: text, caretUTF16Offset: caret),
-           actual.word != modelText {
-            DebugLog.shared.log(
-                "KM", "run resynced from screen: model=\(modelText.count) screen=\(actual.word.count)"
-            )
-            onScreen = actual.word
+        // Logged on EVERY outcome, not just the resync. A silent "no line in
+        // the log" was indistinguishable between "AX agreed", "AX returned
+        // nothing" and "we never asked" — which cost a whole diagnosis round
+        // on the "./exit" report (18:43:06: conversion counted 5 characters,
+        // six had been typed, and nothing said whether the screen was ever
+        // consulted).
+        let axWord = AXTextSelectionService.focusedElement()
+            .flatMap { AXTextSelectionService.valueAndCaret($0) }
+            .flatMap { CaretWordExtractor.wordBeforeCaret(text: $0.text, caretUTF16Offset: $0.caret) }
+            .map(\.word)
+        if let actual = axWord, actual != modelText {
+            onScreen = actual
             resynced = true
         }
+        DebugLog.shared.log(
+            "KM",
+            "run check: model=\(modelText.count) ax=\(axWord.map { String($0.count) } ?? "none")"
+                + " → \(resynced ? "resynced to screen" : "model kept")"
+        )
 
         guard onScreen.count >= 2, onScreen.contains(where: { !$0.isLetter }) else { return false }
 

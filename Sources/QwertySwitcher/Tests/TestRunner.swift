@@ -2444,6 +2444,32 @@ enum KeyboardMonitorIntegrationTests {
             )
         }
 
+        // --- "./exit" typed on RU — the leading "." is a LETTER there ---------
+        // Owner typed "./exit" with the Russian layout active and got
+        // "./exit" back with a stray dot in front (log 18:43:06,
+        // "doubleShift via run len=5" — five characters counted where six
+        // were typed). Keycode 47 is "." in Latin but the LETTER "ю" in
+        // Cyrillic, so the run starts with a letter and continues through a
+        // symbol; nothing about that may drop a keystroke.
+        do {
+            guard let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+                TestRunner.skip("RU layout required")
+                return
+            }
+            TestRunner.section("Double Shift on «ю.учше» typed for «./exit» — nothing dropped")
+            inputSources.switchTo(ruLayout)
+            let h = harness(autoSwitch: false)
+            for code in [UInt16(47), 44, 14, 7, 34, 17] { h.press(code) }
+            TestRunner.assertEqual(
+                h.screen, "ю.учше", "sanity: six keystrokes, six characters on screen"
+            )
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "Double Shift reports a conversion")
+            TestRunner.assertEqual(
+                h.screen, "./exit",
+                "all six convert — no character left stranded in front"
+            )
+        }
+
         // --- "на 300$" — history must not outlive the caret ------------------
         // Double Shift's history fallback rewrites text AT THE CARET. Owner
         // typed "на" + space + "300$" and pressed Double Shift: the stale "на"
