@@ -662,8 +662,12 @@ struct MainView: View {
     // MARK: Logs — moved in from the status-bar menu (03.08.2026) so every
     // control lives inside this window; menu keeps only quick actions.
 
+    /// One card, not two. The toggle, the actions and the preview are the same
+    /// subject, and giving each its own card cost ~70pt of height for nothing —
+    /// which is most of what made this tab tower over the other two and made
+    /// the window lurch when you selected it.
     private var logsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.xs) {
             SectionTitle("Логи")
             VStack(spacing: 0) {
                 SettingToggleRow(
@@ -674,31 +678,35 @@ struct MainView: View {
                         + "В обычном режиме лог не засоряется рутиной вроде каждого набранного слова.",
                     isOn: $viewModel.isVerboseLogEnabled
                 )
-            }
-            .settingsCard()
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 14) {
-                    Button("Показать лог") { viewModel.openLogFile() }
-                    Button("Открыть папку") { viewModel.revealLogFolder() }
-                    Spacer()
-                }
-                .buttonStyle(.borderless)
-                .font(.appText(11, weight: .medium))
-                .foregroundStyle(theme.accent)
+                rowDivider
+                VStack(alignment: .leading, spacing: Space.xs + 2) {
+                    HStack(spacing: Space.md) {
+                        Button("Показать лог") { viewModel.openLogFile() }
+                        Button("Открыть папку") { viewModel.revealLogFolder() }
+                        Spacer()
+                        Text("хранится 5 дней")
+                            .font(.appText(10))
+                            .foregroundStyle(theme.textMuted)
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.appText(11, weight: .medium))
+                    .foregroundStyle(theme.accent)
 
-                ScrollView {
-                    Text(viewModel.logTail.isEmpty ? "Пока пусто" : viewModel.logTail)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(theme.textSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
+                    ScrollView {
+                        Text(viewModel.logTail.isEmpty ? "Пока пусто" : viewModel.logTail)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(theme.textSecondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    .frame(height: 78)
+                    .padding(Space.xs + 2)
+                    .background(theme.bgInput)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
-                .frame(height: 110)
-                .padding(8)
-                .background(theme.bgInput)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .padding(.horizontal, Space.md)
+                .padding(.vertical, Space.sm + 1)
             }
-            .padding(14)
             .settingsCard()
         }
     }

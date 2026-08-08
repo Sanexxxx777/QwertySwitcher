@@ -240,7 +240,10 @@ final class StatusBarController {
         vm.onOpenExceptions = { [weak self] in self?.openExceptions() }
         vm.onOpenLicense = { [weak self] in self?.openLicense() }
 
-        let window = NSWindow(
+        // Sizes itself to its content, so switching tabs changes the window's
+        // own height — see SmoothResizeWindow for why that has to be animated
+        // here rather than in the view.
+        let window = SmoothResizeWindow(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 460),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false
