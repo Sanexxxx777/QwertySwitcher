@@ -136,7 +136,6 @@ final class KeyboardMonitor {
     /// and punctuation in the other — see `InputBuffer.isAlphabetAmbiguous`.
     private var runHasAmbiguousKey = false
 
-    private let spotlightBundleID = "com.apple.Spotlight"
 
     init(languageDetector: LanguageDetector, textReplacer: TextReplacing,
          statsService: StatisticsService, prefsService: PreferencesService,
@@ -431,15 +430,16 @@ final class KeyboardMonitor {
         }
         lastKeyTime = now
 
-        // isSpotlight ONLY gates auto-correction below (canAutoCorrect) — it
-        // never blocks buffering into `buffer`/`lastCompletedWord`, so Double
-        // Shift's buffer/history path already works in Spotlight regardless
-        // of this flag. No written rationale for the skip was found (git
-        // history goes back only to the squashed backup commit, no comment)
-        // — investigated 04.08.2026. Left in place rather than risking
-        // interference with Spotlight's live incremental search without a
-        // real GUI test of that specific behavior.
-        let isSpotlight = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == spotlightBundleID
+        // Spotlight used to be excluded from auto-correction. The exclusion had
+        // no recorded reason (investigated 04.08.2026 — git history goes back
+        // only to the squashed backup commit) and was kept out of caution about
+        // its live incremental search. Removed 08.08.2026 on the owner's report:
+        // typing "sw" there showed "ыц" and stayed that way, which is precisely
+        // the case this app exists for — and Spotlight is where a wrong-layout
+        // query is most useless, since it returns nothing at all.
+        //
+        // The frontmost-app lookup is gone with it: it ran on every keystroke
+        // and now buys nothing.
         if InputBuffer.isModifierActive(flags) {
             if InputBuffer.shouldInvalidateEditingContext(forModifiedFlags: flags) {
                 invalidateEditingContext(reason: "modifier-shortcut")
@@ -449,7 +449,6 @@ final class KeyboardMonitor {
         let canAutoCorrect = prefsService.isAutoSwitchEnabled
             && LicenseService.shared.isEntitled
             && !exceptionsService.isCurrentAppExcepted()
-            && !isSpotlight
 
         if InputBuffer.isDeleteKey(keycode) {
             if !pendingLeadingSymbols.isEmpty || lastCompletedWord != nil {
