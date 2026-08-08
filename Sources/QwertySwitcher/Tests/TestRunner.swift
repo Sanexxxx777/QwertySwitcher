@@ -54,6 +54,7 @@ enum TestRunner {
         CaretWordExtractorTests.run()
         LayoutTextConverterTests.run()
         DominantScriptLanguageTests.run()
+        LogRetentionTests.run()
         MarzheDoubleShiftRegressionTests.run()
         OnboardingStateTests.run()
         KeyboardMonitorIntegrationTests.run()
@@ -873,11 +874,65 @@ enum LayoutTextConverterTests {
         )
         TestRunner.assertEqual(mixed, "привет123", "characters with no reverse mapping (digits) pass through unchanged")
 
+        // Symbols whose meaning differs between layouts must convert too —
+        // this is the selection path, so it covers "I highlighted a sentence
+        // with symbols and pressed Double Shift". Keycode 44 is "/" on QWERTY
+        // and "." on ЙЦУКЕН; before the reverse map covered symbol keys, the
+        // letters moved alphabet and the symbol was left behind (".exit").
+        TestRunner.assertEqual(
+            LayoutTextConverter.convert(
+                ".учше", from: ruLayout, to: enLayout, inputSourceManager: inputSources
+            ),
+            "/exit",
+            "a layout-dependent symbol converts along with the word"
+        )
+        // A whole sentence, both directions. Note what the punctuation does:
+        // Russian puts "," on Shift+/ (keycode 44), English puts it on its own
+        // key (43). Someone touch-typing Russian while the English layout is
+        // active presses Shift+44 for their comma and gets "?" on screen — so
+        // "?" converting BACK to "," is correct, and a literal "," in the
+        // English text genuinely was the "б" key. Key-for-key is not an
+        // approximation here; it is the only reading that reproduces what the
+        // person's fingers actually asked for.
+        TestRunner.assertEqual(
+            LayoutTextConverter.convert(
+                "ghbdtn? rfr ltkf&", from: enLayout, to: ruLayout, inputSourceManager: inputSources
+            ),
+            "привет, как дела?",
+            "a whole sentence converts — letters and punctuation together"
+        )
+        TestRunner.assertEqual(
+            LayoutTextConverter.convert(
+                "привет, как дела?", from: ruLayout, to: enLayout, inputSourceManager: inputSources
+            ),
+            "ghbdtn? rfr ltkf&",
+            "and back the other way — the English direction is not an afterthought"
+        )
+
         let strokes = LayoutTextConverter.keystrokes(for: "ghbdtn", typedOn: enLayout, inputSourceManager: inputSources)
         TestRunner.assertEqual(strokes?.count ?? -1, 6, "reconstructed keystrokes match the source text length")
         TestRunner.assertNil(
             LayoutTextConverter.keystrokes(for: "gh1btn", typedOn: enLayout, inputSourceManager: inputSources),
             "text containing an unmapped character (digit) can't be reconstructed into keystrokes"
+        )
+    }
+}
+
+enum LogRetentionTests {
+    static func run() {
+        TestRunner.section("DebugLog — logs expire by age, not just by size")
+        let now = Date()
+        TestRunner.assertTrue(
+            DebugLog.isExpired(created: now.addingTimeInterval(-6 * 86_400), now: now, maxAgeDays: 5),
+            "a file first written six days ago is past the five-day cap"
+        )
+        TestRunner.assertTrue(
+            !DebugLog.isExpired(created: now.addingTimeInterval(-4 * 86_400), now: now, maxAgeDays: 5),
+            "four days old is still within the window"
+        )
+        TestRunner.assertTrue(
+            !DebugLog.isExpired(created: now, now: now, maxAgeDays: 5),
+            "a file created just now never expires on the same launch"
         )
     }
 }

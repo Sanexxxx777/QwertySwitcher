@@ -11,19 +11,36 @@ import CoreGraphics
 /// `targetLayout`. Characters with no reverse mapping (digits, emoji,
 /// punctuation outside the letter row) pass through unchanged.
 enum LayoutTextConverter {
-    /// Physical keycodes carrying letters in either QWERTY or ЙЦУКЕН (same
-    /// range InputBuffer.isLetterKey recognizes).
+    /// EVERY physical key that prints something — letters, digits and the
+    /// symbol keys between them. Restricting this to letters meant a symbol
+    /// whose meaning genuinely differs between layouts could never convert:
+    /// keycode 44 is "/" in QWERTY and "." in ЙЦУКЕН, so "/exit" typed on
+    /// Russian showed ".учше" and came back as ".exit" — the letters moved
+    /// alphabet and the symbol was silently left behind. Same for Shift-digits
+    /// ("№" vs "#"). Keys that print the same character in both layouts (plain
+    /// digits) map to themselves and pass through unchanged, which costs
+    /// nothing.
+    private static let printableKeycodes: [UInt16] = (UInt16(0)...UInt16(50))
+        .filter { InputBuffer.isLetterKey($0) || InputBuffer.isNumberOrSpecial($0) }
+    /// Letters only. `keystrokes(for:)` deliberately keeps this narrower set:
+    /// returning nil on mixed content is how the SCORED path learns it is not
+    /// applicable, and a run with digits in it is not a dictionary word.
     private static let letterKeycodes: [UInt16] = (UInt16(0)...UInt16(50)).filter(InputBuffer.isLetterKey)
 
     private static func reverseMap(
-        for layout: KeyboardLayout, inputSourceManager: InputSourceManager
+        for layout: KeyboardLayout, inputSourceManager: InputSourceManager,
+        keycodes: [UInt16]
     ) -> [Character: (keycode: UInt16, flags: CGEventFlags)] {
         var map: [Character: (keycode: UInt16, flags: CGEventFlags)] = [:]
-        for code in letterKeycodes {
+        for code in keycodes {
             for flags: CGEventFlags in [[], .maskShift] {
                 guard let s = inputSourceManager.characterForKeycode(code, layout: layout, flags: flags),
                       let ch = s.first, s.count == 1 else { continue }
-                map[ch] = (code, flags)
+                // First writer wins. Two keys can print the same character on
+                // one layout (Russian has "." on both 44 and Shift-47); letting
+                // a later one overwrite would make the mapping depend on
+                // iteration order rather than on anything meaningful.
+                if map[ch] == nil { map[ch] = (code, flags) }
             }
         }
         return map
@@ -37,7 +54,9 @@ enum LayoutTextConverter {
         for text: String, typedOn layout: KeyboardLayout, inputSourceManager: InputSourceManager
     ) -> [BufferedKeystroke]? {
         guard !text.isEmpty else { return nil }
-        let reverse = reverseMap(for: layout, inputSourceManager: inputSourceManager)
+        let reverse = reverseMap(
+            for: layout, inputSourceManager: inputSourceManager, keycodes: letterKeycodes
+        )
         var result: [BufferedKeystroke] = []
         result.reserveCapacity(text.count)
         for ch in text {
@@ -54,7 +73,9 @@ enum LayoutTextConverter {
         inputSourceManager: InputSourceManager
     ) -> String {
         guard !text.isEmpty else { return text }
-        let reverse = reverseMap(for: sourceLayout, inputSourceManager: inputSourceManager)
+        let reverse = reverseMap(
+            for: sourceLayout, inputSourceManager: inputSourceManager, keycodes: printableKeycodes
+        )
         var result = ""
         result.reserveCapacity(text.count)
         for ch in text {

@@ -23,6 +23,12 @@ final class DebugLog {
     private let rotatedURL: URL
     private let queue = DispatchQueue(label: AppIdentity.keyPrefix + "debuglog", qos: .utility)
     private let maxBytes = 512_000    // rotate at 512 KB, keeping at most 2 files
+    /// Age cap, checked once per launch. Size alone bounds disk use (≤1MB
+    /// total) but says nothing about how long a record of someone's typing
+    /// sits around: on a quiet week the same file survives for months. This
+    /// is a privacy bound, not a disk one — the log's whole purpose is
+    /// diagnosing something that just happened.
+    private let maxAgeDays = 5
     private let iso: ISO8601DateFormatter
     private let compact: DateFormatter
     private let verboseKey = AppIdentity.keyPrefix + "verboseLog"
@@ -42,8 +48,29 @@ final class DebugLog {
         compact.dateFormat = "HH:mm:ss.SSS"
         compact.locale = Locale(identifier: "en_US_POSIX")
 
+        pruneAgedLogs(now: Date())
+
         // Mark app start
         write(module: "APP", event: "---- session start \(iso.string(from: Date())) ----")
+    }
+
+    /// Pure age decision, extracted so the retention rule is testable without
+    /// waiting five days or backdating a real file.
+    static func isExpired(created: Date, now: Date, maxAgeDays: Int) -> Bool {
+        now.timeIntervalSince(created) > Double(maxAgeDays) * 24 * 60 * 60
+    }
+
+    /// Deletes either log file whose FIRST line is older than the cap. Keyed on
+    /// creation date, not modification: the active file is touched on every
+    /// write, so its mtime is always "now" and would never expire no matter how
+    /// far back its earliest entries go.
+    private func pruneAgedLogs(now: Date) {
+        for candidate in [url, rotatedURL] {
+            guard let created = (try? fm.attributesOfItem(atPath: candidate.path))?[.creationDate] as? Date,
+                  Self.isExpired(created: created, now: now, maxAgeDays: maxAgeDays)
+            else { continue }
+            try? fm.removeItem(at: candidate)
+        }
     }
 
     /// Compact log line: `HH:mm:ss.SSS [MOD] event`. `.verbose` events are

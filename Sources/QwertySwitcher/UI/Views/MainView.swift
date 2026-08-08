@@ -63,6 +63,9 @@ struct AppTheme {
     let accentRed: Color
 
     let border: Color
+    /// Card outline. Denser than `border`, which stays for hairlines inside a
+    /// card — the contrast between the two is what groups rows.
+    let borderCard: Color
     let borderActive: Color
 
     /// Recessed well behind the selected-tab "keycap". Selection reads by
@@ -99,6 +102,12 @@ struct AppTheme {
     private static let sysSecondaryLabel = Color(nsColor: .secondaryLabelColor)
     private static let sysTertiaryLabel = Color(nsColor: .tertiaryLabelColor)
     private static let sysSeparator = Color(nsColor: .separatorColor)
+    /// The OUTER edge of a card, deliberately denser than the hairlines INSIDE
+    /// it. Raising every line together (the literal reading of "borders
+    /// brighter") turns the window into a grid of boxes — what actually reads
+    /// as sloppy is that a card's edge and the divider between two of its rows
+    /// currently carry the same weight, so nothing says where a group starts.
+    private static let sysBorderCard = Color(nsColor: .tertiaryLabelColor)
     private static let sysBorderActive = Color(nsColor:
         NSColor.separatorColor.blended(withFraction: 0.4, of: .labelColor) ?? .separatorColor)
     private static let sysWindowBackground = Color(nsColor: .windowBackgroundColor)
@@ -140,6 +149,7 @@ struct AppTheme {
         accentAmber: sysAmber,
         accentRed: sysRed,
         border: sysSeparator,
+        borderCard: sysBorderCard,
         borderActive: sysBorderActive,
         trackFill: sysTrack,
         toggleOffTint: sysAccent.opacity(0.32)
@@ -161,6 +171,7 @@ struct AppTheme {
         accentAmber: sysAmber,
         accentRed: sysRed,
         border: sysSeparator,
+        borderCard: sysBorderCard,
         borderActive: sysBorderActive,
         trackFill: sysTrack,
         // Was 0.16 in the first pass — measured too pale against the light card fill,
@@ -239,7 +250,7 @@ struct SettingsCardModifier: ViewModifier {
             .background(.regularMaterial)
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(theme.border, lineWidth: 1)
+                    .stroke(theme.borderCard, lineWidth: 1)
             )
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
     }
@@ -325,8 +336,20 @@ struct MainView: View {
                 case .more: moreTab
                 }
             }
-            .padding(.horizontal, 20)
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: selectedTab)
+            // Without `id` + `transition` SwiftUI reuses the same view slots
+            // and the text simply swaps in place — the tab thumb glides while
+            // the content it selects teleports. The pair moves together now:
+            // the outgoing panel fades, the incoming one fades in from a few
+            // points below, matching the direction the thumb travels.
+            .id(selectedTab)
+            .transition(
+                .asymmetric(
+                    insertion: .opacity.combined(with: .offset(y: 6)),
+                    removal: .opacity
+                )
+            )
+            .padding(.horizontal, Space.xl)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: selectedTab)
 
             footer
                 .padding(.horizontal, 20)
@@ -370,8 +393,25 @@ struct MainView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Space.sm + 2) {
+            statusCover
+            autoSwitchRow
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: viewModel.eventTapHealth)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: viewModel.isAutoSwitchEnabled)
+    }
+
+    /// The one tinted surface in the window. A colored "cover" was the owner's
+    /// idea and it's a good one — with a condition: the tint has to MEAN the
+    /// state (green running, amber blocked, red broken), not decorate the top
+    /// of the window. A fixed brand banner would be the version of this that
+    /// ages badly and competes with the content; a surface that changes color
+    /// when the app's health changes is the fastest possible status read, and
+    /// it earns the color it spends. Kept to ~7% so the words on it stay the
+    /// thing you see first — everything else in the window remains uncolored,
+    /// which is exactly why this one surface registers at all.
+    private var statusCover: some View {
+        VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 7) {
                     Image(systemName: heroIcon)
                         .font(.system(size: 14, weight: .semibold))
@@ -394,31 +434,36 @@ struct MainView: View {
                 // TCC reset) — this is the one health state the window can't
                 // fix on its own, so it gets an inline way out instead of
                 // sending the user hunting for the (now-removed) menu item.
-                if viewModel.needsPermissionRepair {
-                    Button("Настроить разрешения…", action: viewModel.openPermissionRepair)
-                        .buttonStyle(.plain)
-                        .font(.appText(11, weight: .medium))
-                        .foregroundStyle(theme.accent)
-                }
+            if viewModel.needsPermissionRepair {
+                Button("Настроить разрешения…", action: viewModel.openPermissionRepair)
+                    .buttonStyle(.plain)
+                    .font(.appText(11, weight: .medium))
+                    .foregroundStyle(theme.accent)
             }
-            autoSwitchRow
         }
-        // Decorative only — background painting never changes this VStack's own
-        // reported size, so the window doesn't grow a single point for it.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, Space.md)
+        .padding(.vertical, Space.md)
         .background(alignment: .topTrailing) {
-            // Was two blurred blobs at 6-9% opacity, which the owner read as a
-            // rendering artifact rather than a decision — at that blur a shape
-            // stops being a shape. Now the app's own mark: a key and its
-            // mirror, the thing this app literally does.
+            // The mark rides ON the cover now, so the two read as one object
+            // instead of a graphic floating near a headline.
             MirrorKeycapMark(
                 tint: heroColor,
                 ink: theme.textPrimary,
                 muted: !viewModel.isAutoSwitchEnabled
             )
-            .padding(.trailing, 2)
+            .padding(.trailing, Space.md)
+            .padding(.top, Space.sm)
         }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: viewModel.eventTapHealth)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: viewModel.isAutoSwitchEnabled)
+        .background(
+            RoundedRectangle(cornerRadius: Radius.card, style: .continuous)
+                .fill(heroColor.opacity(theme.isDark ? 0.13 : 0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.card, style: .continuous)
+                .strokeBorder(heroColor.opacity(theme.isDark ? 0.34 : 0.26), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
     }
 
     private var autoSwitchRow: some View {
@@ -854,7 +899,11 @@ private struct SectionTitle: View {
         Text(title.uppercased())
             .font(.appText(10, weight: .semibold))
             .tracking(1.1)
-            .foregroundStyle(theme.textMuted)
+            // Secondary, not tertiary. At 10pt these are already the smallest
+            // text in the window, and tertiary label sits near 2:1 — the label
+            // that names a block has to be legible, or the block reads as
+            // starting nowhere.
+            .foregroundStyle(theme.textSecondary)
     }
 }
 
@@ -923,6 +972,7 @@ private struct LicenseBadge: View {
 
 private struct UsageMetric: View {
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let value: Int
     let label: String
 
@@ -932,6 +982,12 @@ private struct UsageMetric: View {
                 .font(.appMono(24, weight: .bold))
                 .foregroundStyle(theme.accent)
                 .monospacedDigit()
+                // These tick up while the window is open (every correction
+                // posts .statsUpdated). A hard swap reads as a glitch; rolling
+                // the digit says "that just happened" — which is the only
+                // moment this number is interesting.
+                .contentTransition(.numericText())
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.28), value: value)
                 .lineLimit(1)
                 .minimumScaleFactor(0.55)
             Text(label)
