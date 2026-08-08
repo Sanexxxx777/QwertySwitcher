@@ -2499,6 +2499,56 @@ enum KeyboardMonitorIntegrationTests {
             )
         }
 
+        // --- lone "b" + space auto-corrects, but "rm -f" does NOT -------------
+        // Owner: typed "b", pressed space, expected "и", got nothing — the
+        // floor was 3 letters, so the single-letter Russian words (и в с к я а
+        // о у) were unreachable for automatic correction. The pair below is
+        // the whole justification for lowering it: the same change would turn
+        // "rm -f" into "rm -а" if a leading symbol didn't block it, because
+        // "а" is a genuine Russian word and wins the scoring fairly.
+        do {
+            guard let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+                TestRunner.skip("RU layout required")
+                return
+            }
+            TestRunner.section("Auto-correction reaches one-letter words — «b » → «и », but «-f » stays")
+            inputSources.switchTo(enLayout)
+            let h = harness(autoSwitch: true)
+            h.press(11) // "b" on en
+            h.press(49) // space — the word boundary
+            TestRunner.assertEqual(h.screen, "и ", "a lone «b» becomes the Russian word «и»")
+
+            inputSources.switchTo(enLayout)
+            let flags = harness(autoSwitch: true)
+            flags.press(27) // "-"
+            flags.press(3)  // "f"
+            flags.press(49) // space
+            TestRunner.assertEqual(
+                flags.screen, "-f ",
+                "a flag is left alone — the leading symbol keeps the short-word path shut"
+            )
+            _ = ruLayout
+        }
+
+        // --- "ы1" → "s1" — one letter plus a digit ----------------------------
+        // Owner, 20:01:50. Auto-correction can't help here (a single letter is
+        // far under the 3-letter floor), so Double Shift is the ONLY way to fix
+        // it — and it answered "no selection/buffer/history/caret word".
+        do {
+            guard let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+                TestRunner.skip("RU layout required")
+                return
+            }
+            TestRunner.section("Double Shift on «ы1» — one letter and a digit")
+            inputSources.switchTo(ruLayout)
+            let h = harness(autoSwitch: false)
+            h.press(1)  // "s" in en, "ы" in ru
+            h.press(18) // "1"
+            TestRunner.assertEqual(h.screen, "ы1", "sanity: letter plus digit on screen")
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "Double Shift reports a conversion")
+            TestRunner.assertEqual(h.screen, "s1", "the pair converts — the digit stays, the letter moves")
+        }
+
         // --- "./exit" typed on RU — the leading "." is a LETTER there ---------
         // Owner typed "./exit" with the Russian layout active and got
         // "./exit" back with a stray dot in front (log 18:43:06,
