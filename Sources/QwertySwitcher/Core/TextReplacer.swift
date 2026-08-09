@@ -1,4 +1,6 @@
 import Foundation
+import AppKit
+import ApplicationServices
 import CoreGraphics
 
 struct TextReplacementPlan: Equatable {
@@ -57,6 +59,14 @@ final class TextReplacer {
 
     private let inputSourceManager: InputSourceManager
     private let keystrokeDelay: useconds_t = 2_500  // 2.5ms — slightly faster than before
+    /// Pacing for apps whose focused field can't be read back via AX
+    /// (terminals: Ghostty & co). There the 2.5ms burst loses keystrokes on
+    /// the receiving side — screen recording 09.08.2026: five backspaces sent
+    /// in ~12ms, four applied, the leftmost character survived ("./exit",
+    /// "йqwerty"). A clean pty accepts the same burst intact, so the loss is
+    /// in the GUI delivery chain; since AX gives us no way to verify the
+    /// result, the only defense is giving the app time to apply each event.
+    private let carefulKeystrokeDelay: useconds_t = 15_000  // 15ms
     private let replacementQueue = DispatchQueue(
         label: AppIdentity.keyPrefix + "text-replacement",
         qos: .userInteractive
@@ -122,8 +132,52 @@ final class TextReplacer {
                 return
             }
 
-            guard self.sendBackspaces(count: plan.backspaceCount, cancellation: cancellation),
-                  self.typeStringFast(plan.payload, cancellation: cancellation) else {
+            // One AX round-trip per replacement (not per keystroke); bounded
+            // by AXTextSelectionService's 0.15s messaging timeout, so an
+            // unresponsive app costs a short stall, not the 6s AX default.
+            //
+            // "Readable" must mean the field's AX value actually CONTAINS what
+            // we are about to erase: Ghostty answers AXValue with an empty
+            // string (formally a success), which passed the original nil-check
+            // and kept the fast burst — the 09.08 field test lost one
+            // backspace per gesture there ("../exit", "...../exit").
+            var axReadable = false
+            var overlayPid: pid_t?
+            if let element = AXTextSelectionService.focusedElement() {
+                if let (text, caret) = AXTextSelectionService.valueAndCaret(element) {
+                    let need = plan.backspaceCount
+                    axReadable = text.utf16.count >= need && caret >= need
+                    DebugLog.shared.log(
+                        "TR",
+                        "ax probe: len=\(text.utf16.count) caret=\(caret) need=\(need)"
+                            + " → \(axReadable ? "fast" : "careful")",
+                        level: .verbose
+                    )
+                }
+                // Overlay fields (Spotlight, Raycast-style panels) take the
+                // keyboard focus WITHOUT becoming the frontmost app — and
+                // synthetic CGEvents posted to the session tap land in the
+                // frontmost app, not in the focused field. The 09.08 field
+                // test typed "ghbdtn" into Spotlight and the correction
+                // printed "прив" into the terminal behind it. This is the
+                // unrecorded reason the old isSpotlight exclusion existed.
+                // Deliver straight to the field's process instead.
+                overlayPid = AXTextSelectionService.overlayTargetPid(element)
+                if let overlayPid {
+                    DebugLog.shared.log(
+                        "TR", "overlay delivery: posting to focused field pid=\(overlayPid)"
+                    )
+                }
+            }
+            let pacing = axReadable ? self.keystrokeDelay : self.carefulKeystrokeDelay
+            if !axReadable && overlayPid == nil {
+                DebugLog.shared.log("TR", "careful pacing: field not AX-readable")
+            }
+
+            guard self.sendBackspaces(count: plan.backspaceCount, pacing: pacing,
+                                      toPid: overlayPid, cancellation: cancellation),
+                  self.typeStringFast(plan.payload, pacing: pacing,
+                                      toPid: overlayPid, cancellation: cancellation) else {
                 self.complete(.cancelled, cancellation: cancellation, completion: completion)
                 return
             }
@@ -154,8 +208,20 @@ final class TextReplacer {
     /// never retyped it, which loses characters permanently. Everything slow
     /// (the layout switch and its verification retries) happens before this,
     /// so the useful cancellation window is untouched.
+    /// Session tap for the normal case; straight to the field's process for
+    /// overlay panels (see the overlay comment in `replaceCurrentWord`).
+    private static func deliver(_ event: CGEvent, toPid pid: pid_t?) {
+        if let pid {
+            event.postToPid(pid)
+        } else {
+            event.post(tap: .cgAnnotatedSessionEventTap)
+        }
+    }
+
     private func sendBackspaces(
         count: Int,
+        pacing: useconds_t,
+        toPid pid: pid_t?,
         cancellation: ReplacementCancellationToken
     ) -> Bool {
         guard !cancellation.isCancelled else { return false }
@@ -165,10 +231,10 @@ final class TextReplacer {
                let ku = CGEvent(keyboardEventSource: src, virtualKey: 51, keyDown: false) {
                 SyntheticEventMarker.mark(kd)
                 SyntheticEventMarker.mark(ku)
-                kd.post(tap: .cgAnnotatedSessionEventTap)
-                ku.post(tap: .cgAnnotatedSessionEventTap)
+                Self.deliver(kd, toPid: pid)
+                Self.deliver(ku, toPid: pid)
             }
-            usleep(keystrokeDelay)
+            usleep(pacing)
         }
         return true
     }
@@ -182,6 +248,8 @@ final class TextReplacer {
     /// early return would leave the user with a hole where their word was.
     private func typeStringFast(
         _ text: String,
+        pacing: useconds_t,
+        toPid pid: pid_t?,
         cancellation: ReplacementCancellationToken
     ) -> Bool {
         let src = CGEventSource(stateID: .hidSystemState)
@@ -190,14 +258,14 @@ final class TextReplacer {
             if let kd = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true) {
                 SyntheticEventMarker.mark(kd)
                 kd.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
-                kd.post(tap: .cgAnnotatedSessionEventTap)
+                Self.deliver(kd, toPid: pid)
             }
             if let ku = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false) {
                 SyntheticEventMarker.mark(ku)
                 ku.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
-                ku.post(tap: .cgAnnotatedSessionEventTap)
+                Self.deliver(ku, toPid: pid)
             }
-            usleep(keystrokeDelay)
+            usleep(pacing)
         }
         return true
     }

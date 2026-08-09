@@ -483,6 +483,14 @@ final class KeyboardMonitor {
         // keystroke regardless of how the scoring buffer chooses to slice it.
         if InputBuffer.isLetterKey(keycode) || InputBuffer.isNumberOrSpecial(keycode) {
             runKeystrokes.append(BufferedKeystroke(keycode: keycode, flags: flags))
+            // Field-debugging trace ("Подробный лог"): which keystroke stopped
+            // growing the run. buf is pre-append for the letter path below.
+            DebugLog.shared.log(
+                "KM",
+                "key kc=\(keycode) run=\(runKeystrokes.count)"
+                    + " buf=\(buffer.currentWord().count) lead=\(pendingLeadingSymbols.count)",
+                level: .verbose
+            )
         }
 
         // Context-aware punctuation: e.g. `.` `,` `;` `'` produce real letters in

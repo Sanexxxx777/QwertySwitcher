@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import ApplicationServices
 import CoreGraphics
 
@@ -146,6 +147,21 @@ enum AXTextSelectionService {
     /// the leftover characters in "./compact". A tight bound turns a freeze
     /// into a clean miss, and a miss just falls through to the next path.
     private static let axTimeoutSeconds: Float = 0.15
+
+    /// pid of the focused element's process when it is NOT the frontmost app.
+    /// Overlay panels (Spotlight, Raycast-style launchers) take the keyboard
+    /// focus without activating their app — synthetic events posted to the
+    /// session tap then land in the frontmost app behind the panel (09.08
+    /// field test: a correction typed "прив" into the terminal, a Cmd+C probe
+    /// printed "с" there). Callers deliver via `postToPid` to this pid
+    /// instead. nil = normal case, focused field belongs to the frontmost app.
+    static func overlayTargetPid(_ element: AXUIElement) -> pid_t? {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success,
+              let frontmost = NSWorkspace.shared.frontmostApplication,
+              pid != frontmost.processIdentifier else { return nil }
+        return pid
+    }
 
     static func focusedElement() -> AXUIElement? {
         let systemWide = AXUIElementCreateSystemWide()
