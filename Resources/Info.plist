@@ -2,41 +2,41 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleExecutable</key>
-    <string>QwertySwitcher</string>
-    <key>CFBundleIdentifier</key>
-    <string>tech.sasha.qwertyswitch</string>
-    <key>CFBundleName</key>
-    <string>QwertySwitcher</string>
-    <key>CFBundleDisplayName</key>
-    <string>Qwerty Switcher</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.6.8</string>
-    <key>CFBundleVersion</key>
-    <string>21</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.utilities</string>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>ATSApplicationFontsPath</key>
-    <string>Fonts</string>
-    <key>NSSupportsAutomaticTermination</key>
-    <false/>
-    <key>NSSupportsSuddenTermination</key>
-    <false/>
-    <key>NSAccessibilityUsageDescription</key>
-    <string>Qwerty Switcher использует Универсальный доступ только для исправления раскладки в активном текстовом поле.</string>
-    <key>NSInputMonitoringUsageDescription</key>
-    <string>Qwerty Switcher читает коды клавиш локально, чтобы определить ошибочную раскладку; история набора не сохраняется.</string>
+	<key>ATSApplicationFontsPath</key>
+	<string>Fonts</string>
+	<key>CFBundleDisplayName</key>
+	<string>Qwerty Switcher</string>
+	<key>CFBundleExecutable</key>
+	<string>QwertySwitcher</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>tech.sasha.qwertyswitch</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>QwertySwitcher</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.6.9</string>
+	<key>CFBundleVersion</key>
+	<string>22</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>Qwerty Switcher использует Универсальный доступ только для исправления раскладки в активном текстовом поле.</string>
+	<key>NSInputMonitoringUsageDescription</key>
+	<string>Qwerty Switcher читает коды клавиш локально, чтобы определить ошибочную раскладку; история набора не сохраняется.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
 </dict>
 </plist>

@@ -217,19 +217,31 @@ final class HotkeyManager {
     /// Priority chain (each step gated by `LicenseService.isEntitled` like
     /// every other conversion, except the final Undo fallback — Undo is
     /// deliberately never license-gated, see CLAUDE.md):
-    ///  1. Selected text — Accessibility API first (no side effect); if the
-    ///     app's AX tree doesn't expose a selection (Electron, some
-    ///     terminals — see v0.2.0 hotfix notes), probe the clipboard instead.
-    ///  2. Internal buffer + last-word history, unchanged from before.
-    ///  3. Word immediately before the caret, via Accessibility (no keyboard
+    ///  1. Selected text via the Accessibility API (no side effect).
+    ///  2. Internal buffer + last-word history — BEFORE the clipboard probe:
+    ///     the probe's synthetic Cmd+C reaches kitty-protocol terminals as a
+    ///     CSI sequence in the input stream (see handleDoubleShift).
+    ///  3. Clipboard probe for selections the AX tree doesn't expose
+    ///     (Electron, some terminals — see v0.2.0 hotfix notes).
+    ///  4. Word immediately before the caret, via Accessibility (no keyboard
     ///     hack — NEVER Shift+Option+Left, that is exactly what broke this
     ///     feature in the v0.2.0 hotfix).
-    ///  4. Undo the last correction (existing fallback, ungated).
+    ///  5. Undo the last correction (existing fallback, ungated).
     private func handleDoubleShift() {
         DebugLog.shared.log("HK", "doubleShift triggered")
         guard keyboardMonitor?.isPaused != true else { return }
 
         if convertAXSelection() { return }
+        // Freshly typed keys convert with no side effect and are the dominant
+        // live case — they must run BEFORE the clipboard probe. The probe
+        // posts a synthetic Cmd+C, and kitty-protocol terminals deliver that
+        // into the app's INPUT stream as `CSI 99;9u`/`CSI 1089;9u` (byte log
+        // 09.08.2026: one before every replacement burst) — Claude Code's
+        // parser stumbled over it and ate an adjacent backspace, which is
+        // exactly what the accumulating dots ("...../exit") were made of.
+        // A selection can't coexist with a live run: both mouse clicks and
+        // caret-moving keys wipe it, so nothing is lost by reordering.
+        if keyboardMonitor?.swapLastWordInBuffer() == true { return }
         probeClipboardSelection()
     }
 
@@ -247,11 +259,21 @@ final class HotkeyManager {
     }
 
     private func probeClipboardSelection() {
-        ClipboardSelectionProbe.probe { [weak self] copied, snapshot in
+        // Overlay panels (Spotlight): the probe's Cmd+C posted to the session
+        // tap lands in the frontmost app behind the panel — with a Cyrillic
+        // layout active Ghostty doesn't match Cmd+кириллица as Copy and
+        // PRINTS "с" instead (09.08 field report). Deliver to the field's
+        // own process in that case.
+        let overlayPid = AXTextSelectionService.focusedElement()
+            .flatMap { AXTextSelectionService.overlayTargetPid($0) }
+        if let overlayPid {
+            DebugLog.shared.log("HK", "clipboard probe: overlay delivery to pid=\(overlayPid)")
+        }
+        ClipboardSelectionProbe.probe(toPid: overlayPid) { [weak self] copied, snapshot in
             guard let self else { return }
             if let copied, !copied.isEmpty, LicenseService.shared.isEntitled,
                let target = self.convertedReplacement(for: copied) {
-                self.pasteConverted(target.text, restoring: snapshot)
+                self.pasteConverted(target.text, restoring: snapshot, toPid: overlayPid)
                 self.recordDoubleShiftSuccess(via: "clipboard selection", length: copied.count, targetLayout: target.layout)
                 return
             }
@@ -266,7 +288,6 @@ final class HotkeyManager {
     }
 
     private func continueAfterSelectionPaths() {
-        if keyboardMonitor?.swapLastWordInBuffer() == true { return }
         if convertWordBeforeCaret() { return }
         if keyboardMonitor?.undoLastCorrection() == true { return }
         // Bundle ID logged here (nowhere else in the Double Shift chain) so a
@@ -339,7 +360,8 @@ final class HotkeyManager {
         DebugLog.shared.log("HK", "doubleShift via \(source): len=\(length) target=\(targetLayout.languageCode)")
     }
 
-    private func pasteConverted(_ text: String, restoring snapshot: PasteboardSnapshot) {
+    private func pasteConverted(_ text: String, restoring snapshot: PasteboardSnapshot,
+                                toPid pid: pid_t? = nil) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
@@ -348,12 +370,12 @@ final class HotkeyManager {
         if let kd = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true) {
             kd.flags = .maskCommand
             SyntheticEventMarker.mark(kd)
-            kd.post(tap: .cgAnnotatedSessionEventTap)
+            if let pid { kd.postToPid(pid) } else { kd.post(tap: .cgAnnotatedSessionEventTap) }
         }
         if let ku = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false) {
             ku.flags = .maskCommand
             SyntheticEventMarker.mark(ku)
-            ku.post(tap: .cgAnnotatedSessionEventTap)
+            if let pid { ku.postToPid(pid) } else { ku.post(tap: .cgAnnotatedSessionEventTap) }
         }
         // Same 0.15s "don't clobber a change made while the paste was in
         // flight" delay as handlePasteNoFormat below.
@@ -430,7 +452,8 @@ private enum ClipboardSelectionProbe {
     /// `completion(copiedText, snapshot)`; `snapshot` is the state captured
     /// BEFORE sending Cmd+C, for the caller to restore after it's done using
     /// the clipboard (e.g. pasting a converted replacement back).
-    static func probe(completion: @escaping (String?, PasteboardSnapshot) -> Void) {
+    static func probe(toPid pid: pid_t? = nil,
+                      completion: @escaping (String?, PasteboardSnapshot) -> Void) {
         let pasteboard = NSPasteboard.general
         let snapshot = PasteboardSnapshot(pasteboard: pasteboard)
         let before = pasteboard.changeCount
@@ -439,12 +462,12 @@ private enum ClipboardSelectionProbe {
         if let kd = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: true) { // 'C'
             kd.flags = .maskCommand
             SyntheticEventMarker.mark(kd)
-            kd.post(tap: .cgAnnotatedSessionEventTap)
+            if let pid { kd.postToPid(pid) } else { kd.post(tap: .cgAnnotatedSessionEventTap) }
         }
         if let ku = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: false) {
             ku.flags = .maskCommand
             SyntheticEventMarker.mark(ku)
-            ku.post(tap: .cgAnnotatedSessionEventTap)
+            if let pid { ku.postToPid(pid) } else { ku.post(tap: .cgAnnotatedSessionEventTap) }
         }
 
         poll(
