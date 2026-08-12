@@ -144,12 +144,31 @@ final class TextReplacer {
             var axReadable = false
             var overlayPid: pid_t?
             if let element = AXTextSelectionService.focusedElement() {
-                if let (text, caret) = AXTextSelectionService.valueAndCaret(element) {
+                // Length + caret only — never the value itself. Asking for
+                // kAXValueAttribute here copied the app's ENTIRE field across
+                // the process boundary just to count it (286 908 characters on
+                // one Ghostty probe), on the hot path of every correction.
+                var probe = AXTextSelectionService.lengthAndCaret(element)
+                if probe == nil {
+                    // Field exposes its value but not its character count.
+                    // Says so out loud: whether this line shows up in the
+                    // field log is the whole question of whether the cheap
+                    // path applies to a given app.
+                    probe = AXTextSelectionService.valueAndCaret(element)
+                        .map { (length: $0.text.utf16.count, caret: $0.caret) }
+                    if probe != nil {
+                        DebugLog.shared.log(
+                            "TR", "ax probe: no char-count attribute — read the whole value",
+                            level: .verbose
+                        )
+                    }
+                }
+                if let (length, caret) = probe {
                     let need = plan.backspaceCount
-                    axReadable = text.utf16.count >= need && caret >= need
+                    axReadable = length >= need && caret >= need
                     DebugLog.shared.log(
                         "TR",
-                        "ax probe: len=\(text.utf16.count) caret=\(caret) need=\(need)"
+                        "ax probe: len=\(length) caret=\(caret) need=\(need)"
                             + " → \(axReadable ? "fast" : "careful")",
                         level: .verbose
                     )

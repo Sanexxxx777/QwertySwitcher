@@ -205,6 +205,40 @@ enum AXTextSelectionService {
         ) == .success
     }
 
+    /// Field LENGTH + caret position, without copying the field's text across
+    /// the process boundary. `TextReplacer`'s pre-replacement probe only needs
+    /// the two numbers, and `kAXValueAttribute` in a terminal hands over the
+    /// whole scrollback: 286 908 characters measured on one probe (log
+    /// 08:16:48), copied on every single correction. That IPC is what the
+    /// `slow doubleShift action 57ms` warning was measuring.
+    /// Returns nil when either attribute is missing (some Electron fields
+    /// expose the value but not the character count) — the caller falls back
+    /// to `valueAndCaret`, so coverage is unchanged, only the common path is
+    /// cheap.
+    static func lengthAndCaret(_ element: AXUIElement) -> (length: Int, caret: Int)? {
+        var countRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(
+            element, kAXNumberOfCharactersAttribute as CFString, &countRef
+        ) == .success, let length = countRef as? Int else { return nil }
+        guard let caret = caretOffset(element) else { return nil }
+        return (length, caret)
+    }
+
+    /// Caret position for a ZERO-length selection (a plain caret, nothing
+    /// selected). An actual selection means a different path entirely.
+    private static func caretOffset(_ element: AXUIElement) -> Int? {
+        var rangeRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(
+            element, kAXSelectedTextRangeAttribute as CFString, &rangeRef
+        ) == .success else { return nil }
+        let axRange = unsafeBitCast(rangeRef, to: AXValue.self)
+        var cfRange = CFRange()
+        guard AXValueGetType(axRange) == .cfRange,
+              AXValueGetValue(axRange, .cfRange, &cfRange),
+              cfRange.length == 0 else { return nil }
+        return cfRange.location
+    }
+
     /// Full field value + caret position, for the "word before caret" path.
     /// Returns nil unless there is a ZERO-length selection (a plain caret,
     /// i.e. nothing selected) — an actual selection is handled by
@@ -214,17 +248,8 @@ enum AXTextSelectionService {
         guard AXUIElementCopyAttributeValue(
             element, kAXValueAttribute as CFString, &valueRef
         ) == .success, let text = valueRef as? String else { return nil }
-
-        var rangeRef: AnyObject?
-        guard AXUIElementCopyAttributeValue(
-            element, kAXSelectedTextRangeAttribute as CFString, &rangeRef
-        ) == .success else { return nil }
-        let axRange = unsafeBitCast(rangeRef, to: AXValue.self)
-        var cfRange = CFRange()
-        guard AXValueGetType(axRange) == .cfRange,
-              AXValueGetValue(axRange, .cfRange, &cfRange) else { return nil }
-        guard cfRange.length == 0 else { return nil }
-        return (text, cfRange.location)
+        guard let caret = caretOffset(element) else { return nil }
+        return (text, caret)
     }
 
     @discardableResult
