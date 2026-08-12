@@ -2469,6 +2469,68 @@ enum KeyboardMonitorIntegrationTests {
             }
         }
 
+        // A one-letter word that has already been closed by a space must stay
+        // reachable: the history slot used to carry a 2-character floor, so
+        // "b" converted while "b " did not — the same lone-"b" report one
+        // keystroke later (log 13.08.2026, four "no selection/buffer/history/
+        // caret word" skips in Ghostty).
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: false)
+            h.press(11) // "b"
+            h.press(49) // space — the word moves into the history slot
+            TestRunner.assertEqual(h.screen, "b ", "sanity: the closed one-letter word is on screen")
+            TestRunner.assertTrue(
+                h.monitor.swapLastWordInBuffer(),
+                "Double Shift reaches a one-letter word through the history slot"
+            )
+            TestRunner.assertEqual(
+                h.screen, "и ",
+                "fix: the closed single letter converts, its trailing space is preserved"
+            )
+        }
+
+        // A lone SYMBOL is convertible too — the run path used to require two
+        // characters, so "ю" typed where "." was meant had no path at all:
+        // auto-correction never touches a single character, and the scored
+        // path has no word to score.
+        inputSources.switchTo(enLayout)
+        do {
+            guard let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+                TestRunner.skip("RU layout required")
+                return
+            }
+            inputSources.switchTo(ruLayout)
+            let h = harness(autoSwitch: false)
+            h.press(47) // "." in Latin, the LETTER "ю" in Cyrillic
+            TestRunner.assertEqual(h.screen, "ю", "sanity: a lone Cyrillic letter-symbol on screen")
+            TestRunner.assertTrue(
+                h.monitor.swapLastWordInBuffer(),
+                "Double Shift converts a one-character run"
+            )
+            TestRunner.assertEqual(h.screen, ".", "fix: the single symbol converts key-for-key")
+        }
+
+        // The same for a key that is punctuation in BOTH alphabets and so
+        // never enters the letter buffer at all — keycode 44 is "/" in Latin
+        // and "." in Cyrillic. Only the run path can reach it, and that path
+        // used to require two characters.
+        do {
+            guard let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+                TestRunner.skip("RU layout required")
+                return
+            }
+            inputSources.switchTo(ruLayout)
+            let h = harness(autoSwitch: false)
+            h.press(44) // "/" in Latin, "." in Cyrillic
+            TestRunner.assertEqual(h.screen, ".", "sanity: a lone punctuation key on screen")
+            TestRunner.assertTrue(
+                h.monitor.swapLastWordInBuffer(),
+                "Double Shift converts a one-character run of pure punctuation"
+            )
+            TestRunner.assertEqual(h.screen, "/", "fix: «.» typed where «/» was meant is reachable")
+        }
+
         // --- "7ю6с" → "7.6s" — a run the dictionary cannot judge -------------
         // Owner typed "7.6s" with the Russian layout active, got "7ю6с", and
         // pressed Double Shift three times with nothing happening at all (log

@@ -858,8 +858,13 @@ final class KeyboardMonitor {
                 + " → \(resynced ? "resynced to screen" : "model kept")"
         )
 
-        guard onScreen.count >= 2 else {
-            DebugLog.shared.log("KM", "run check: too short (\(onScreen.count)) — falls through to the scored path")
+        // >= 1, matching the buffer path below: Double Shift is an explicit
+        // gesture, not a judgement call, and a lone symbol is exactly the kind
+        // of thing it exists for ("ю" typed where "." was meant). The guard
+        // right after this one still requires a non-letter in the run, so a
+        // single LETTER keeps going to the scored path as before.
+        guard onScreen.count >= 1 else {
+            DebugLog.shared.log("KM", "run check: empty — falls through to the scored path")
             return false
         }
         guard onScreen.contains(where: { !$0.isLetter }) else {
@@ -957,8 +962,15 @@ final class KeyboardMonitor {
         // win over an older history slot — owner hit exactly this: five Double
         // Shifts on a lone "b" did nothing (log 07:49:54-57, all five
         // "no selection/buffer/history/caret word").
+        // The history slot carries the SAME floor as the live buffer (>= 1):
+        // a one-letter word is ordinary Russian (и, а, в, к, с, я, о, у), and
+        // pressing space before reaching for Double Shift must not be what
+        // decides whether the gesture works. The floor here used to be 2, so
+        // "b" + space + Double Shift did nothing while "b" + Double Shift
+        // converted — the same inconsistency the 05.08 lone-"b" report was
+        // about, one keystroke later.
         if keystrokes.isEmpty {
-            if let last = lastCompletedWord, last.keystrokes.count >= 2 {
+            if let last = lastCompletedWord, last.keystrokes.count >= 1 {
                 keystrokes = last.keystrokes
                 trailing = last.trailing
                 typedLayout = last.typedLayout
