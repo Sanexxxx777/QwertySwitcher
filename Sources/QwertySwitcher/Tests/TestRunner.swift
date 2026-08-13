@@ -63,6 +63,7 @@ enum TestRunner {
         AvalancheGuardWiringTests.run()
         HotPathStructuralGuardTests.run()
         ReplacementAtomicityGuardTests.run()
+        DoubleShiftSelectionGuardTests.run()
         StatusInkContrastTests.run()
         SecureInputAXTierTests.run()
         CallbackDurationThresholdTests.run()
@@ -3075,6 +3076,62 @@ enum ReplacementAtomicityGuardTests {
                     + " (a mid-loop bail erases text and never retypes it)"
             )
         }
+    }
+}
+
+/// Double Shift on a SELECTION has no headless coverage — it needs a live
+/// focused AX element, which the harness cannot provide. What CAN be pinned
+/// structurally are the two invariants the 13.08.2026 report was made of:
+/// the AX write is verified by reading back (apps answer `.success` and change
+/// nothing), and a selection we failed to write is never handed to the
+/// buffer/history path (which would convert an unrelated older word).
+enum DoubleShiftSelectionGuardTests {
+    static func run() {
+        TestRunner.section("Double Shift on a selection — write is verified, selection never falls to the buffer")
+
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()      // Tests/
+            .deletingLastPathComponent()      // QwertySwitcher/
+            .appendingPathComponent("Core/HotkeyManager.swift")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            TestRunner.skip("HotkeyManager.swift not readable from \(source.path)")
+            return
+        }
+
+        guard let writeCall = text.range(of: "AXTextSelectionService.replaceSelectedText") else {
+            TestRunner.assertTrue(false, "AX selection write not found — test needs updating")
+            return
+        }
+        let afterWrite = String(text[writeCall.upperBound...])
+        let functionTail = afterWrite.range(of: "\n    private func").map { String(afterWrite[..<$0.lowerBound]) }
+            ?? afterWrite
+        TestRunner.assertTrue(
+            functionTail.contains("AXTextSelectionService.selectedText"),
+            "the AX write is read back before being reported as success"
+                + " (.success only means the app accepted the message)"
+        )
+
+        guard let chainStart = text.range(of: "switch convertAXSelection()") else {
+            TestRunner.assertTrue(false, "Double Shift chain not found — test needs updating")
+            return
+        }
+        let chain = String(text[chainStart.upperBound...])
+        let unwritableCase = chain.range(of: "case .selectionUnwritable:")
+        let noSelectionCase = chain.range(of: "case .noSelection:")
+        guard let unwritableCase, let noSelectionCase else {
+            TestRunner.assertTrue(false, "outcome cases not found — test needs updating")
+            return
+        }
+        let unwritableBody = String(chain[unwritableCase.upperBound..<noSelectionCase.lowerBound])
+        TestRunner.assertTrue(
+            unwritableBody.contains("probeClipboardSelection"),
+            "an unwritable selection goes straight to the clipboard probe"
+        )
+        TestRunner.assertTrue(
+            !unwritableBody.contains("swapLastWordInBuffer"),
+            "an unwritable selection is NEVER handed to the buffer/history path"
+                + " (it holds an unrelated older word after a mouse selection)"
+        )
     }
 }
 
