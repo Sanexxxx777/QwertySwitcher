@@ -231,7 +231,25 @@ final class HotkeyManager {
         DebugLog.shared.log("HK", "doubleShift triggered")
         guard keyboardMonitor?.isPaused != true else { return }
 
-        if convertAXSelection() { return }
+        switch convertAXSelection() {
+        case .converted:
+            return
+        case .selectionUnwritable:
+            // A selection EXISTS, we just can't write it through AX. The
+            // buffer/history step below must be skipped entirely: after a
+            // mouse selection the history slot still holds an unrelated older
+            // word (log: "buffer wiped: reason=mouse-click … history=1"), and
+            // converting that instead of what the user highlighted is worse
+            // than doing nothing. The clipboard probe is the only path that
+            // can still reach the actual selection — including in
+            // kitty-protocol terminals, where its Cmd+C costs a stray CSI
+            // sequence in the input stream. That price is worth paying only
+            // here, where the alternative is the feature not working at all.
+            probeClipboardSelection()
+            return
+        case .noSelection:
+            break
+        }
         // Freshly typed keys convert with no side effect and are the dominant
         // live case — they must run BEFORE the clipboard probe. The probe
         // posts a synthetic Cmd+C, and kitty-protocol terminals deliver that
@@ -245,17 +263,47 @@ final class HotkeyManager {
         probeClipboardSelection()
     }
 
-    private func convertAXSelection() -> Bool {
-        guard LicenseService.shared.isEntitled else { return false }
+    /// Outcome of the AX-selection step — `selectionUnwritable` is what keeps
+    /// the caller from handing a live selection to the buffer/history path.
+    enum AXSelectionOutcome {
+        case converted
+        case selectionUnwritable
+        case noSelection
+    }
+
+    private func convertAXSelection() -> AXSelectionOutcome {
+        guard LicenseService.shared.isEntitled else { return .noSelection }
         guard let element = AXTextSelectionService.focusedElement(),
-              let selected = AXTextSelectionService.selectedText(element) else { return false }
-        guard let target = convertedReplacement(for: selected) else { return false }
+              let selected = AXTextSelectionService.selectedText(element) else { return .noSelection }
+        // From here on a selection demonstrably exists, so every failure below
+        // is `selectionUnwritable`, never `noSelection`.
+        guard let target = convertedReplacement(for: selected), target.text != selected else {
+            return .selectionUnwritable
+        }
         guard AXTextSelectionService.replaceSelectedText(target.text, in: element) else {
             DebugLog.shared.log("HK", "doubleShift: AX selection write failed")
-            return false
+            return .selectionUnwritable
+        }
+        // `.success` from AXUIElementSetAttributeValue means "the app accepted
+        // the message", NOT "the text changed" — Electron/Chromium fields and
+        // terminals routinely answer success and leave the selection exactly
+        // as it was. Owner, 13.08.2026: three Double Shifts in a row on the
+        // same selection, each logged "via AX selection: len=6 target=ru" with
+        // the target never flipping to en — i.e. nothing was ever replaced,
+        // while the reported success stopped the chain before the clipboard
+        // probe that WOULD have worked. So the write is verified by reading
+        // back: unchanged selection = failure, fall through.
+        if let after = AXTextSelectionService.selectedText(element), after == selected {
+            let app = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
+            DebugLog.shared.log(
+                "HK",
+                "doubleShift: AX selection write reported success but the text is unchanged"
+                    + " — falling through to the clipboard probe (app=\(app))"
+            )
+            return .selectionUnwritable
         }
         recordDoubleShiftSuccess(via: "AX selection", length: selected.count, targetLayout: target.layout)
-        return true
+        return .converted
     }
 
     private func probeClipboardSelection() {
