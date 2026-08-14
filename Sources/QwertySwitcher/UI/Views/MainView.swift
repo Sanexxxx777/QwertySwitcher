@@ -588,7 +588,7 @@ struct MainView: View {
                 rowDivider
                 SettingToggleRow(
                     icon: "doc.on.clipboard",
-                    title: "Command + Shift + V",
+                    title: "Command + Option + Shift + V",
                     subtitle: "вставить текст без форматирования",
                     isOn: $viewModel.isPasteNoFormatEnabled
                 )

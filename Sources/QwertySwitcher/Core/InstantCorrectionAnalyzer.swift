@@ -23,7 +23,7 @@ final class InstantCorrectionAnalyzer {
     static let currentCeiling = 5
 
     /// The other-language candidate's combined score must clear this floor.
-    static let candidateFloor = 40
+    static let candidateFloor = 35
 
     /// Minimum score gap required between the candidate and the current text.
     static let margin = 30
@@ -56,14 +56,6 @@ final class InstantCorrectionAnalyzer {
 
         let currentText = convert(currentLayout)
         guard !currentText.isEmpty, !LanguageDetector.shouldSkip(currentText) else { return nil }
-
-        // Cheap pre-filter: a recognizable n-gram pattern in the current
-        // language is never "impossible", so skip the dictionary/spellcheck
-        // calls entirely for the overwhelming majority of normal (correct)
-        // keystrokes — this runs on every buffered letter and must stay fast.
-        guard ngramAnalyzer.score(currentText, language: currentLayout.languageCode) <= 0 else {
-            return nil
-        }
 
         let current = combinedScore(currentText, language: currentLayout.languageCode)
         // A dictionary/prefix match on the CURRENT side always wins, even if
