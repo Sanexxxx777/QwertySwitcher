@@ -152,9 +152,28 @@ final class KeyboardMonitor {
     // out of scope for now — see Fix report.
     private var pendingLeadingSymbols: [BufferedKeystroke] = []
 
-    /// Set while the current run holds a key that is a letter in one alphabet
-    /// and punctuation in the other — see `InputBuffer.isAlphabetAmbiguous`.
-    private var runHasAmbiguousKey = false
+    /// Position (1-based `buffer.count` right after it was appended) of the
+    /// most recent alphabet-ambiguous key — a letter in one alphabet and
+    /// punctuation in the other, see `InputBuffer.isAlphabetAmbiguous` — in
+    /// the word currently being buffered. `nil` once no such key has been
+    /// typed yet for this word. Recomputed every keystroke rather than
+    /// latched for the whole word — see `ambiguousKeyRecent`.
+    private var lastAmbiguousKeyIndex: Int?
+
+    /// True while an alphabet-ambiguous key is still within the last 2
+    /// keystrokes of the buffered word — i.e. fewer than 2 plain letters
+    /// have followed it since. Instant correction has its own, looser
+    /// scorer than the word-boundary path, so while the ambiguous key's
+    /// alphabet is still genuinely unsettled ("key." reads as the real
+    /// Russian word "луню" the instant "." lands), it must wait for the
+    /// boundary. Once 2 more letters have been typed, the run is
+    /// overwhelmingly one alphabet or the other and instant correction may
+    /// resume — unlike a sticky flag, this stays accurate for a key that
+    /// happens to sit in the MIDDLE of a long word.
+    private var ambiguousKeyRecent: Bool {
+        guard let idx = lastAmbiguousKeyIndex else { return false }
+        return buffer.count - idx < 2
+    }
 
 
     init(languageDetector: LanguageDetector, textReplacer: TextReplacing,
@@ -347,7 +366,7 @@ final class KeyboardMonitor {
         }
         guard type == .keyDown else { return false }
         let flags = event.flags
-        if flags.contains(.maskCommand) && flags.contains(.maskShift) && keycode == 9 {
+        if flags.contains(.maskCommand) && flags.contains(.maskShift) && flags.contains(.maskAlternate) && keycode == 9 {
             return prefsService.isPasteNoFormatEnabled
                 && NSPasteboard.general.string(forType: .string) != nil
         }
@@ -403,8 +422,8 @@ final class KeyboardMonitor {
         let keycode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
 
-        // Cmd+Shift+V
-        if flags.contains(.maskCommand) && flags.contains(.maskShift) && keycode == 9 {
+        // Cmd+Option+Shift+V
+        if flags.contains(.maskCommand) && flags.contains(.maskShift) && flags.contains(.maskAlternate) && keycode == 9 {
             // Ghost shift-tap fix: mark the key as pressed BEFORE anything
             // else in this branch, whether or not the feature is enabled or
             // even fires. Without this, Cmd↓→Shift↓→V(swallowed)→Shift↑
@@ -571,20 +590,22 @@ final class KeyboardMonitor {
             autoLearnTracker.registerNonDeletion()
             if buffer.isEmpty {
                 lastCompletedWord = nil
-                runHasAmbiguousKey = false
+                lastAmbiguousKeyIndex = nil
                 instantCorrectionGate.startNewWord()
             }
-            if InputBuffer.isAlphabetAmbiguous(keycode) { runHasAmbiguousKey = true }
             buffer.append(keycode, flags: flags)
+            if InputBuffer.isAlphabetAmbiguous(keycode) { lastAmbiguousKeyIndex = buffer.count }
             // Instant correction fires MID-word, before the evidence is in. It
-            // has its own, looser scorer, so once alphabet-ambiguous keys were
-            // allowed to stay in the run it started rewriting correct English:
-            // "key." reads as the Russian word "луню" and got replaced while
-            // still being typed. Runs containing such a key wait for the real
-            // word boundary, where the full projection logic applies. Pure
-            // letter runs behave exactly as they did before.
+            // has its own, looser scorer, so while an alphabet-ambiguous key is
+            // still within the last 2 keystrokes it can misread pure punctuation
+            // as a letter: "key." reads as the Russian word "луню" and got
+            // replaced while still being typed. The run waits for the real word
+            // boundary (full projection logic) until 2 plain letters have
+            // followed the ambiguous key — by then its alphabet is settled and
+            // it no longer needs to poison the rest of the word. Pure letter
+            // runs behave exactly as they did before.
             if canAutoCorrect && prefsService.isInstantCorrectionEnabled
-                && !instantCorrectionGate.wasCorrected && !runHasAmbiguousKey {
+                && !instantCorrectionGate.wasCorrected && !ambiguousKeyRecent {
                 tryInstantCorrection(triggerEvent: event)
             }
         } else if InputBuffer.isNumberOrSpecial(keycode) {

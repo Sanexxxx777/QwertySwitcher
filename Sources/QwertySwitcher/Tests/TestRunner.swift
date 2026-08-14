@@ -2496,6 +2496,65 @@ enum KeyboardMonitorIntegrationTests {
             )
         }
 
+        // --- ambiguousKeyRecent unblocks mid-word once 2 plain letters follow
+        // "работа" = "hf,jnf" on EN keys — the ambiguous ',' ('б') sits at
+        // index 3. Instant correction stays gated through indices 3 and 4
+        // (the ambiguous key is still within the last 2 keystrokes) and is
+        // free to fire again at index 5 ("hf,jn" = "работ", a confident
+        // dictionary prefix) — i.e. before the word is even finished, let
+        // alone before a word boundary. A sticky whole-run flag (the old
+        // `runHasAmbiguousKey`) would keep this blocked all the way to the
+        // end of the word instead.
+        TestRunner.section("Instant correction unblocks past an ambiguous key once 2 letters follow — \"работа\"")
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: true)
+            if let rabota = InstantCorrectionFixtures.keystrokes(for: "работа", reverse: ruReverse) {
+                for stroke in rabota.dropLast() { h.press(stroke) } // "hf,jn" — everything but the last "f"
+                TestRunner.assertEqual(
+                    h.invocationCount, 1,
+                    "instant correction already fired mid-word, before the final letter and before any space"
+                )
+                TestRunner.assertEqual(
+                    h.screen, "работ",
+                    "on-screen text is the corrected Russian prefix — fixed before the word was even finished"
+                )
+                h.press(rabota.last!) // the trailing "f" ("а") — types normally on the now-switched layout
+                TestRunner.assertEqual(
+                    h.invocationCount, 1,
+                    "the word boundary/gate path does not fire a second correction on the same word"
+                )
+                TestRunner.assertEqual(h.screen, "работа", "the rest of the word completes correctly on the new layout")
+            } else {
+                TestRunner.assertTrue(false, "'работа': ru fixture can type every character")
+            }
+        }
+
+        // --- ambiguousKeyRecent still blocks while the key is in the last 2 -
+        // "key." — the "." (kc47) is a letter in Russian ("ю") and joins the
+        // word buffer as its own defense (see the comment above), landing
+        // right at the last keystroke. Instant correction must NOT misread
+        // it as the real Russian word "луню" while it's still that recent —
+        // the full word-boundary scorer (which reads the trailing key both
+        // ways) is what safely resolves "key." as English, not the looser
+        // instant path.
+        TestRunner.section("Instant correction stays gated with the ambiguous key in the last 2 keystrokes — \"key.\"")
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: true)
+            if let key = InstantCorrectionFixtures.keystrokes(for: "key", reverse: enReverse) {
+                h.type(key)
+                h.press(47) // "." — a letter (ю) in Russian; joins the buffer, not a boundary
+                TestRunner.assertEqual(
+                    h.invocationCount, 0,
+                    "instant correction stays blocked while '.' is still within the last 2 keystrokes"
+                )
+                TestRunner.assertEqual(h.screen, "key.", "on-screen text is exactly what was typed, untouched so far")
+            } else {
+                TestRunner.assertTrue(false, "'key': EN fixture can type every character")
+            }
+        }
+
         // --- Trailing trigger renders on the TARGET layout, not the source --
         // Shift+kc44 is '?' on QWERTY but ',' on ЙЦУКЕН (same physical key);
         // Shift+kc26 is '&' on QWERTY but '?' on ЙЦУКЕН. The trigger that
@@ -2934,18 +2993,67 @@ enum KeyboardMonitorIntegrationTests {
         // live in it. Before the fix, `buffer`/`runKeystrokes` from typing
         // "ghbdtn" survived the Cmd+Shift+V branch untouched, and the space
         // right after fired a boundary correction on that stale buffer.
-        TestRunner.section("Cmd+Shift+V invalidates the stale word buffer (FIX A)")
+        TestRunner.section("Cmd+Option+Shift+V invalidates the stale word buffer (FIX A)")
         inputSources.switchTo(enLayout)
         do {
             let h = harness(autoSwitch: true)
             h.prefs.isInstantCorrectionEnabled = false // isolate the boundary-correction path
             if let ghbdtn = InstantCorrectionFixtures.keystrokes(for: "ghbdtn", reverse: enReverse) {
                 h.type(ghbdtn)
-                h.press(9, flags: [.maskCommand, .maskShift]) // Cmd+Shift+V
+                h.press(9, flags: [.maskCommand, .maskShift, .maskAlternate]) // Cmd+Option+Shift+V
                 h.press(49) // space — word boundary
                 TestRunner.assertEqual(
                     h.invocationCount, 0,
-                    "a stale buffer from before Cmd+Shift+V does not fire a correction after the paste"
+                    "a stale buffer from before Cmd+Option+Shift+V does not fire a correction after the paste"
+                )
+            } else {
+                TestRunner.assertTrue(false, "'ghbdtn': en fixture can type every character")
+            }
+        }
+
+        // --- NEW (15.08.2026): bare Cmd+Shift+V (no Option) must now pass --
+        // through untouched — PasteNow (the owner's clipboard manager) opens
+        // on the SAME shortcut (carbonKeyCode 9, modifiers 768) and our tap
+        // was swallowing it, killing PasteNow. Paste-without-formatting moved
+        // to Cmd+Option+Shift+V (macOS's own "Paste and Match Style" combo);
+        // plain Cmd+Shift+V must not even enter the paste-no-format branch —
+        // it falls straight through to the ordinary modifier-shortcut path
+        // (any Cmd/Ctrl/Option combo invalidates context there already).
+        //
+        // `consumeSuppressCurrentEvent()`/`invocationCount` can't tell the two
+        // branches apart here: neither ever sets the internal suppress flag
+        // for this key (the REAL swallow happens in `handlesShortcut`, which
+        // is `fileprivate` and only reachable from the real CGEventTap
+        // callback — the structural check above already pins that), and
+        // `hotkeyManager` is never wired in this harness, so a "started"
+        // paste never reaches the replacer either way. The one thing that
+        // DOES differ observably is whether `handleEvent`'s branch itself
+        // ran at all — it logs unconditionally on every pass — so the debug
+        // log is the actual falsifiable signal for "which branch executed".
+        TestRunner.section("Cmd+Shift+V without Option never enters the paste-no-format branch")
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: true)
+            h.prefs.isInstantCorrectionEnabled = false // isolate the boundary-correction path
+            if let ghbdtn = InstantCorrectionFixtures.keystrokes(for: "ghbdtn", reverse: enReverse) {
+                h.type(ghbdtn)
+                DebugLog.shared.waitForPendingWrites()
+                let before = DebugLog.shared.currentContents
+                h.press(9, flags: [.maskCommand, .maskShift]) // no .maskAlternate
+                DebugLog.shared.waitForPendingWrites()
+                let newLines = String(DebugLog.shared.currentContents.dropFirst(before.count))
+                TestRunner.assertTrue(
+                    !newLines.contains("pasteNoFormat:"),
+                    "bare Cmd+Shift+V (no Option) never enters the paste-no-format branch at all"
+                )
+                TestRunner.assertEqual(
+                    h.invocationCount, 0,
+                    "bare Cmd+Shift+V never starts a paste-no-format replacement — Option is required now"
+                )
+                h.press(49) // space — would fire a boundary correction if the stale buffer had survived
+                TestRunner.assertEqual(
+                    h.invocationCount, 0,
+                    "the modifier-shortcut path still invalidated the stale 'ghbdtn' buffer, so the space corrects nothing"
                 )
             } else {
                 TestRunner.assertTrue(false, "'ghbdtn': en fixture can type every character")
@@ -3465,7 +3573,7 @@ enum OverlayMismatchGuardTests {
 /// same precedent as `ReplacementAtomicityGuardTests`.
 enum PasteNoFormatGuardTests {
     static func run() {
-        TestRunner.section("Cmd+Shift+V — every pass resets state, formatting stripped only when present")
+        TestRunner.section("Cmd+Option+Shift+V — every pass resets state, formatting stripped only when present")
 
         let coreDir = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()      // Tests/
@@ -3498,6 +3606,23 @@ enum PasteNoFormatGuardTests {
         TestRunner.assertTrue(
             branch.contains("pasteNoFormat: swallowed enabled=") && branch.contains("started="),
             "FIX D: the branch is observable in the debug log (metadata only)"
+        )
+
+        // --- FIX (15.08.2026): Option is now required on BOTH the shortcut
+        // classifier (handlesShortcut) and the handler (handleEvent) — a
+        // stray plain Cmd+Shift+V must not match either, or the tap would
+        // suppress it in one place while still trying to act on it (or vice
+        // versa). Checked directly against the full file text rather than
+        // `branch` above, since `branch` starts right after the FIRST
+        // "keycode == 9 {" match (inside `handlesShortcut`) and so never
+        // contains the condition text leading up to that marker.
+        let pasteCondition =
+            "flags.contains(.maskCommand) && flags.contains(.maskShift)"
+                + " && flags.contains(.maskAlternate) && keycode == 9"
+        let pasteConditionCount = kmText.components(separatedBy: pasteCondition).count - 1
+        TestRunner.assertEqual(
+            pasteConditionCount, 2,
+            "both handlesShortcut and handleEvent require Option — bare Cmd+Shift+V matches neither"
         )
 
         // --- FIX B(2): fresh Shift-down seeds anyModifierWithShift from
