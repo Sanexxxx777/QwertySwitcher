@@ -29,6 +29,7 @@ enum TestRunner {
         SyntheticEventTests.run()
         ShiftStateTests.run()
         ShiftTapResolverTests.run()
+        ShiftTapModifierDisqualifierTests.run()
         AutoLearnTrackerTests.run()
         ReplacementTransactionTests.run()
         LanguageSkipTests.run()
@@ -66,6 +67,7 @@ enum TestRunner {
         DoubleShiftSelectionGuardTests.run()
         RunResyncStructuralGuardTests.run()
         OverlayMismatchGuardTests.run()
+        PasteNoFormatGuardTests.run()
         StatusInkContrastTests.run()
         SecureInputAXTierTests.run()
         CallbackDurationThresholdTests.run()
@@ -517,6 +519,45 @@ enum ShiftTapResolverTests {
         _ = resolver.registerTap(doubleShiftEnabled: true)
         resolver.cancel()
         TestRunner.assertTrue(!resolver.hasPendingFirstTap, "typing cancels pending Shift tap")
+    }
+}
+
+/// FIX B (13.08.2026, ghost Cmd+Shift+V shift-tap): a fresh Shift-down used
+/// to unconditionally reset `anyModifierWithShift = false`, so
+/// Cmd↓→Shift↓→V(swallowed)→Shift↑ read as a clean Shift-tap and armed a
+/// phantom Single/Double Shift on the NEXT tap within 450ms. The predicate is
+/// pure and shared between the mid-hold check and the fresh-down seed.
+enum ShiftTapModifierDisqualifierTests {
+    static func run() {
+        TestRunner.section("HotkeyManager.modifierDisqualifiesShiftTap — pure predicate")
+        TestRunner.assertTrue(
+            !HotkeyManager.modifierDisqualifiesShiftTap([]),
+            "no modifiers: does not disqualify"
+        )
+        TestRunner.assertTrue(
+            !HotkeyManager.modifierDisqualifiesShiftTap(.maskShift),
+            "Shift alone: does not disqualify"
+        )
+        TestRunner.assertTrue(
+            HotkeyManager.modifierDisqualifiesShiftTap(.maskCommand),
+            "Cmd: disqualifies"
+        )
+        TestRunner.assertTrue(
+            HotkeyManager.modifierDisqualifiesShiftTap(.maskControl),
+            "Ctrl: disqualifies"
+        )
+        TestRunner.assertTrue(
+            HotkeyManager.modifierDisqualifiesShiftTap(.maskAlternate),
+            "Alt: disqualifies"
+        )
+        TestRunner.assertTrue(
+            HotkeyManager.modifierDisqualifiesShiftTap([.maskCommand, .maskShift]),
+            "Cmd+Shift together (the Cmd+Shift+V case): disqualifies"
+        )
+        TestRunner.assertTrue(
+            HotkeyManager.modifierDisqualifiesShiftTap([.maskAlternate, .maskShift]),
+            "Alt+Shift together: disqualifies"
+        )
     }
 }
 
@@ -2884,6 +2925,33 @@ enum KeyboardMonitorIntegrationTests {
             TestRunner.assertEqual(h.replacer.invocationCount, 0, "no correction ever fired on correctly-typed text")
         }
 
+        // --- FIX A (13.08.2026): Cmd+Shift+V must not leave a stale buffer --
+        // `KeyboardMonitorHarness` never wires `hotkeyManager` (it exercises
+        // `handleEvent`'s own analysis, not HotkeyManager's live TIS/AX
+        // calls), so `started` is always false here — this exercises the
+        // "paste never actually fired" arm of the fix, the one FIX A's own
+        // comment calls out as easy to forget since the paste itself doesn't
+        // live in it. Before the fix, `buffer`/`runKeystrokes` from typing
+        // "ghbdtn" survived the Cmd+Shift+V branch untouched, and the space
+        // right after fired a boundary correction on that stale buffer.
+        TestRunner.section("Cmd+Shift+V invalidates the stale word buffer (FIX A)")
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: true)
+            h.prefs.isInstantCorrectionEnabled = false // isolate the boundary-correction path
+            if let ghbdtn = InstantCorrectionFixtures.keystrokes(for: "ghbdtn", reverse: enReverse) {
+                h.type(ghbdtn)
+                h.press(9, flags: [.maskCommand, .maskShift]) // Cmd+Shift+V
+                h.press(49) // space — word boundary
+                TestRunner.assertEqual(
+                    h.invocationCount, 0,
+                    "a stale buffer from before Cmd+Shift+V does not fire a correction after the paste"
+                )
+            } else {
+                TestRunner.assertTrue(false, "'ghbdtn': en fixture can type every character")
+            }
+        }
+
         // --- Guards: shell/code punctuation and correctly-typed words -------
         TestRunner.section("Guards — correctly-typed text and shell/code punctuation never trigger a correction")
 
@@ -3384,6 +3452,96 @@ enum OverlayMismatchGuardTests {
         TestRunner.assertTrue(
             pacingBlock.contains("overlay pacing:"),
             "the overlay path now logs its own pacing line instead of being silently excluded"
+        )
+    }
+}
+
+/// FIX A+B+C+D (13.08.2026 diagnosis, Cmd+Shift+V "paste without
+/// formatting"): four independent defects in one feature. FIX A's
+/// buffer-staleness half already has live coverage
+/// (`KeyboardMonitorIntegrationTests`, "Cmd+Shift+V invalidates the stale
+/// word buffer"); the rest needs a real pasteboard + focused app the
+/// headless harness cannot provide, so it's pinned structurally instead,
+/// same precedent as `ReplacementAtomicityGuardTests`.
+enum PasteNoFormatGuardTests {
+    static func run() {
+        TestRunner.section("Cmd+Shift+V — every pass resets state, formatting stripped only when present")
+
+        let coreDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()      // Tests/
+            .deletingLastPathComponent()      // QwertySwitcher/
+            .appendingPathComponent("Core")
+
+        // --- FIX A + B(1): KeyboardMonitor.handleEvent's kc9 branch --------
+        guard let kmText = try? String(
+            contentsOf: coreDir.appendingPathComponent("KeyboardMonitor.swift"), encoding: .utf8
+        ) else {
+            TestRunner.skip("KeyboardMonitor.swift not readable")
+            return
+        }
+        guard let branchStart = kmText.range(of: "keycode == 9 {"),
+              let branchEnd = kmText.range(
+                of: "// Cmd+Option+Z", range: branchStart.upperBound..<kmText.endIndex
+              ) else {
+            TestRunner.assertTrue(false, "Cmd+Shift+V branch not found — test needs updating")
+            return
+        }
+        let branch = String(kmText[branchStart.upperBound..<branchEnd.lowerBound])
+        TestRunner.assertTrue(
+            branch.contains("hotkeyManager?.markKeyPressed()"),
+            "FIX B: a swallowed V still registers as a real keypress (kills the ghost shift-tap)"
+        )
+        TestRunner.assertTrue(
+            branch.contains("invalidateEditingContext(reason: \"paste-no-format\")"),
+            "FIX A: every pass through the branch resets buffer/runKeystrokes/lastCompletedWord"
+        )
+        TestRunner.assertTrue(
+            branch.contains("pasteNoFormat: swallowed enabled=") && branch.contains("started="),
+            "FIX D: the branch is observable in the debug log (metadata only)"
+        )
+
+        // --- FIX B(2): fresh Shift-down seeds anyModifierWithShift from
+        //     THIS event's own flags instead of an unconditional reset.
+        guard let hkText = try? String(
+            contentsOf: coreDir.appendingPathComponent("HotkeyManager.swift"), encoding: .utf8
+        ) else {
+            TestRunner.skip("HotkeyManager.swift not readable")
+            return
+        }
+        TestRunner.assertTrue(
+            hkText.contains("anyModifierWithShift = Self.modifierDisqualifiesShiftTap(flags)"),
+            "FIX B: a fresh Shift-down derives anyModifierWithShift from this event's own flags"
+        )
+
+        // --- FIX C + D: handlePasteNoFormat --------------------------------
+        guard let funcStart = hkText.range(of: "func handlePasteNoFormat(completion:"),
+              let funcEnd = hkText.range(
+                of: "private struct PasteboardSnapshot", range: funcStart.upperBound..<hkText.endIndex
+              ) else {
+            TestRunner.assertTrue(false, "handlePasteNoFormat not found — test needs updating")
+            return
+        }
+        let pasteFn = String(hkText[funcStart.upperBound..<funcEnd.lowerBound])
+        TestRunner.assertTrue(
+            pasteFn.contains(".pasteboardItems"),
+            "FIX C: the pasteboard's actual flavors are inspected before deciding whether to substitute"
+        )
+        TestRunner.assertTrue(
+            pasteFn.contains("onlyPlainText"),
+            "FIX C: a pasteboard with no non-plain flavors skips the clear/set substitution entirely"
+        )
+        TestRunner.assertTrue(
+            pasteFn.contains("+ 0.4"),
+            "FIX C: the restore delay was widened from 0.15s to 0.4s"
+        )
+        TestRunner.assertTrue(
+            pasteFn.contains("paste-no-format: len=") && pasteFn.contains("flavors=")
+                && pasteFn.contains("substituted="),
+            "FIX D: the substitution decision is logged with metadata only, never the pasted text"
+        )
+        TestRunner.assertTrue(
+            pasteFn.contains("restore="),
+            "FIX D: the restore outcome (done/skipped) is logged"
         )
     }
 }
