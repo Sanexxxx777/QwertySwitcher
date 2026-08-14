@@ -315,6 +315,33 @@ enum InputBufferTests {
             TestRunner.skip("Russian layout is required for layout-aware trailing-character checks")
         }
 
+        // Same physical key, different printed symbol per layout — the root
+        // cause of the "Да?" instead of "Да," auto-correct trailing-trigger
+        // bug. KeyboardMonitor's processCurrentWord/swapLastWordInBuffer
+        // recompute a word-closing trigger against the TARGET layout using
+        // exactly this call.
+        if let ru = inputSources.availableLayouts.first(where: { $0.languageCode == "ru" }),
+           let en = inputSources.availableLayouts.first(where: { $0.languageCode == "en" }) {
+            TestRunner.assertTrue(
+                inputSources.characterForKeycode(44, layout: ru, flags: .maskShift) == ",",
+                "Shift+kc44 renders ',' on ЙЦУКЕН"
+            )
+            TestRunner.assertTrue(
+                inputSources.characterForKeycode(44, layout: en, flags: .maskShift) == "?",
+                "Shift+kc44 renders '?' on QWERTY"
+            )
+            TestRunner.assertTrue(
+                inputSources.characterForKeycode(26, layout: ru, flags: .maskShift) == "?",
+                "Shift+kc26 renders '?' on ЙЦУКЕН"
+            )
+            TestRunner.assertTrue(
+                inputSources.characterForKeycode(26, layout: en, flags: .maskShift) == "&",
+                "Shift+kc26 renders '&' on QWERTY"
+            )
+        } else {
+            TestRunner.skip("EN + RU layouts are required for the trigger-symbol layout check")
+        }
+
         let buf = InputBuffer()
         buf.append(1, flags: .maskShift)
         buf.append(2, flags: .maskAlphaShift)
@@ -2424,6 +2451,67 @@ enum KeyboardMonitorIntegrationTests {
                 h2.invocationCount, 0,
                 "not a single replacement was attempted on correct English"
             )
+        }
+
+        // --- Trailing trigger renders on the TARGET layout, not the source --
+        // Shift+kc44 is '?' on QWERTY but ',' on ЙЦУКЕН (same physical key);
+        // Shift+kc26 is '&' on QWERTY but '?' on ЙЦУКЕН. The trigger that
+        // closes an auto-corrected word used to render on the layout it was
+        // PRESSED on (before the switch) instead of the one the word lands
+        // in — "Да" + Shift+kc44 in en printed "Да?" instead of "Да,".
+        // Instant correction is switched off in all three cases below: it
+        // fires MID-WORD and would flip the layout before the trigger key is
+        // even pressed, masking the bug this test targets — the trigger
+        // that closes the word at the BOUNDARY (processCurrentWord).
+        TestRunner.section("Trailing trigger converts with the word — \"Да,\" not \"Да?\"")
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: true)
+            h.prefs.isInstantCorrectionEnabled = false
+            if let privet = InstantCorrectionFixtures.keystrokes(for: "ghbdtn", reverse: enReverse) {
+                h.type(privet)
+                h.press(44, flags: .maskShift) // '?' on QWERTY, ',' on ЙЦУКЕН
+                TestRunner.assertEqual(
+                    h.screen, "привет,",
+                    "fix: trailing renders on the TARGET (ru) layout — was \"привет?\""
+                )
+            } else {
+                TestRunner.assertTrue(false, "'ghbdtn': EN fixture can type every character")
+            }
+        }
+        // Mirror direction: ru → en.
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(autoSwitch: true)
+            h.prefs.isInstantCorrectionEnabled = false
+            if let what = InstantCorrectionFixtures.keystrokes(for: "what", reverse: enReverse) {
+                h.type(what)
+                h.press(44, flags: .maskShift)
+                TestRunner.assertEqual(
+                    h.screen, "what?",
+                    "fix: trailing renders on the TARGET (en) layout — was \"what,\""
+                )
+            } else {
+                TestRunner.assertTrue(false, "'what': EN fixture can type every character")
+            }
+        }
+        // Second trigger key on the same physical row, same direction as the
+        // first case (en → ru) — the bug's other reported instance ("Что&"
+        // instead of "Что?").
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: true)
+            h.prefs.isInstantCorrectionEnabled = false
+            if let dela = InstantCorrectionFixtures.keystrokes(for: "дела", reverse: ruReverse) {
+                h.type(dela)
+                h.press(26, flags: .maskShift) // '&' on QWERTY, '?' on ЙЦУКЕН
+                TestRunner.assertEqual(
+                    h.screen, "дела?",
+                    "fix: Shift+kc26 also renders on the TARGET (ru) layout — was \"дела&\""
+                )
+            } else {
+                TestRunner.assertTrue(false, "'дела': RU fixture can type every character")
+            }
         }
 
         // --- lone "b" → "и" — the 05.08.2026 report ------------------------
