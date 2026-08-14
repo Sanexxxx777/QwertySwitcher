@@ -64,6 +64,8 @@ enum TestRunner {
         HotPathStructuralGuardTests.run()
         ReplacementAtomicityGuardTests.run()
         DoubleShiftSelectionGuardTests.run()
+        RunResyncStructuralGuardTests.run()
+        OverlayMismatchGuardTests.run()
         StatusInkContrastTests.run()
         SecureInputAXTierTests.run()
         CallbackDurationThresholdTests.run()
@@ -3228,6 +3230,164 @@ enum DoubleShiftSelectionGuardTests {
 /// appearances. Straight `NSColor.systemGreen` measures 2.22:1 on a light
 /// window and was shipped that way; this is the check that makes that a test
 /// failure instead of a bug report.
+/// Spotlight overlay drift class ("ccccara"/"cchr", field log 14.08.2026
+/// 20:13:35-37: `run check: model=4 ax=5 → resynced to screen`, then a later
+/// gesture on the same field `model=4 ax=6` — the screen kept growing while
+/// the model never moved). `convertWholeRun` measures the real on-screen
+/// word via AX whenever it can, but for a letters-only run that is a
+/// dictionary judgement, not its call — it falls through to
+/// `swapLastWordInBuffer`, which used to re-derive the erase count from
+/// `keystrokes.count` alone and throw the measurement away, so the SAME
+/// AX-verified drift was never healed, only ever compounded.
+/// No live AX inside the headless test harness (a CLI test binary has no
+/// focused element to read, and forcing one would make the suite depend on
+/// whatever the test machine happens to have focused) — pinned structurally
+/// instead, same precedent as `ReplacementAtomicityGuardTests`.
+enum RunResyncStructuralGuardTests {
+    static func run() {
+        TestRunner.section("Double Shift erase count — the scored path reuses convertWholeRun's screen measurement")
+
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()      // Tests/
+            .deletingLastPathComponent()      // QwertySwitcher/
+            .appendingPathComponent("Core/KeyboardMonitor.swift")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            TestRunner.skip("KeyboardMonitor.swift not readable from \(source.path)")
+            return
+        }
+
+        // 1) convertWholeRun stashes the AX measurement right where it falls
+        //    through (letters-only run — nothing for THIS function to do).
+        guard let fallthroughMarker = text.range(
+            of: "run check: letters only — falls through to the scored path"
+        ) else {
+            TestRunner.assertTrue(false, "letters-only fallthrough log line not found — test needs updating")
+            return
+        }
+        let precedingGuardBlock = String(text[..<fallthroughMarker.lowerBound]).suffix(400)
+        TestRunner.assertTrue(
+            precedingGuardBlock.contains("pendingRunResync = onScreen.count"),
+            "convertWholeRun stashes the AX-measured screen length before falling through"
+        )
+
+        // 2) swapLastWordInBuffer picks it up, gated to the LIVE run — never
+        //    a `lastCompletedWord` history snapshot, which is a different
+        //    word at a different caret position.
+        guard let funcStart = text.range(of: "func swapLastWordInBuffer() -> Bool {") else {
+            TestRunner.assertTrue(false, "swapLastWordInBuffer not found — test needs updating")
+            return
+        }
+        guard let lengthMarker = text.range(
+            of: "var length = leadingSymbols.count + keystrokes.count",
+            range: funcStart.upperBound..<text.endIndex
+        ) else {
+            TestRunner.assertTrue(false, "erase-length computation not found — test needs updating")
+            return
+        }
+        // 3) Everything BEFORE the erase-length computation — where the
+        //    replacement CONTENT (`correctedWord`/`runReplacement`) is
+        //    decided from `keystrokes` — must never reference the
+        //    measurement. Only the erase count is allowed to move; the
+        //    screen decides how much to erase, the keycodes decide what to
+        //    type (project invariant).
+        let contentSelection = String(text[funcStart.upperBound..<lengthMarker.lowerBound])
+        TestRunner.assertTrue(
+            !contentSelection.contains("pendingRunResync"),
+            "the replacement CONTENT is fully decided before the erase-length override runs"
+        )
+
+        guard let callSite = text.range(
+            of: "textReplacer.replaceCurrentWord(", range: lengthMarker.upperBound..<text.endIndex
+        ) else {
+            TestRunner.assertTrue(false, "replaceCurrentWord call site not found — test needs updating")
+            return
+        }
+        let overrideBlock = String(text[lengthMarker.upperBound..<callSite.lowerBound])
+        TestRunner.assertTrue(
+            overrideBlock.contains("if source == \"buffer\", let measured = pendingRunResync"),
+            "the override is gated to the live run (source == \"buffer\"), never applied to a history word"
+        )
+        TestRunner.assertTrue(
+            overrideBlock.contains("length = measured"),
+            "the erase length is overridden with the measured on-screen length, not the model"
+        )
+        TestRunner.assertTrue(
+            overrideBlock.contains("run check: erase resynced "),
+            "the override is logged with the specific 'run check: erase resynced N→M' format"
+        )
+    }
+}
+
+/// Second line of defense for the same drift class: `convertWholeRun`'s
+/// resync only covers ONE call site (`RunResyncStructuralGuardTests` above).
+/// Any OTHER replacement that ends up delivered to an overlay field still
+/// hands `TextReplacer` a `length` derived purely from its caller's typed
+/// model — this pins that `TextReplacer` refuses to erase on a mismatch
+/// instead of trusting the caller blindly (erasing the wrong count is worse
+/// than doing nothing: a stray character self-heals on the next correction,
+/// a wrong erase eats real text). No live overlay window inside the headless
+/// harness, so this reads the source, same precedent as
+/// `ReplacementAtomicityGuardTests`.
+enum OverlayMismatchGuardTests {
+    static func run() {
+        TestRunner.section("TextReplacer — an overlay delivery aborts on a screen/model mismatch instead of guessing")
+
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()      // Tests/
+            .deletingLastPathComponent()      // QwertySwitcher/
+            .appendingPathComponent("Core/TextReplacer.swift")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            TestRunner.skip("TextReplacer.swift not readable from \(source.path)")
+            return
+        }
+
+        guard let overlayMarker = text.range(
+            of: "overlay delivery: posting to focused field pid=\\(overlayPid)"
+        ), let pacingMarker = text.range(
+            of: "let pacing = axReadable ? self.keystrokeDelay : self.carefulKeystrokeDelay"
+        ) else {
+            TestRunner.assertTrue(false, "overlay delivery block not found — test needs updating")
+            return
+        }
+        let overlayBlock = String(text[overlayMarker.upperBound..<pacingMarker.lowerBound])
+
+        TestRunner.assertTrue(
+            overlayBlock.contains("CaretWordExtractor.wordBeforeCaret"),
+            "the overlay guard re-measures the real on-screen word via AX before the replacement fires"
+        )
+        TestRunner.assertTrue(
+            overlayBlock.contains("plan.backspaceCount"),
+            "the guard compares against what the caller actually intends to erase"
+        )
+        TestRunner.assertTrue(
+            overlayBlock.contains("overlay replacement skipped: screen/model mismatch"),
+            "a mismatch is logged with the specific 'overlay replacement skipped' message"
+        )
+        TestRunner.assertTrue(
+            overlayBlock.contains("self.complete(.cancelled, cancellation: cancellation, completion: completion)"),
+            "a mismatch aborts the replacement (.cancelled) instead of erasing the wrong count"
+        )
+
+        // Pacing diagnostics are no longer suppressed for the overlay path —
+        // TextReplacer.swift used to log nothing at all there.
+        guard let sendBackspacesMarker = text.range(
+            of: "guard self.sendBackspaces", range: pacingMarker.upperBound..<text.endIndex
+        ) else {
+            TestRunner.assertTrue(false, "pacing block not found — test needs updating")
+            return
+        }
+        let pacingBlock = String(text[pacingMarker.upperBound..<sendBackspacesMarker.lowerBound])
+        TestRunner.assertTrue(
+            pacingBlock.contains("careful pacing: field not AX-readable"),
+            "the non-overlay careful-pacing log is untouched"
+        )
+        TestRunner.assertTrue(
+            pacingBlock.contains("overlay pacing:"),
+            "the overlay path now logs its own pacing line instead of being silently excluded"
+        )
+    }
+}
+
 enum StatusInkContrastTests {
     static func run() {
         TestRunner.section("StatusInk — measured contrast, both appearances")

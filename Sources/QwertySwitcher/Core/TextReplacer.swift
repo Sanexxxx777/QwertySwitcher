@@ -186,11 +186,38 @@ final class TextReplacer {
                     DebugLog.shared.log(
                         "TR", "overlay delivery: posting to focused field pid=\(overlayPid)"
                     )
+                    // Second line of defense for the class of bug that lived
+                    // here (Spotlight "ccccara"/"cchr"): the caller's own
+                    // resync only covers ONE call site (KeyboardMonitor's
+                    // Double Shift run check). Any other overlay replacement
+                    // still hands us a `length` derived purely from its typed
+                    // model — if that has drifted, erasing the wrong count is
+                    // worse than not erasing at all (a stray character
+                    // self-heals on the next correction; a wrong erase eats
+                    // real text). Read-only, best-effort: no measurement →
+                    // no opinion, proceed exactly as before this guard.
+                    if let (text, caret) = AXTextSelectionService.valueAndCaret(element),
+                       let word = CaretWordExtractor.wordBeforeCaret(text: text, caretUTF16Offset: caret) {
+                        let model = plan.backspaceCount
+                        let ax = word.word.count
+                        if ax != model {
+                            DebugLog.shared.log(
+                                "TR",
+                                "overlay replacement skipped: screen/model mismatch model=\(model) ax=\(ax)"
+                            )
+                            self.complete(.cancelled, cancellation: cancellation, completion: completion)
+                            return
+                        }
+                    }
                 }
             }
             let pacing = axReadable ? self.keystrokeDelay : self.carefulKeystrokeDelay
             if !axReadable && overlayPid == nil {
                 DebugLog.shared.log("TR", "careful pacing: field not AX-readable")
+            } else if overlayPid != nil {
+                DebugLog.shared.log(
+                    "TR", "overlay pacing: \(axReadable ? "fast" : "careful") axReadable=\(axReadable)"
+                )
             }
 
             guard self.sendBackspaces(count: plan.backspaceCount, pacing: pacing,

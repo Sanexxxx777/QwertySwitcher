@@ -75,6 +75,18 @@ final class KeyboardMonitor {
     /// scoring buffer into something it was never meant to hold.
     private var runKeystrokes: [BufferedKeystroke] = []
 
+    /// Set by `convertWholeRun` when it measured the real on-screen text for
+    /// a letters-only run (AX resync) and then fell through — a pure word is
+    /// this function's business to convert, not judge, so it hands the
+    /// measurement to the scored path in `swapLastWordInBuffer` right after
+    /// it returns. Without this the measurement was computed and thrown
+    /// away, and the scored path re-derived the erase count from the model
+    /// that had just disagreed with the screen — the Spotlight
+    /// "ccccara"/"cchr" class: every swap erased one character too few and
+    /// the survivor stacked up on the left. Reset at the top of every
+    /// `convertWholeRun` call and consumed once by `swapLastWordInBuffer`.
+    private var pendingRunResync: Int?
+
     // Avalanche circuit breaker (see CorrectionAvalancheGuard) — applies only
     // to the two fully-automatic correction entry points (instant + word
     // boundary). Double Shift is intentionally NOT gated by either of these:
@@ -820,6 +832,11 @@ final class KeyboardMonitor {
     /// the scored path picks the target layout intelligently, and that
     /// calibration is left exactly as it was.
     private func convertWholeRun() -> Bool {
+        // Cleared on every call, not just the branch that fills it — every
+        // exit path below is a fresh reset first, an explicit fill only in
+        // the one branch that produced a real screen measurement, so a stale
+        // value from an earlier word can never leak into this one.
+        pendingRunResync = nil
         guard let currentLayout = languageDetector.inputSourceManager.currentLayout,
               let targetLayout = languageDetector.activeLayouts.first(where: { $0.id != currentLayout.id })
         else { return false }
@@ -878,6 +895,10 @@ final class KeyboardMonitor {
             return false
         }
         guard onScreen.contains(where: { !$0.isLetter }) else {
+            // The AX measurement above is real regardless of which branch
+            // uses it — stash it for the scored path about to run
+            // (`swapLastWordInBuffer`, right after this call returns).
+            if resynced { pendingRunResync = onScreen.count }
             DebugLog.shared.log("KM", "run check: letters only — falls through to the scored path")
             return false
         }
@@ -1024,7 +1045,23 @@ final class KeyboardMonitor {
         let originalWord = leadingOriginalText + originalWordOnly
 
         isPaused = true
-        let length = leadingSymbols.count + keystrokes.count
+        // `convertWholeRun`, called at the top of this function, already
+        // measured the real on-screen word when it fell through here
+        // (letters only — a dictionary judgement, not its call). Reusing
+        // THAT length for the erase, instead of re-deriving it from
+        // `keystrokes`, is what actually fixes the drift: the model is what
+        // disagreed with the screen in the first place. Only the erase count
+        // changes — `swap.word` above was already scored from `keystrokes`
+        // and stays exactly that; the screen decides how much to erase, the
+        // keycodes decide what to type. `source == "buffer"` is a belt: the
+        // measurement only ever comes from the run just typed, never from a
+        // `lastCompletedWord` snapshot pulled out of history.
+        var length = leadingSymbols.count + keystrokes.count
+        if source == "buffer", let measured = pendingRunResync, measured != length {
+            DebugLog.shared.log("KM", "run check: erase resynced \(length)→\(measured)")
+            length = measured
+        }
+        pendingRunResync = nil
 
         textReplacer.replaceCurrentWord(
             length: length,
