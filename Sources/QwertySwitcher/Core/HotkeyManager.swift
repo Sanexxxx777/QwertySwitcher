@@ -37,6 +37,18 @@ final class HotkeyManager {
         self.prefsService = prefsService
     }
 
+    /// Whether a modifier present on THIS flagsChanged event disqualifies the
+    /// shift press it's part of from ever resolving to a clean Shift-tap.
+    /// Used both mid-hold (line ~56) and to seed a FRESH Shift-down (line
+    /// ~81) — the seeded case is what closes the ghost-tap gap: Cmd already
+    /// held when Shift goes down (e.g. Cmd+Shift+V) used to unconditionally
+    /// reset `anyModifierWithShift = false` on that very down-transition,
+    /// because `hadShiftHeld` is false on a fresh press and the mid-hold
+    /// check at line ~56 never got a chance to run.
+    static func modifierDisqualifiesShiftTap(_ flags: CGEventFlags) -> Bool {
+        flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
+    }
+
     func handleFlagsChanged(_ event: CGEvent) {
         let flags = event.flags
         let keycode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
@@ -78,7 +90,7 @@ final class HotkeyManager {
             // left these flags set and poisoned the tap detection.
             if !wasAlreadyHeld {
                 anyKeyBetweenShifts = false
-                anyModifierWithShift = false
+                anyModifierWithShift = Self.modifierDisqualifiesShiftTap(flags)
             }
         }
 
@@ -457,11 +469,31 @@ final class HotkeyManager {
     func handlePasteNoFormat(completion: @escaping () -> Void) -> Bool {
         let pasteboard = NSPasteboard.general
         guard let str = pasteboard.string(forType: .string) else { return false }
-        let snapshot = PasteboardSnapshot(pasteboard: pasteboard)
 
-        pasteboard.clearContents()
-        pasteboard.setString(str, forType: .string)
-        let temporaryChangeCount = pasteboard.changeCount
+        // Only strip formatting if there's formatting to strip. A pasteboard
+        // that already carries nothing but plain text needs no
+        // clear/set/restore cycle at all — a plain Cmd+V already pastes
+        // exactly what "no format" is asking for, and skipping the
+        // substitution avoids a pointless clipboard flicker for what is the
+        // common case (copy from a terminal, another plain-text field, etc).
+        let flavors = pasteboard.pasteboardItems?.reduce(into: Set<NSPasteboard.PasteboardType>()) {
+            $0.formUnion($1.types)
+        } ?? []
+        let onlyPlainText = flavors.subtracting([.string]).isEmpty
+
+        var restoreSnapshot: PasteboardSnapshot?
+        var temporaryChangeCount = pasteboard.changeCount
+        if !onlyPlainText {
+            let snapshot = PasteboardSnapshot(pasteboard: pasteboard)
+            pasteboard.clearContents()
+            pasteboard.setString(str, forType: .string)
+            temporaryChangeCount = pasteboard.changeCount
+            restoreSnapshot = snapshot
+        }
+        DebugLog.shared.log(
+            "HK",
+            "paste-no-format: len=\(str.count) flavors=\(flavors.count) substituted=\(onlyPlainText ? "N" : "Y")"
+        )
 
         let src = CGEventSource(stateID: .hidSystemState)
         let kd = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
@@ -473,12 +505,18 @@ final class HotkeyManager {
         if let ku { SyntheticEventMarker.mark(ku) }
         ku?.post(tap: .cgAnnotatedSessionEventTap)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+        // Widened 0.15s → 0.4s: some apps (Electron/webviews especially)
+        // process a paste slower than the old fixed budget, and restoring
+        // the original clipboard mid-paste raced the app's own read of it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             // Do not overwrite a clipboard change made by the user or target app
             // while the paste was in flight.
-            if pasteboard.changeCount == temporaryChangeCount {
-                snapshot.restore(to: pasteboard)
+            var didRestore = false
+            if let restoreSnapshot, pasteboard.changeCount == temporaryChangeCount {
+                restoreSnapshot.restore(to: pasteboard)
+                didRestore = true
             }
+            DebugLog.shared.log("HK", "restore=\(didRestore ? "done" : "skipped")")
             completion()
         }
         return true

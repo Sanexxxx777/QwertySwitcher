@@ -405,13 +405,33 @@ final class KeyboardMonitor {
 
         // Cmd+Shift+V
         if flags.contains(.maskCommand) && flags.contains(.maskShift) && keycode == 9 {
+            // Ghost shift-tap fix: mark the key as pressed BEFORE anything
+            // else in this branch, whether or not the feature is enabled or
+            // even fires. Without this, Cmd↓→Shift↓→V(swallowed)→Shift↑
+            // looked exactly like a clean Shift-tap gesture to
+            // `HotkeyManager`, arming a phantom Double/Single Shift on the
+            // NEXT shift-tap within its 450ms window.
+            hotkeyManager?.markKeyPressed()
+            var started = false
             if prefsService.isPasteNoFormatEnabled {
                 isPaused = true
-                let started = hotkeyManager?.handlePasteNoFormat { [weak self] in
+                started = hotkeyManager?.handlePasteNoFormat { [weak self] in
                     self?.finishReplacement()
                 } ?? false
                 if !started { isPaused = false }
             }
+            DebugLog.shared.log(
+                "KM", "pasteNoFormat: swallowed enabled=\(prefsService.isPasteNoFormatEnabled) started=\(started)"
+            )
+            // Every pass through this branch — feature disabled, pasteboard
+            // empty, or a real substitution — can end with the on-screen
+            // text changed underneath our buffer/runKeystrokes/lastCompletedWord
+            // model (either our own synthetic paste, or the real Cmd+Shift+V
+            // reaching the app because it wasn't swallowed). `isPaused==true`
+            // defers this to `finishReplacement` via `invalidateAfterReplacement`
+            // (same mechanism other replacement paths use); otherwise it
+            // clears immediately.
+            invalidateEditingContext(reason: "paste-no-format")
             return
         }
 
