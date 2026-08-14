@@ -118,7 +118,15 @@ final class KeyboardMonitor {
         // Layout-dependent symbols typed right before this word (e.g. "/" in
         // "/exit"), captured alongside so Double Shift's history fallback
         // can fold them into the SAME transaction — see `pendingLeadingSymbols`.
-        leadingSymbols: [BufferedKeystroke]
+        leadingSymbols: [BufferedKeystroke],
+        // The keycode+flags that rendered `trailing` — a physical key can
+        // print a DIFFERENT character per layout (Shift+kc44 = '?' in
+        // QWERTY, ',' in ЙЦУКЕН). Kept so the history fallback in
+        // `swapLastWordInBuffer` can re-render the trigger for whatever
+        // layout it is about to convert INTO, instead of replaying the
+        // string captured on the layout it was typed on. Nil for triggers
+        // with no single originating keystroke (space, re-armed history).
+        trailingKeystroke: BufferedKeystroke?
     )?
 
     // Layout-dependent symbols typed with an empty letter buffer (leading
@@ -576,7 +584,8 @@ final class KeyboardMonitor {
                 trailing: digit,
                 canAutoCorrect: canAutoCorrect,
                 keepForManualSwitch: true,
-                triggerEvent: event
+                triggerEvent: event,
+                triggerKeystroke: BufferedKeystroke(keycode: keycode, flags: flags)
             )
         } else {
             logContextWipe("navigation-key-\(keycode)")
@@ -590,7 +599,8 @@ final class KeyboardMonitor {
     }
 
     private func handleWordBoundary(
-        trailing: String?, canAutoCorrect: Bool, keepForManualSwitch: Bool, triggerEvent: CGEvent
+        trailing: String?, canAutoCorrect: Bool, keepForManualSwitch: Bool, triggerEvent: CGEvent,
+        triggerKeystroke: BufferedKeystroke? = nil
     ) {
         let captured = buffer.currentWord()
         if captured.isEmpty { switchUndoManager.invalidate() }
@@ -607,7 +617,7 @@ final class KeyboardMonitor {
         let replacementStarted = canAutoCorrect
             && learned == nil
             && !captured.isEmpty
-            && processCurrentWord(trigger: trailing, triggerEvent: triggerEvent)
+            && processCurrentWord(trigger: trailing, triggerKeystroke: triggerKeystroke, triggerEvent: triggerEvent)
 
         if replacementStarted {
             lastCompletedWord = nil
@@ -617,7 +627,7 @@ final class KeyboardMonitor {
             // it was typed on (any layout change mid-word would already have
             // cleared `buffer` via `layoutDidChange`). `pendingLeadingSymbols`
             // is read here, BEFORE it's cleared below.
-            lastCompletedWord = (captured, trailing, typedLayout, pendingLeadingSymbols)
+            lastCompletedWord = (captured, trailing, typedLayout, pendingLeadingSymbols, triggerKeystroke)
         } else {
             lastCompletedWord = nil
         }
@@ -936,6 +946,7 @@ final class KeyboardMonitor {
         if convertWholeRun() { return true }
         var keystrokes = buffer.currentWord()
         var trailing: String? = nil
+        var trailingKeystroke: BufferedKeystroke? = nil
         // Layout-dependent symbol(s) typed right before this word (e.g. "/"
         // in "/exit", "$" in "$GRAF") — tracked separately from `keystrokes`
         // exactly like the boundary/instant-correction paths, and folded
@@ -975,6 +986,7 @@ final class KeyboardMonitor {
                 trailing = last.trailing
                 typedLayout = last.typedLayout
                 leadingSymbols = last.leadingSymbols
+                trailingKeystroke = last.trailingKeystroke
                 source = "history"
             }
         }
@@ -992,6 +1004,16 @@ final class KeyboardMonitor {
         }
         let targetLayout = swap.layout
         let correctedWord = swap.word
+
+        // Same layout-dependent trigger re-render as the boundary path
+        // (`processCurrentWord`): the trailing symbol pulled from history was
+        // rendered on the layout it was TYPED on, not the one Double Shift is
+        // about to switch INTO.
+        if let trailingKeystroke {
+            trailing = languageDetector.inputSourceManager.characterForKeycode(
+                trailingKeystroke.keycode, layout: targetLayout, flags: trailingKeystroke.flags
+            ) ?? trailing
+        }
 
         let originalWordOnly = languageDetector.lastConvertedWord(keystrokes: keystrokes) ?? ""
         let leadingOriginalText = leadingSymbols.isEmpty ? ""
@@ -1040,7 +1062,7 @@ final class KeyboardMonitor {
                 // instead of falling through to caret-word/Undo (which used
                 // to make it look like the feature needed 2-3 presses to
                 // "finally" work).
-                self.lastCompletedWord = (keystrokes, trailing ?? "", targetLayout, leadingSymbols)
+                self.lastCompletedWord = (keystrokes, trailing ?? "", targetLayout, leadingSymbols, trailingKeystroke)
                 self.statsService.recordOptionSwitch()
                 SoundService.shared.playSwitch(targetLanguageCode: targetLayout.languageCode, prefsService: self.prefsService)
                 NotificationCenter.default.post(name: .statsUpdated, object: nil)
@@ -1069,7 +1091,9 @@ final class KeyboardMonitor {
     ///                      replacer must backspace over it and re-type it.
     ///                      Pass nil only if nothing was printed after the word.
     @discardableResult
-    private func processCurrentWord(trigger: String?, triggerEvent: CGEvent) -> Bool {
+    private func processCurrentWord(
+        trigger: String?, triggerKeystroke: BufferedKeystroke? = nil, triggerEvent: CGEvent
+    ) -> Bool {
         guard !isPaused else { return false }
         if instantCorrectionGate.consumeIfCorrected() {
             DebugLog.shared.log("KM", "skip boundary correction: already instant-corrected")
@@ -1125,6 +1149,20 @@ final class KeyboardMonitor {
                 return false
             }
 
+            // The trigger that closed this word (e.g. Shift+kc44) renders a
+            // DIFFERENT printed character per layout — '?' in QWERTY, ',' in
+            // ЙЦУКЕН; Shift+kc26 — '&' in QWERTY, '?' in ЙЦУКЕН (same
+            // physical key, different symbol). `trigger` was rendered on the
+            // SOURCE layout (before this switch); re-render it for the
+            // TARGET layout the word is about to land in, so the retyped
+            // payload prints the right symbol — "Да" + Shift+kc44 in en
+            // becomes "Да," not "Да?".
+            let retypedTrigger = triggerKeystroke.flatMap {
+                languageDetector.inputSourceManager.characterForKeycode(
+                    $0.keycode, layout: layout, flags: $0.flags
+                )
+            } ?? trigger
+
             // Layout-dependent symbols typed right before this word (e.g. "$"
             // in "$GRAF", "/" in "/model") were structurally unreachable for
             // correction before — fold them into the SAME backspace+retype
@@ -1155,7 +1193,7 @@ final class KeyboardMonitor {
                 length: runLength,
                 replacement: runReplacement,
                 targetLayout: layout,
-                trailing: trigger,
+                trailing: retypedTrigger,
                 trailingAlreadyOnScreen: false
             ) { [weak self] result in
                 guard let self else { return }
@@ -1167,7 +1205,7 @@ final class KeyboardMonitor {
                         originalKeycodes: leadingSymbols.map(\.keycode) + keystrokes.map(\.keycode),
                         originalWord: leadingOriginalText + original,
                         correctedWord: runReplacement,
-                        trailing: trigger,
+                        trailing: retypedTrigger,
                         originalLayoutID: sourceLayout.id,
                         targetLayoutID: layout.id
                     )
@@ -1184,18 +1222,23 @@ final class KeyboardMonitor {
                     DebugLog.shared.log(
                         "KM",
                         "correction: \(sourceLayout.languageCode)→\(layout.languageCode)"
-                            + " len=\(runLength) lead=\(leadingSymbols.count) trig=\(trigger ?? "∅")"
+                            + " len=\(runLength) lead=\(leadingSymbols.count) trig=\(retypedTrigger ?? "∅")"
                             // See the instant path: retyped − erased − the
                             // suppressed trigger. Must be 0; any other value is
                             // exactly how many characters the text silently
                             // gained or lost. Bare counts, never content — so a
                             // report like "a letter went missing" is one glance
                             // to diagnose instead of a round of guesses.
-                            + " net=\(runReplacement.count + (trigger?.count ?? 0) - runLength - 1)"
+                            + " net=\(runReplacement.count + (retypedTrigger?.count ?? 0) - runLength - 1)"
                     )
                 case .layoutSwitchFailed:
+                    // Layout switch failed → nothing was retyped, the word is
+                    // still on screen in `sourceLayout` exactly as typed — so
+                    // history keeps the ORIGINAL (source-rendered) `trigger`,
+                    // not `retypedTrigger` (which was rendered for the target
+                    // layout that never actually took effect).
                     if let trigger {
-                        self.lastCompletedWord = (keystrokes, trigger, sourceLayout, leadingSymbols)
+                        self.lastCompletedWord = (keystrokes, trigger, sourceLayout, leadingSymbols, triggerKeystroke)
                     }
                     DebugLog.shared.log("KM", "correction aborted: layout switch verification failed")
                 case .cancelled:
