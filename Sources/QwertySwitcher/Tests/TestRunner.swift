@@ -59,6 +59,7 @@ enum TestRunner {
         MarzheDoubleShiftRegressionTests.run()
         TwoLetterWordScoringTests.run()
         NativeContextIncumbentAndOneLetterTests.run()
+        ConflictPairDisambiguationTests.run()
         OnboardingStateTests.run()
         KeyboardMonitorIntegrationTests.run()
         CorrectionAvalancheGuardTests.run()
@@ -1365,6 +1366,144 @@ enum NativeContextIncumbentAndOneLetterTests {
             TestRunner.assertTrue(false, "«баги» under neutral context must stay noSwitch (pre-fix regression: switched to «fub»)")
         case .noSwitch:
             TestRunner.assertTrue(true, "«баги» under neutral context stays noSwitch — now a dictionary word")
+        }
+    }
+}
+
+/// v0.6.13 wired "vs"/"kb"/"dj" into `twoLetterWords["en"]` as a blanket
+/// lock protecting the owner's live English tokens — which permanently
+/// broke the RU side («мы»/«ли»/«во» typed in EN layout never corrected,
+/// see `TwoLetterWordScoringTests`' "vs" negative, still green under
+/// neutral/lowercase). The owner rejected that trade: both sides must
+/// live. `LanguageDetector.conflictPairs` replaces the blanket lock with a
+/// context-based decision — this suite exercises every branch directly
+/// against `detect()`.
+enum ConflictPairDisambiguationTests {
+    static func run() {
+        TestRunner.section("Conflict-pair disambiguation (vs/kb/dj ↔ мы/ли/во)")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for conflict-pair fixtures")
+            return
+        }
+
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let prefs = PreferencesService()
+        let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
+
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+
+        guard let vsStrokes = InstantCorrectionFixtures.keystrokes(for: "vs", reverse: enReverse),
+              let kbStrokes = InstantCorrectionFixtures.keystrokes(for: "kb", reverse: enReverse),
+              let djStrokes = InstantCorrectionFixtures.keystrokes(for: "dj", reverse: enReverse),
+              let myStrokesRu = InstantCorrectionFixtures.keystrokes(for: "мы", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "conflict-pair fixtures: both layouts can type every character")
+            return
+        }
+
+        // --- 1: "vs" under an established EN context stays EN — the live
+        //        token lives. ---
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse)!,
+            typedLayout: enLayout
+        ) // primes previousWordLanguage = "en"
+        switch detector.detect(keystrokes: vsStrokes, typedLayout: enLayout) {
+        case .switchTo:
+            TestRunner.assertTrue(false, "'vs' under en-context must stay noSwitch — the live token lives")
+        case .noSwitch:
+            TestRunner.assertTrue(true, "'vs' under en-context stays noSwitch")
+        }
+
+        // --- 2: "vs" under an established RU context corrects to «мы» —
+        //        the owner is mid-sentence in Russian. ---
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse)!,
+            typedLayout: ruLayout
+        ) // primes previousWordLanguage = "ru"
+        switch detector.detect(keystrokes: vsStrokes, typedLayout: enLayout) {
+        case .switchTo(let layout, let word):
+            TestRunner.assertEqual(layout.languageCode, "ru", "'vs' under ru-context switches to ru")
+            TestRunner.assertEqual(word, "мы", "'vs' under ru-context corrects to «мы»")
+        case .noSwitch:
+            TestRunner.assertTrue(false, "'vs' under ru-context must switch to «мы»")
+        }
+
+        // --- 3: "Vs" (Shift on the FIRST keystroke) with NEUTRAL context —
+        //        no established language, but sentence-initial capitalization
+        //        reads as intent to type «Мы» (capitalization fallback; AX
+        //        probe ruled out — see LanguageDetector.swift comment on
+        //        this branch). ---
+        detector.resetContext()
+        let vsShiftStrokes = [
+            BufferedKeystroke(keycode: vsStrokes[0].keycode, flags: .maskShift),
+            vsStrokes[1]
+        ]
+        switch detector.detect(keystrokes: vsShiftStrokes, typedLayout: enLayout) {
+        case .switchTo(let layout, let word):
+            TestRunner.assertEqual(layout.languageCode, "ru", "'Vs' under neutral context switches to ru")
+            TestRunner.assertEqual(word, "Мы", "'Vs' under neutral context corrects to «Мы» (case preserved through convertKeystrokes, same as every other correction path)")
+        case .noSwitch:
+            TestRunner.assertTrue(false, "'Vs' (Shift on first key) under neutral context must switch — sentence-initial capitalization is the fallback signal")
+        }
+
+        // --- 4: "vs" lowercase with NEUTRAL context — no signal to act on,
+        //        stays put (Double Shift still fixes it manually). ---
+        detector.resetContext()
+        switch detector.detect(keystrokes: vsStrokes, typedLayout: enLayout) {
+        case .switchTo:
+            TestRunner.assertTrue(false, "'vs' lowercase under neutral context must stay noSwitch — no signal to act on")
+        case .noSwitch:
+            TestRunner.assertTrue(true, "'vs' lowercase under neutral context stays noSwitch")
+        }
+
+        // --- 5: "kb"/"dj" under ru-context — same mechanism, different pairs. ---
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse)!,
+            typedLayout: ruLayout
+        )
+        switch detector.detect(keystrokes: kbStrokes, typedLayout: enLayout) {
+        case .switchTo(let layout, let word):
+            TestRunner.assertEqual(layout.languageCode, "ru", "'kb' under ru-context switches to ru")
+            TestRunner.assertEqual(word, "ли", "'kb' under ru-context corrects to «ли»")
+        case .noSwitch:
+            TestRunner.assertTrue(false, "'kb' under ru-context must switch to «ли»")
+        }
+
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse)!,
+            typedLayout: ruLayout
+        )
+        switch detector.detect(keystrokes: djStrokes, typedLayout: enLayout) {
+        case .switchTo(let layout, let word):
+            TestRunner.assertEqual(layout.languageCode, "ru", "'dj' under ru-context switches to ru")
+            TestRunner.assertEqual(word, "во", "'dj' under ru-context corrects to «во»")
+        case .noSwitch:
+            TestRunner.assertTrue(false, "'dj' under ru-context must switch to «во»")
+        }
+
+        // --- 6: reverse direction — «мы» typed ON THE RU LAYOUT (not the
+        //        conflict-pair keys read as ru) must stay «мы» regardless of
+        //        context, even en. Guarded by the ordinary same-layout early
+        //        return in `detect()`, well before `conflictPairs` is ever
+        //        consulted. ---
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse)!,
+            typedLayout: enLayout
+        ) // primes previousWordLanguage = "en"
+        switch detector.detect(keystrokes: myStrokesRu, typedLayout: ruLayout) {
+        case .switchTo:
+            TestRunner.assertTrue(false, "«мы» typed on ru layout must stay noSwitch even under en-context — reverse direction must not be perturbed")
+        case .noSwitch:
+            TestRunner.assertTrue(true, "«мы» typed on ru layout stays noSwitch under en-context — reverse direction protected")
         }
     }
 }

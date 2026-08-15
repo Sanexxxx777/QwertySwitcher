@@ -147,6 +147,47 @@ final class LanguageDetector {
         // never corrupted text (not recoverable without noticing it first).
         guard best.inDictionary else { return .noSwitch }
 
+        // Conflict-pair disambiguation: a two-letter Russian dictionary word
+        // ("мы"/"ли"/"во") and a live English token the owner types daily
+        // ("vs"/"kb"/"dj") are two readings of the SAME physically-typed
+        // keys — see `conflictPairs`. `best` can only be "ru" here (the
+        // same-layout early return above already excluded
+        // `best.layout.id == currentLayout.id`), so `currentLayout` is EN
+        // and `currentText`'s core is exactly what the owner physically
+        // typed, read as English.
+        if best.layout.languageCode == "ru",
+           let enToken = Self.conflictPairs[best.core.lowercased()],
+           Self.core(of: currentText)?.lowercased() == enToken {
+            switch contextLanguageBeforeThisWord {
+            case "en":
+                // Owner is mid-sentence in English — "vs" lives, untouched.
+                return .noSwitch
+            case "ru":
+                // Owner is mid-sentence in Russian — fall through, «мы»
+                // gets fixed like any other correction.
+                break
+            default:
+                // Start of input, no context to lean on. An AX probe of the
+                // text before the caret (`AXTextSelectionService.valueAndCaret`
+                // + `CaretWordExtractor`) could settle this the way it does
+                // elsewhere, but this call is synchronous, inside the
+                // CGEventTap callback (`processCurrentWord` ← `handleEvent`
+                // ← `eventTapCallback` — the tap already logs WARNINGs for
+                // slow callbacks, and AX messaging can stall ~0.15s, see
+                // TextReplacer's own comment on the same API). The one place
+                // an AX round-trip already happens off that thread
+                // (`TextReplacer.replaceCurrentWord`, on
+                // `replacementQueue.async`) runs AFTER this decision is
+                // final — for `.noSwitch` that path is never even reached —
+                // so reusing it would mean building a new defer-the-decision
+                // mechanism, not reusing an existing one. Falling back to
+                // capitalization instead: Shift held on the FIRST keystroke
+                // ("Vs") reads as a sentence-opening «Мы»; lowercase is left
+                // alone (Double Shift still fixes it manually).
+                guard keystrokes.first?.flags.contains(.maskShift) == true else { return .noSwitch }
+            }
+        }
+
         // Native-context incumbent lock. A dictionary-valid word of the
         // CURRENT layout's language, typed while that same language is
         // already the established context, is never worth overwriting — no
@@ -336,16 +377,31 @@ final class LanguageDetector {
     /// real word of one language score in the OTHER language too (e.g. if
     /// "ok" were absent from `en` while its ru-layout reading "щл" stayed
     /// unlisted, that's fine — but if "ok" were present without a matching ru
-    /// check, ru gibberish under an en word could never lose fairly). "vs"
-    /// and "kb" are kept in `en` for the owner's actual usage; their ru-layout
-    /// readings ("мы", "ли") are real Russian words too and are deliberately
-    /// left OUT of `ru` — a missed correction there is cheaper than a false
-    /// rewrite of a live English token.
+    /// check, ru gibberish under an en word could never lose fairly). "vs" /
+    /// "kb" / "dj" — English tokens whose RU-layout reading is also a real
+    /// Russian word («мы» / «ли» / «во») — are deliberately NOT listed here.
+    /// 0.6.13 kept them in `en` as a blanket lock protecting the owner's
+    /// English usage, which permanently broke the RU side instead (the owner
+    /// rejected that trade). See `conflictPairs` below for the context-based
+    /// resolution that replaced it.
     private static let twoLetterWords: [String: Set<String>] = [
         "ru": ["на", "не", "но", "он", "мы", "за", "по", "от", "до", "из", "их", "им", "ей", "ты", "вы",
                "да", "же", "ли", "бы", "то", "ни", "ну", "со", "во", "ко", "об", "ой", "ах", "ох", "эй"],
         "en": ["am", "an", "as", "at", "be", "by", "do", "go", "he", "hi", "id", "if", "in", "is", "it",
-               "me", "my", "no", "of", "oh", "ok", "on", "or", "so", "to", "up", "us", "we", "vs", "kb", "dj", "ex", "re"]
+               "me", "my", "no", "of", "oh", "ok", "on", "or", "so", "to", "up", "us", "we", "ex", "re"]
+    ]
+
+    /// Conflict pairs: two-letter runs where an English token the owner
+    /// types daily and a real Russian word are the SAME physically-typed
+    /// keys — "vs"↔«мы», "kb"↔«ли», "dj"↔«во». Neither side can be muted
+    /// outright (see `twoLetterWords` above), so `detect()` resolves them by
+    /// context instead. Keyed by the RU word (the side `detect()` looks this
+    /// up from — its `best.core` when the winner reads as Russian); extend
+    /// by adding more en↔ru pairs here.
+    private static let conflictPairs: [String: String] = [
+        "мы": "vs",
+        "ли": "kb",
+        "во": "dj"
     ]
 
     private func scoreWord(_ word: String, language: String) -> Int {
