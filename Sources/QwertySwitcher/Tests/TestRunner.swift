@@ -57,6 +57,7 @@ enum TestRunner {
         DominantScriptLanguageTests.run()
         LogRetentionTests.run()
         MarzheDoubleShiftRegressionTests.run()
+        TwoLetterWordScoringTests.run()
         OnboardingStateTests.run()
         KeyboardMonitorIntegrationTests.run()
         CorrectionAvalancheGuardTests.run()
@@ -1128,6 +1129,95 @@ enum MarzheDoubleShiftRegressionTests {
             press3.word, "марже",
             "toggle 3rd press: converts to «марже» again — one press per result, never 3 presses to work"
         )
+    }
+}
+
+enum TwoLetterWordScoringTests {
+    /// Diagnosis: en_US.txt and ru_RU.txt list almost the entire two-letter
+    /// Cartesian square as "words" (650/1024 en pairs, 774/1024 ru pairs), so
+    /// the Bloom filter used to score a reversed-layout typo like "yf" (the
+    /// EN-layout reading of «на») as a genuine EN dictionary hit — 84 points,
+    /// enough to make `incumbentGap` (25) unbeatable and permanently block
+    /// the correction. `scoreWord`'s closed `twoLetterWords` list (see
+    /// `oneLetterWords` next to it in LanguageDetector.swift) fixes this.
+    static func run() {
+        TestRunner.section("scoreWord — closed two-letter word list (yf/yt regression)")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for two-letter word fixtures")
+            return
+        }
+
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let prefs = PreferencesService()
+        let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
+
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+
+        // --- 1: "yf" (EN-layout reading of «на»), primed en-context ---
+        guard let naStrokes = InstantCorrectionFixtures.keystrokes(for: "на", reverse: ruReverse),
+              let helloStrokes = InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse) else {
+            TestRunner.assertTrue(false, "«на»/«hello»: fixture layouts can type every character")
+            return
+        }
+        TestRunner.assertEqual(
+            inputSources.convertKeystrokes(naStrokes, toLayout: enLayout), "yf",
+            "sanity: physical keys for «на» render as 'yf' when EN is active — matches the reported garbage"
+        )
+        // Primes previousWordLanguage = "en" — a genuine EN word typed while
+        // EN is active (previousWordLanguage starts nil on a fresh detector).
+        _ = detector.detect(keystrokes: helloStrokes, typedLayout: enLayout)
+
+        switch detector.detect(keystrokes: naStrokes, typedLayout: enLayout) {
+        case .switchTo(let layout, let word):
+            TestRunner.assertEqual(layout.languageCode, "ru", "'yf' under en-context switches to ru")
+            TestRunner.assertEqual(word, "на", "'yf' under en-context corrects to «на»")
+        case .noSwitch:
+            TestRunner.assertTrue(false, "'yf' under en-context must switch to «на» (pre-fix regression: noSwitch)")
+        }
+
+        // --- 2: "yt" (EN-layout reading of «не»), neutral context ---
+        detector.resetContext()
+        guard let neStrokes = InstantCorrectionFixtures.keystrokes(for: "не", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "«не»: RU fixture layout can type every character")
+            return
+        }
+        TestRunner.assertEqual(
+            inputSources.convertKeystrokes(neStrokes, toLayout: enLayout), "yt",
+            "sanity: physical keys for «не» render as 'yt' when EN is active"
+        )
+        switch detector.detect(keystrokes: neStrokes, typedLayout: enLayout) {
+        case .switchTo(let layout, let word):
+            TestRunner.assertEqual(layout.languageCode, "ru", "'yt' under neutral context switches to ru")
+            TestRunner.assertEqual(word, "не", "'yt' under neutral context corrects to «не»")
+        case .noSwitch:
+            TestRunner.assertTrue(false, "'yt' under neutral context must switch to «не»")
+        }
+
+        // --- 3/4/5: negatives — words typed correctly in EN never switch ---
+        detector.resetContext()
+        let negatives: [(word: String, note: String)] = [
+            ("ok", "list symmetry guard"),
+            ("vs", "live token protected despite «мы» being a real (deliberately omitted) ru word"),
+            ("zx", "garbage in both languages"),
+        ]
+        for negative in negatives {
+            guard let strokes = InstantCorrectionFixtures.keystrokes(for: negative.word, reverse: enReverse) else {
+                TestRunner.assertTrue(false, "'\(negative.word)': EN fixture layout can type every character")
+                continue
+            }
+            switch detector.detect(keystrokes: strokes, typedLayout: enLayout) {
+            case .switchTo:
+                TestRunner.assertTrue(false, "'\(negative.word)' must stay noSwitch — \(negative.note)")
+            case .noSwitch:
+                TestRunner.assertTrue(true, "'\(negative.word)' stays noSwitch — \(negative.note)")
+            }
+            detector.resetContext()
+        }
     }
 }
 

@@ -278,6 +278,29 @@ final class LanguageDetector {
         "en": ["a", "i"]
     ]
 
+    /// Same rationale as `oneLetterWords`, one letter longer. At length 2 the
+    /// bundled dictionaries are almost entirely garbage (650 of ~1024 possible
+    /// en_US pairs and 774 of ~1024 possible ru_RU pairs are listed "words"),
+    /// so the Bloom filter would pass nearly every two-letter run — including
+    /// the reversed-layout typo itself ("yf" for «на»/yt for «не») — as a
+    /// dictionary hit and let `incumbentGap` protect the garbage instead of
+    /// the real word. Membership here must be a closed, hand-picked list, and
+    /// it must be symmetric between languages: a one-sided list would let a
+    /// real word of one language score in the OTHER language too (e.g. if
+    /// "ok" were absent from `en` while its ru-layout reading "щл" stayed
+    /// unlisted, that's fine — but if "ok" were present without a matching ru
+    /// check, ru gibberish under an en word could never lose fairly). "vs"
+    /// and "kb" are kept in `en` for the owner's actual usage; their ru-layout
+    /// readings ("мы", "ли") are real Russian words too and are deliberately
+    /// left OUT of `ru` — a missed correction there is cheaper than a false
+    /// rewrite of a live English token.
+    private static let twoLetterWords: [String: Set<String>] = [
+        "ru": ["на", "не", "но", "он", "мы", "за", "по", "от", "до", "из", "их", "им", "ей", "ты", "вы",
+               "да", "же", "ли", "бы", "то", "ни", "ну", "со", "во", "ко", "об", "ой", "ах", "ох", "эй"],
+        "en": ["am", "an", "as", "at", "be", "by", "do", "go", "he", "hi", "id", "if", "in", "is", "it",
+               "me", "my", "no", "of", "oh", "ok", "on", "or", "so", "to", "up", "us", "we", "vs", "kb", "ex", "re"]
+    ]
+
     private func scoreWord(_ word: String, language: String) -> Int {
         let lowered = word.lowercased()
         if lowered.count == 1 {
@@ -287,6 +310,10 @@ final class LanguageDetector {
             // real, but it is also the weakest possible evidence, and it has
             // to lose to any longer word competing for the same run.
             return 70
+        }
+        if lowered.count == 2 {
+            guard Self.twoLetterWords[language]?.contains(lowered) == true else { return 0 }
+            return 84
         }
         guard lowered.count >= 2 else { return 0 }
 
