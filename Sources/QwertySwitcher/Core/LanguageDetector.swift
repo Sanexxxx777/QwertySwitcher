@@ -72,7 +72,13 @@ final class LanguageDetector {
         let currentText = inputSourceManager.convertKeystrokes(keystrokes, toLayout: currentLayout)
         if Self.shouldSkip(currentText) { return .noSwitch }
 
-        var candidates: [(layout: KeyboardLayout, word: String, score: Int, inDictionary: Bool)] = []
+        // Snapshot BEFORE the loop below overwrites `previousWordLanguage`
+        // with this word's own winner (line ~126) — the native-context and
+        // one-letter gates further down need the context as it stood WHEN
+        // this word was typed, not the outcome being decided right now.
+        let contextLanguageBeforeThisWord = previousWordLanguage
+
+        var candidates: [(layout: KeyboardLayout, word: String, score: Int, inDictionary: Bool, core: String)] = []
 
         for layout in layouts {
             // A run can hold keys that are punctuation in one alphabet and
@@ -112,7 +118,7 @@ final class LanguageDetector {
             }
 
             if score > 0 {
-                candidates.append((layout, word, score, inDictionary))
+                candidates.append((layout, word, score, inDictionary, core))
             }
         }
 
@@ -140,6 +146,47 @@ final class LanguageDetector {
         // language. Cost is a missed correction (recoverable — Double Shift),
         // never corrupted text (not recoverable without noticing it first).
         guard best.inDictionary else { return .noSwitch }
+
+        // Native-context incumbent lock. A dictionary-valid word of the
+        // CURRENT layout's language, typed while that same language is
+        // already the established context, is never worth overwriting — no
+        // score gap buys it back. Without this, frequency+bigram bonuses on
+        // the other side can outrun `incumbentGap`(25) outright: "руку"
+        // (ru dictionary word) loses to "here" on points alone, "рук"→"her",
+        // "беру"→"the", "берут"→"then". Deliberately independent of the gap
+        // below — the invariant is a native-language dictionary word is
+        // never perturbed by anything, because a missed correction is cheap
+        // and corrupting a word the user just typed in their own
+        // already-established language is not. Neutral/opposite context
+        // (context nil or the other language) is unaffected — that's the
+        // "blind typing" case the gap-based gate below still has to cover.
+        if let incumbent = candidates.first(where: { $0.layout.id == currentLayout.id }),
+           incumbent.inDictionary,
+           incumbent.layout.languageCode == contextLanguageBeforeThisWord {
+            return .noSwitch
+        }
+
+        // One-letter winners are the weakest possible evidence (`scoreWord`
+        // scores them 70 against 80-100 for a real word) and, unlike longer
+        // runs, the OWN reading of a single letter almost never scores at
+        // all — there is no incumbent and no gap to hold the line. All 7
+        // false switches the corpus sweep found (d/c/e/b/f/j/r, 15.08.2026)
+        // happened with the OPPOSITE language already established as
+        // context — an English word typed live right after another English
+        // word, one stray letter away from a Cyrillic one-letter reading —
+        // so that's exactly what this blocks: an EXPLICIT opposite-language
+        // context. Neutral context (nil, previousWordLanguage never set —
+        // e.g. the very first word of a session) is deliberately left
+        // alone: that's field feature 0.6.8's actual scenario ("b"+space ->
+        // "и", regression test at KeyboardMonitorIntegrationTests "Auto-
+        // correction reaches one-letter words"), and narrowing it further
+        // than the corpus evidence demands would break a shipped feature
+        // for no measured gain.
+        if best.core.count == 1,
+           let context = contextLanguageBeforeThisWord,
+           context != best.layout.languageCode {
+            return .noSwitch
+        }
 
         // Collision: need clear winner
         if candidates.count >= 2 && (candidates[0].score - candidates[1].score) < collisionGap {
@@ -298,7 +345,7 @@ final class LanguageDetector {
         "ru": ["на", "не", "но", "он", "мы", "за", "по", "от", "до", "из", "их", "им", "ей", "ты", "вы",
                "да", "же", "ли", "бы", "то", "ни", "ну", "со", "во", "ко", "об", "ой", "ах", "ох", "эй"],
         "en": ["am", "an", "as", "at", "be", "by", "do", "go", "he", "hi", "id", "if", "in", "is", "it",
-               "me", "my", "no", "of", "oh", "ok", "on", "or", "so", "to", "up", "us", "we", "vs", "kb", "ex", "re"]
+               "me", "my", "no", "of", "oh", "ok", "on", "or", "so", "to", "up", "us", "we", "vs", "kb", "dj", "ex", "re"]
     ]
 
     private func scoreWord(_ word: String, language: String) -> Int {
