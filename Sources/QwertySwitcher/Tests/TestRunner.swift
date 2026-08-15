@@ -58,6 +58,7 @@ enum TestRunner {
         LogRetentionTests.run()
         MarzheDoubleShiftRegressionTests.run()
         TwoLetterWordScoringTests.run()
+        NativeContextIncumbentAndOneLetterTests.run()
         OnboardingStateTests.run()
         KeyboardMonitorIntegrationTests.run()
         CorrectionAvalancheGuardTests.run()
@@ -1217,6 +1218,153 @@ enum TwoLetterWordScoringTests {
                 TestRunner.assertTrue(true, "'\(negative.word)' stays noSwitch — \(negative.note)")
             }
             detector.resetContext()
+        }
+    }
+}
+
+/// Diagnosis (false_switch_sim.py corpus sweep, 15.08.2026): the boundary
+/// scorer's `incumbentGap` moat is a fixed number of points and can be
+/// outrun by frequency+bigram bonuses on the other side ("руку" a real
+/// Russian dictionary word losing to "here"), and one-letter candidates
+/// have no incumbent at all to hold a gap against ("d" typed live in
+/// English converting to Russian "в"). Both fixes gate on the context the
+/// user had established BEFORE this word, not on the score itself.
+enum NativeContextIncumbentAndOneLetterTests {
+    static func run() {
+        TestRunner.section("Native-context incumbent lock + one-letter context gate")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for native-context fixtures")
+            return
+        }
+
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let prefs = PreferencesService()
+        let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
+
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+
+        // --- 1: «руку» (ru dictionary word, ranked 677) typed on ru layout
+        //        with an already-established ru context must never be
+        //        overwritten — pre-fix this switched to en «here». ---
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse)!,
+            typedLayout: ruLayout
+        ) // primes previousWordLanguage = "ru"
+
+        guard let rukuStrokes = InstantCorrectionFixtures.keystrokes(for: "руку", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "«руку»: RU fixture layout can type every character")
+            return
+        }
+        switch detector.detect(keystrokes: rukuStrokes, typedLayout: ruLayout) {
+        case .switchTo:
+            TestRunner.assertTrue(false, "«руку» under ru-context must stay noSwitch (pre-fix regression: switched to «here»)")
+        case .noSwitch:
+            TestRunner.assertTrue(true, "«руку» under ru-context stays noSwitch — native dictionary word is not perturbed")
+        }
+
+        // --- 2: «беру» (also a ru dictionary word) typed on ru layout, but
+        //        the ESTABLISHED context is en — the native-context lock
+        //        must not apply here, so behavior is whatever the existing
+        //        gap-based gate decides (recorded, not assumed). ---
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse)!,
+            typedLayout: enLayout
+        ) // primes previousWordLanguage = "en"
+
+        guard let beruStrokes = InstantCorrectionFixtures.keystrokes(for: "беру", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "«беру»: RU fixture layout can type every character")
+            return
+        }
+        switch detector.detect(keystrokes: beruStrokes, typedLayout: ruLayout) {
+        case .switchTo(let layout, let word):
+            TestRunner.assertEqual(layout.languageCode, "en", "«беру» under en-context: the native-context lock doesn't apply (context isn't ru), gap-based gate still allows the switch")
+            TestRunner.assertEqual(word, ",the", "«беру» under en-context corrects to «,the» (leading «б»-as-comma key kept as typed, only the letter core converts)")
+        case .noSwitch:
+            TestRunner.assertTrue(true, "«беру» under en-context stays noSwitch — gap-based gate blocked it (still fine: ru-context is what must be protected, and it is)")
+        }
+
+        // --- 3: single "d" typed live on en layout with en-context must
+        //        stay noSwitch — pre-fix this converted to ru «в» with no
+        //        incumbent and no gap to stop it. ---
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse)!,
+            typedLayout: enLayout
+        ) // primes previousWordLanguage = "en"
+
+        guard let dStrokes = InstantCorrectionFixtures.keystrokes(for: "d", reverse: enReverse) else {
+            TestRunner.assertTrue(false, "'d': EN fixture layout can type every character")
+            return
+        }
+        switch detector.detect(keystrokes: dStrokes, typedLayout: enLayout) {
+        case .switchTo:
+            TestRunner.assertTrue(false, "'d' under en-context must stay noSwitch (pre-fix regression: converted to «в»)")
+        case .noSwitch:
+            TestRunner.assertTrue(true, "'d' under en-context stays noSwitch — one-letter winner has no context backing it")
+        }
+
+        // --- 3b: single "d" typed live on en layout with NEUTRAL context
+        //        (no previous word this session at all) — the corpus fix
+        //        above only covers an EXPLICIT opposite-language context
+        //        (all 7 false switches the sweep found had one); neutral
+        //        context is deliberately left alone so feature 0.6.8's own
+        //        neutral-context case (test 4 below, and
+        //        KeyboardMonitorIntegrationTests "Auto-correction reaches
+        //        one-letter words") keeps working. Recording the actual
+        //        consequence: a stray "d" as the very first thing typed in
+        //        a session can still convert to «в» — consciously accepted,
+        //        it's the price of not narrowing 0.6.8 further than the
+        //        corpus evidence demands. ---
+        detector.resetContext()
+        switch detector.detect(keystrokes: dStrokes, typedLayout: enLayout) {
+        case .switchTo(let layout, let word):
+            TestRunner.assertEqual(layout.languageCode, "ru", "'d' under neutral context still switches to ru — consciously accepted: price of feature 0.6.8")
+            TestRunner.assertEqual(word, "в", "'d' under neutral context still corrects to «в»")
+        case .noSwitch:
+            TestRunner.assertTrue(false, "'d' under neutral context: expected switchTo «в» per the accepted 0.6.8 tradeoff — if this is noSwitch, the assumption above needs revisiting")
+        }
+
+        // --- 4: single "b" typed live on en layout with ru-context must
+        //        still convert to «и» — feature 0.6.8 stays alive. ---
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse)!,
+            typedLayout: ruLayout
+        ) // primes previousWordLanguage = "ru"
+
+        guard let bStrokes = InstantCorrectionFixtures.keystrokes(for: "b", reverse: enReverse) else {
+            TestRunner.assertTrue(false, "'b': EN fixture layout can type every character")
+            return
+        }
+        switch detector.detect(keystrokes: bStrokes, typedLayout: enLayout) {
+        case .switchTo(let layout, let word):
+            TestRunner.assertEqual(layout.languageCode, "ru", "'b' under ru-context still switches to ru (0.6.8 alive)")
+            TestRunner.assertEqual(word, "и", "'b' under ru-context still corrects to «и»")
+        case .noSwitch:
+            TestRunner.assertTrue(false, "'b' under ru-context must still switch to «и» — feature 0.6.8 must stay alive")
+        }
+
+        // --- 5: «баги» typed on ru layout with a NEUTRAL (nil) context —
+        //        now a ru dictionary word (Fix 3), so noSwitch comes from
+        //        the ordinary incumbent-gap gate. Pre-fix this switched to
+        //        en «fub» because «баги» wasn't in ru_RU.txt at all. ---
+        detector.resetContext()
+        guard let bagiStrokes = InstantCorrectionFixtures.keystrokes(for: "баги", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "«баги»: RU fixture layout can type every character")
+            return
+        }
+        switch detector.detect(keystrokes: bagiStrokes, typedLayout: ruLayout) {
+        case .switchTo:
+            TestRunner.assertTrue(false, "«баги» under neutral context must stay noSwitch (pre-fix regression: switched to «fub»)")
+        case .noSwitch:
+            TestRunner.assertTrue(true, "«баги» under neutral context stays noSwitch — now a dictionary word")
         }
     }
 }
