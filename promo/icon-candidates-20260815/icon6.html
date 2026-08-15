@@ -1,0 +1,73 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+@font-face {
+  font-family: 'Geist';
+  src: url('file:///Users/sasha/Projects/products/QwertySwitcher/Resources/Fonts/Geist_wght_.ttf') format('truetype');
+  font-weight: 100 900;
+}
+html,body{margin:0;padding:0;width:1024px;height:1024px;background:transparent;overflow:hidden}
+.board{position:relative;width:1024px;height:1024px}
+.sq{
+  position:absolute;left:96px;top:96px;width:832px;height:832px;
+  border-radius:186px;
+  background:linear-gradient(180deg,#F2A24B 0%,#E08A2E 100%);
+  box-shadow:0 14px 30px rgba(0,0,0,.32);
+  display:flex;align-items:center;justify-content:center;
+}
+.row{display:flex;align-items:center;gap:34px;font-family:'Geist';font-weight:800;color:#FDFBF7}
+.g{font-size:300px;line-height:1;text-shadow:0 8px 22px rgba(0,0,0,.18)}
+.arrow{font-size:230px;font-weight:700;line-height:1;text-shadow:0 8px 22px rgba(0,0,0,.18)}
+
+/* a — оригинал */
+
+/* b — опечатка: красная волна под Й, ровная база под Q */
+.vb .u{position:relative;display:inline-block}
+.vb .u.bad::after{
+  content:'';position:absolute;left:6px;right:6px;bottom:-52px;height:26px;
+  background:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='72' height='26'><path d='M0 16 Q 9 0 18 16 T 36 16 T 54 16 T 72 16' fill='none' stroke='%23E5484D' stroke-width='13' stroke-linecap='round'/></svg>") repeat-x;
+  background-size:72px 26px;
+}
+.vb .u.good::after{
+  content:'';position:absolute;left:10px;right:10px;bottom:-46px;height:16px;
+  border-radius:8px;background:#8FCB6B;
+}
+
+/* c — двунаправленная */
+.vc .arrow{font-size:210px}
+
+/* d — двуязычная кейкапа: Q крупно, Й в углу, как на реальной клавише */
+.vd .key{
+  width:560px;height:560px;border-radius:110px;
+  background:linear-gradient(180deg,#FFFEFB,#F1EBE0);
+  box-shadow:0 16px 0 #C8A176, 0 34px 44px rgba(0,0,0,.30), inset 0 2px 0 #FFFFFF;
+  position:relative;
+}
+.vd .q{position:absolute;left:70px;top:28px;font-family:'Geist';font-weight:800;font-size:330px;color:#221F1A}
+.vd .yi{position:absolute;right:64px;bottom:44px;font-family:'Geist';font-weight:760;font-size:190px;color:#DE8425}
+
+/* e — морфинг: Й тает, Q плотная */
+.ve .g.fade{opacity:.42}
+.ve .arrow{opacity:.75;font-size:190px}
+
+/* f — каретка набора после Q */
+.vf .caret{
+  width:26px;height:330px;border-radius:13px;background:#FDFBF7;margin-left:10px;
+  box-shadow:0 8px 22px rgba(0,0,0,.18);
+}
+</style>
+<div class="board" id="board"></div>
+<script>
+const v = new URLSearchParams(location.search).get('v') || 'a';
+const b = document.getElementById('board');
+b.className = 'board v' + v;
+const tpl = {
+  a: `<div class="sq"><div class="row"><span class="g">Й</span><span class="arrow">&#8594;</span><span class="g">Q</span></div></div>`,
+  b: `<div class="sq"><div class="row"><span class="g u bad">Й</span><span class="arrow">&#8594;</span><span class="g u good">Q</span></div></div>`,
+  c: `<div class="sq"><div class="row"><span class="g">Й</span><span class="arrow">&#8646;</span><span class="g">Q</span></div></div>`,
+  d: `<div class="sq"><div class="key"><span class="q">Q</span><span class="yi">Й</span></div></div>`,
+  e: `<div class="sq"><div class="row"><span class="g fade">Й</span><span class="arrow">&#8594;</span><span class="g">Q</span></div></div>`,
+  f: `<div class="sq"><div class="row"><span class="g">Й</span><span class="arrow">&#8594;</span><span class="g">Q</span><span class="caret"></span></div></div>`,
+};
+b.innerHTML = tpl[v];
+</script>
