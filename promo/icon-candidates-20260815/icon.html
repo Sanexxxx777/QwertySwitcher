@@ -1,0 +1,76 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+@font-face {
+  font-family: 'Geist';
+  src: url('file:///Users/sasha/Projects/products/QwertySwitcher/Resources/Fonts/Geist_wght_.ttf') format('truetype');
+  font-weight: 100 900;
+}
+html,body{margin:0;padding:0;width:1024px;height:1024px;background:transparent;overflow:hidden}
+.board{position:relative;width:1024px;height:1024px}
+/* macOS squircle по гайдлайну: 832px по центру, системная лёгкая тень */
+.sq{
+  position:absolute;left:96px;top:96px;width:832px;height:832px;
+  border-radius:186px;
+  box-shadow:0 14px 30px rgba(0,0,0,.32);
+  display:flex;align-items:center;justify-content:center;
+}
+.circle{
+  border-radius:50%;display:flex;align-items:center;justify-content:center;
+  flex-direction:column;
+}
+.stack{font-family:'Geist';font-weight:760;line-height:.92;text-align:center;letter-spacing:.01em;white-space:pre}
+
+/* v1 — оммаж Caramba: тёплый оранжевый, белый круг, QW ER TY */
+.v1 .sq{background:linear-gradient(180deg,#F2A24B 0%,#E88F32 100%)}
+.v1 .circle{width:600px;height:600px;background:#FDFBF7;box-shadow:inset 0 -6px 18px rgba(0,0,0,.06)}
+.v1 .stack{font-size:150px;color:#221F1A}
+
+/* v2 — наш синий бренд, белый круг */
+.v2 .sq{background:linear-gradient(180deg,#2E7BFF 0%,#1263F2 100%)}
+.v2 .circle{width:600px;height:600px;background:#FFFFFF;box-shadow:inset 0 -6px 18px rgba(0,0,0,.05)}
+.v2 .stack{font-size:150px;color:#0E1B33}
+
+/* v3 — эволюция витринной: графит + оранжевый круг */
+.v3 .sq{background:linear-gradient(180deg,#2B2B2E 0%,#161618 100%)}
+.v3 .circle{width:600px;height:600px;background:linear-gradient(180deg,#F2A24B,#E08A2E);box-shadow:inset 0 -8px 22px rgba(0,0,0,.18)}
+.v3 .stack{font-size:150px;color:#191612}
+
+/* v4 — Я⇄R сплит-круг: суть продукта в одном знаке */
+.v4 .sq{background:linear-gradient(180deg,#F2A24B 0%,#E88F32 100%)}
+.v4 .circle{width:600px;height:600px;background:#FDFBF7;flex-direction:row;gap:0;overflow:hidden}
+.v4 .half{width:50%;height:100%;display:flex;align-items:center;justify-content:center;font-family:'Geist';font-weight:800;font-size:300px}
+.v4 .half.l{background:#221F1A;color:#FDFBF7}
+.v4 .half.r{color:#221F1A}
+
+/* v5 — две кейкапы Й/Q на графите */
+.v5 .sq{background:linear-gradient(180deg,#2B2B2E 0%,#161618 100%)}
+.key{
+  position:absolute;width:340px;height:340px;border-radius:64px;
+  font-family:'Geist';font-weight:780;font-size:190px;
+  display:flex;align-items:center;justify-content:center;
+}
+.v5 .key.ru{left:170px;top:170px;background:linear-gradient(180deg,#4A4A4F,#39393D);color:#F5F1EA;box-shadow:0 10px 0 #202023,0 22px 30px rgba(0,0,0,.4)}
+.v5 .key.en{right:170px;bottom:150px;background:linear-gradient(180deg,#F2A24B,#E08A2E);color:#191612;box-shadow:0 10px 0 #9C5F1D,0 22px 30px rgba(0,0,0,.4)}
+.v5 .arr{position:absolute;left:0;right:0;top:0;bottom:0;display:flex;align-items:center;justify-content:center;font-family:'Geist';font-weight:700;font-size:150px;color:#FDFBF7;opacity:.92}
+
+/* v6 — минимал: оранжевый, крупный моногам Й→Q без круга */
+.v6 .sq{background:linear-gradient(180deg,#F2A24B 0%,#E08A2E 100%)}
+.v6 .stack{font-size:300px;color:#FDFBF7;font-weight:800;letter-spacing:-.01em;
+  text-shadow:0 8px 22px rgba(0,0,0,.18)}
+</style>
+<div class="board" id="board"></div>
+<script>
+const v = new URLSearchParams(location.search).get('v') || '1';
+const b = document.getElementById('board');
+b.className = 'board v' + v;
+const tpl = {
+  1: `<div class="sq"><div class="circle"><div class="stack">QW\nER\nTY</div></div></div>`,
+  2: `<div class="sq"><div class="circle"><div class="stack">QW\nER\nTY</div></div></div>`,
+  3: `<div class="sq"><div class="circle"><div class="stack">QW\nER\nTY</div></div></div>`,
+  4: `<div class="sq"><div class="circle"><div class="half l">Я</div><div class="half r">R</div></div></div>`,
+  5: `<div class="sq"></div><div class="key ru">Й</div><div class="key en">Q</div><div class="arr">⇄</div>`,
+  6: `<div class="sq"><div class="stack">Й→Q</div></div>`,
+};
+b.innerHTML = tpl[v];
+</script>
