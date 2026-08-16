@@ -3897,7 +3897,7 @@ enum OverlayMismatchGuardTests {
         guard let overlayMarker = text.range(
             of: "overlay delivery: posting to focused field pid=\\(overlayPid)"
         ), let pacingMarker = text.range(
-            of: "let pacing = axReadable ? self.keystrokeDelay : self.carefulKeystrokeDelay"
+            of: "let pacing = (axReadable && overlayPid == nil)"
         ) else {
             TestRunner.assertTrue(false, "overlay delivery block not found — test needs updating")
             return
@@ -3935,8 +3935,14 @@ enum OverlayMismatchGuardTests {
             "the non-overlay careful-pacing log is untouched"
         )
         TestRunner.assertTrue(
-            pacingBlock.contains("overlay pacing:"),
-            "the overlay path now logs its own pacing line instead of being silently excluded"
+            pacingBlock.contains("overlay pacing: careful (forced"),
+            "an overlay ALWAYS gets the careful pace — Spotlight lost one backspace per "
+                + "gesture at the fast burst even with a readable AX value "
+                + "(field episodes ccccara/cchr/ccfhf, 15-16.08.2026)"
+        )
+        TestRunner.assertTrue(
+            !pacingBlock.contains("axReadable ? \"fast\" : \"careful\""),
+            "the old readability-driven fast/careful switch for overlays is gone"
         )
     }
 }
