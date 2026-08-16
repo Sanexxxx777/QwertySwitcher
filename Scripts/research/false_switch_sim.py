@@ -211,11 +211,11 @@ ONE_LETTER = {
 }
 TWO_LETTER = {
     "ru": {"на", "не", "но", "он", "мы", "за", "по", "от", "до", "из", "их", "им", "ей", "ты", "вы",
-           "да", "же", "ли", "бы", "то", "ни", "ну", "со", "во", "ко", "об", "ой", "ах", "ох", "эй"},
+           "да", "же", "ли", "бы", "то", "ни", "ну", "со", "во", "ко", "об", "ой", "ах", "ох", "эй", "ща"},
     "en": {"am", "an", "as", "at", "be", "by", "do", "go", "he", "hi", "id", "if", "in", "is", "it",
            "me", "my", "no", "of", "oh", "ok", "on", "or", "so", "to", "up", "us", "we", "ex", "re"},
 }
-CONFLICT_PAIRS = {"мы": "vs", "ли": "kb", "во": "dj"}
+CONFLICT_PAIRS = {"мы": "vs", "ли": "kb", "во": "dj", "ща": "of"}
 
 
 # ============================================================================
@@ -393,6 +393,14 @@ def detect_boundary(own_word, own_lang, context="same"):
             pass
         else:
             return ("noSwitch", None, None, other_reading)  # lowercase default
+
+    # Та же пара с другого конца (0.6.15): own — русское словарное слово из
+    # CONFLICT_PAIRS, best — его английский двойник («ща» против "of").
+    # Блок выше эту сторону не ловит: он смотрит best.core, а ключи —
+    # русские слова. ru-контекст закрывает native lock ниже.
+    if own_core and CONFLICT_PAIRS.get(own_core.lower()) == (best["core"].lower() if best["core"] else None) \
+            and previous_lang is None:
+        return ("noSwitch", None, None, other_reading)
 
     # native-context incumbent lock (0.6.13)
     _inc = next((c for c in candidates if c["lang"] == own_lang), None)
