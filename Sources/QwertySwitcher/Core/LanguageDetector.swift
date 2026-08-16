@@ -24,6 +24,29 @@ final class LanguageDetector {
     /// outcomes are not equally bad.
     private let incumbentGap = 25
 
+    /// Bundle id of the frontmost app, kept current by subscribing to
+    /// `NSWorkspace.didActivateApplicationNotification` (event-driven, off
+    /// the CGEventTap callback) rather than querying `NSWorkspace` inside
+    /// `detect()` itself — `detect()` runs synchronously in the callback and
+    /// AppKit calls there are exactly what the hot-path ban exists for (see
+    /// `ExceptionsService.isCurrentAppExcepted`'s frontmost-app read for the
+    /// cautionary precedent this deliberately avoids repeating here). Seeded
+    /// once at init (a one-time, non-hot-path read) so the very first word
+    /// of a session — before any activation notification has fired — is
+    /// still covered.
+    private var currentAppBundleID: String?
+
+    /// Terminals/editors where `ax=none` (see CLAUDE.md) makes correction
+    /// mistakes unrecoverable and the AX-based repair paths unavailable.
+    /// Junk-override ONLY — it does not touch the rest of `detect()`,
+    /// which already tolerates these apps via the ordinary dictionary path.
+    private static let junkOverrideTerminalBundleIDs: Set<String> = [
+        "com.mitchellh.ghostty", "com.apple.Terminal", "net.kovidgoyal.kitty",
+        "com.googlecode.iterm2", "dev.warp.Warp-Stable", "com.github.wez.wezterm",
+        "org.alacritty", "co.zeit.hyper", "com.microsoft.VSCode",
+        "com.todesktop.230313mzl4w4u92",
+    ]
+
     private static let skipPatterns: [NSRegularExpression] = {
         let patterns = [
             #"^\d+$"#,                          // numbers
@@ -39,11 +62,39 @@ final class LanguageDetector {
         return patterns.compactMap { try? NSRegularExpression(pattern: $0) }
     }()
 
+    /// Same detection `InputSourceManager.isTestBinary` uses to keep TIS
+    /// layout switching from touching the real system during `--test` runs.
+    /// Reused here for the same reason: the real frontmost app when the test
+    /// binary launches is ambient, uncontrolled state (it's often a terminal
+    /// — which would silently blocklist every junk-override fixture) and
+    /// must never leak into a deterministic test run.
+    private static var isTestBinary: Bool {
+        CommandLine.arguments.contains("--test")
+    }
+
     init(dictionary: WordDictionary, inputSourceManager: InputSourceManager,
          prefsService: PreferencesService) {
         self.dictionary = dictionary
         self.inputSourceManager = inputSourceManager
         self.prefsService = prefsService
+        self.currentAppBundleID = Self.isTestBinary
+            ? nil
+            : NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(appActivatedForJunkOverrideGate(_:)),
+            name: NSWorkspace.didActivateApplicationNotification, object: nil
+        )
+    }
+
+    deinit {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    @objc private func appActivatedForJunkOverrideGate(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+            return
+        }
+        currentAppBundleID = app.bundleIdentifier
     }
 
     var activeLayouts: [KeyboardLayout] {
@@ -77,6 +128,16 @@ final class LanguageDetector {
         // one-letter gates further down need the context as it stood WHEN
         // this word was typed, not the outcome being decided right now.
         let contextLanguageBeforeThisWord = previousWordLanguage
+
+        // Junk-override's "own" side: the literal on-screen reading in the
+        // CURRENTLY TYPED layout, letter-core only. Computed once, unlike
+        // the per-target-layout `projections()` scan below, because it does
+        // not depend on which OTHER layout ends up as the override target
+        // (points A and C below both need the same value).
+        let ownCoreForOverride: String? = {
+            guard let core = Self.core(of: currentText) else { return nil }
+            return Self.isMixedScript(core) ? nil : core
+        }()
 
         var candidates: [(layout: KeyboardLayout, word: String, score: Int, inDictionary: Bool, core: String)] = []
 
@@ -124,6 +185,43 @@ final class LanguageDetector {
 
         guard !candidates.isEmpty else {
             previousWordLanguage = currentLayout.languageCode
+
+            // Junk-override, point A: neither reading scored a single point,
+            // but the screen may plainly be gibberish in the CURRENT layout
+            // ("русский коряво написан ⇒ пишу на английском" — owner's TODO,
+            // 16.08.2026). On success `previousWordLanguage` is the TARGET
+            // language, not `currentLayout`'s (overwriting the assignment
+            // above), mirroring the ordinary switchTo path below.
+            if let ownCore = ownCoreForOverride,
+               let otherLayout = layouts.first(where: { $0.languageCode != currentLayout.languageCode }),
+               !isJunkOverrideBlockedByTerminal() {
+                let otherLang = otherLayout.languageCode
+                // Two readings of the SAME run: the whole conversion, and —
+                // when the run ends in a key that reads as punctuation here —
+                // the head only, keeping the trailing punctuation exactly as
+                // typed ("src." must stay "src." + ".", never become "ю").
+                // Both are tried; the trailing-peeled one is preferred so a
+                // user's own punctuation is never swallowed into the word.
+                let targetReadings = projections(keystrokes, to: otherLayout, asTyped: currentText)
+                    .filter { !Self.isMixedScript($0.core) }
+                let ordered = targetReadings.count > 1
+                    ? [targetReadings[1], targetReadings[0]]
+                    : targetReadings
+                for reading in ordered {
+                    guard junkOverrideFires(
+                        ownCore: ownCore, ownLang: currentLayout.languageCode,
+                        targetCore: reading.core, targetLang: otherLang,
+                        context: contextLanguageBeforeThisWord
+                    ) else { continue }
+                    previousWordLanguage = otherLang
+                    DebugLog.shared.log(
+                        "KM",
+                        "detect: junk-override \(currentLayout.languageCode)\(ownCore.count)"
+                            + "→\(otherLang)\(reading.core.count)"
+                    )
+                    return .switchTo(layout: otherLayout, correctedWord: reading.replacement)
+                }
+            }
             return .noSwitch
         }
 
@@ -145,7 +243,45 @@ final class LanguageDetector {
         // wins unopposed. So: the winner must be a real word of the target
         // language. Cost is a missed correction (recoverable — Double Shift),
         // never corrupted text (not recoverable without noticing it first).
-        guard best.inDictionary else { return .noSwitch }
+        guard best.inDictionary else {
+            // Junk-override, point C: exactly the guard the words-only rule
+            // used to be. `best` already won on score against `own`, it is
+            // just not a dictionary word — the junk-override gate is the
+            // only thing that can still authorize it.
+            if let ownCore = ownCoreForOverride, !isJunkOverrideBlockedByTerminal() {
+                let otherLang = best.layout.languageCode
+                if junkOverrideFires(
+                    ownCore: ownCore, ownLang: currentLayout.languageCode,
+                    targetCore: best.core, targetLang: otherLang,
+                    context: contextLanguageBeforeThisWord
+                ) {
+                    previousWordLanguage = otherLang
+                    DebugLog.shared.log(
+                        "KM", "detect: junk-override \(currentLayout.languageCode)\(ownCore.count)→\(otherLang)\(best.core.count)"
+                    )
+                    return .switchTo(layout: best.layout, correctedWord: best.word)
+                }
+                // `best.core` was `readings.max`'s pick at a ZERO score —
+                // ties there resolve to whichever projection came first, not
+                // necessarily the one that best fits the target gate. Try
+                // the other projection of the same run under the same rule
+                // before giving up.
+                if let alt = projections(keystrokes, to: best.layout, asTyped: currentText)
+                    .first(where: { $0.core != best.core && !Self.isMixedScript($0.core) }),
+                   junkOverrideFires(
+                       ownCore: ownCore, ownLang: currentLayout.languageCode,
+                       targetCore: alt.core, targetLang: otherLang,
+                       context: contextLanguageBeforeThisWord
+                   ) {
+                    previousWordLanguage = otherLang
+                    DebugLog.shared.log(
+                        "KM", "detect: junk-override \(currentLayout.languageCode)\(ownCore.count)→\(otherLang)\(alt.core.count)"
+                    )
+                    return .switchTo(layout: best.layout, correctedWord: alt.replacement)
+                }
+            }
+            return .noSwitch
+        }
 
         // Conflict-pair disambiguation: a two-letter Russian dictionary word
         // ("мы"/"ли"/"во") and a live English token the owner types daily
@@ -186,6 +322,28 @@ final class LanguageDetector {
                 // alone (Double Shift still fixes it manually).
                 guard keystrokes.first?.flags.contains(.maskShift) == true else { return .noSwitch }
             }
+        }
+
+        // The SAME conflict pair, read from the other end. Above, the owner
+        // typed on EN and the Russian reading won; here they typed on RU and
+        // the English reading wins — «ща» (a real word, and how the owner
+        // actually opens a message) against "of" (a real word too, and one
+        // that outscores «ща» by ~30 points on frequency alone, past both
+        // gaps). The block above can never catch this direction: it keys off
+        // `best.core`, which is the ENGLISH side here, while `conflictPairs`
+        // is keyed by the Russian word. Same three-way resolution as above,
+        // mirrored: an established EN context means the owner is writing
+        // English and simply left the layout on RU (convert), no context at
+        // all means what is on screen is the safer bet (leave it — Double
+        // Shift still converts on demand). An established RU context needs
+        // no case here at all: the native-context lock immediately below
+        // already returns `.noSwitch` for any dictionary word of the current
+        // layout under its own context.
+        if let ownCore = ownCoreForOverride,
+           let enToken = Self.conflictPairs[ownCore.lowercased()],
+           best.core.lowercased() == enToken,
+           contextLanguageBeforeThisWord == nil {
+            return .noSwitch
         }
 
         // Native-context incumbent lock. A dictionary-valid word of the
@@ -385,8 +543,11 @@ final class LanguageDetector {
     /// rejected that trade). See `conflictPairs` below for the context-based
     /// resolution that replaced it.
     private static let twoLetterWords: [String: Set<String>] = [
+        // "ща" ↔ "of" (same physical keys o+f) — added 16.08.2026 alongside
+        // `conflictPairs` below, same mechanism as "мы"/"ли"/"во" ↔ "vs"/
+        // "kb"/"dj".
         "ru": ["на", "не", "но", "он", "мы", "за", "по", "от", "до", "из", "их", "им", "ей", "ты", "вы",
-               "да", "же", "ли", "бы", "то", "ни", "ну", "со", "во", "ко", "об", "ой", "ах", "ох", "эй"],
+               "да", "же", "ли", "бы", "то", "ни", "ну", "со", "во", "ко", "об", "ой", "ах", "ох", "эй", "ща"],
         "en": ["am", "an", "as", "at", "be", "by", "do", "go", "he", "hi", "id", "if", "in", "is", "it",
                "me", "my", "no", "of", "oh", "ok", "on", "or", "so", "to", "up", "us", "we", "ex", "re"]
     ]
@@ -401,7 +562,8 @@ final class LanguageDetector {
     private static let conflictPairs: [String: String] = [
         "мы": "vs",
         "ли": "kb",
-        "во": "dj"
+        "во": "dj",
+        "ща": "of"
     ]
 
     private func scoreWord(_ word: String, language: String) -> Int {
@@ -438,6 +600,43 @@ final class LanguageDetector {
         }
 
         return 0
+    }
+
+    /// Junk-override's full condition set, in the order they're cheapest to
+    /// fail first. Mirrors `override_fires` in
+    /// Scripts/research/false_switch_sim.py — the corpus numbers documented
+    /// there (false switches, OOV recall, nonling false positives) are the
+    /// authority on these thresholds, so keep both in sync on any change.
+    /// `possibleBigrams` availability is checked here rather than by the
+    /// callers because `junk`/`clean` need it to even run — nil from either
+    /// language degrades to "don't fire", never to "treat as impossible" or
+    /// "treat as always possible".
+    private func junkOverrideFires(
+        ownCore: String, ownLang: String,
+        targetCore: String, targetLang: String,
+        context: String?
+    ) -> Bool {
+        guard ownCore.count >= 3, targetCore.count >= 4 else { return false }
+        guard context != ownLang else { return false }
+        guard scoreWord(ownCore, language: ownLang) == 0 else { return false }
+        guard let ownBigrams = dictionary.possibleBigrams(language: ownLang),
+              let targetBigrams = dictionary.possibleBigrams(language: targetLang)
+        else { return false }
+        guard JunkMeter.isJunk(ownCore, language: ownLang, possibleBigrams: ownBigrams) else { return false }
+        guard JunkMeter.isClean(targetCore, language: targetLang, possibleBigrams: targetBigrams) else { return false }
+        return true
+    }
+
+    /// Junk-override is disabled — ONLY for junk-override, the rest of
+    /// `detect()` is unaffected — while a terminal/editor is frontmost:
+    /// `ax=none` there (CLAUDE.md) means there is no way to verify or repair
+    /// a wrong guess, so the cost of a mistake is higher than in an
+    /// AX-readable app. `currentAppBundleID` is a cache updated by
+    /// `appActivatedForJunkOverrideGate`, never a live `NSWorkspace` query —
+    /// see the property's doc comment for why.
+    private func isJunkOverrideBlockedByTerminal() -> Bool {
+        guard let bundleID = currentAppBundleID else { return false }
+        return Self.junkOverrideTerminalBundleIDs.contains(bundleID)
     }
 
     static func shouldSkip(_ text: String) -> Bool {

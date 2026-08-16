@@ -13,6 +13,14 @@ import AppKit
 final class WordDictionary {
     private var bloomFilters: [String: BloomFilter] = [:]
     private var sortedWords: [String: [String]] = [:]
+    /// All bigrams occurring in any bundled word of length >=3, per language —
+    /// junk-override's "is this letter pair even possible" check
+    /// (`JunkMeter`, `LanguageDetector`). Built alongside `sortedWords` in the
+    /// same background pass (len-2 dictionary garbage — see `twoLetterWords`
+    /// in LanguageDetector — is excluded so it can't widen the possible set).
+    /// Python mirror: Scripts/research/false_switch_sim.py `POSSIBLE` — keep
+    /// both in sync.
+    private var bigramSets: [String: Set<String>] = [:]
     private let sortedWordsLock = NSLock()
     private let sortedWordsGroup = DispatchGroup()
     private let spellChecker = NSSpellChecker.shared
@@ -90,6 +98,16 @@ final class WordDictionary {
         return words[lo].hasPrefix(prefix)
     }
 
+    /// Nil until the same background load `isPrefixOfBundledWord` depends on
+    /// finishes — callers (junk-override) MUST treat nil as "don't fire",
+    /// never as "empty set = nothing possible" (that would junk-flag every
+    /// word during the brief startup window).
+    func possibleBigrams(language: String) -> Set<String>? {
+        sortedWordsLock.lock()
+        defer { sortedWordsLock.unlock() }
+        return bigramSets[language]
+    }
+
     var stats: String {
         let parts = bloomFilters.map { "\($0.key) bloom: \($0.value.sizeInBytes / 1024)KB" }
         return parts.joined(separator: ", ")
@@ -137,9 +155,18 @@ final class WordDictionary {
             for lang in ["en", "ru"] {
                 let fileName = lang == "en" ? "en_US" : "ru_RU"
                 guard let source = self.loadWordListData(named: fileName) else { continue }
-                let sorted = self.parseWordList(source.data).sorted()
+                let words = self.parseWordList(source.data)
+                let sorted = words.sorted()
+                var bigrams = Set<String>()
+                for word in words where word.count >= 3 {
+                    let chars = Array(word)
+                    for i in 0..<(chars.count - 1) {
+                        bigrams.insert(String(chars[i...i + 1]))
+                    }
+                }
                 self.sortedWordsLock.lock()
                 self.sortedWords[lang] = sorted
+                self.bigramSets[lang] = bigrams
                 self.sortedWordsLock.unlock()
             }
         }

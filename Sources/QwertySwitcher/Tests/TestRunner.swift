@@ -60,6 +60,8 @@ enum TestRunner {
         TwoLetterWordScoringTests.run()
         NativeContextIncumbentAndOneLetterTests.run()
         ConflictPairDisambiguationTests.run()
+        JunkOverrideDetectionTests.run()
+        JunkMeterTests.run()
         OnboardingStateTests.run()
         KeyboardMonitorIntegrationTests.run()
         CorrectionAvalancheGuardTests.run()
@@ -1505,6 +1507,273 @@ enum ConflictPairDisambiguationTests {
         case .noSwitch:
             TestRunner.assertTrue(true, "«мы» typed on ru layout stays noSwitch under en-context — reverse direction protected")
         }
+    }
+}
+
+/// 16.08.2026 — junk-override (owner TODO, CLAUDE.md: "русский коряво
+/// написан ⇒ пишу на английском, программа должна это понимать"). Exercises
+/// `detect()` end to end against the exact corpus-verified pairs from
+/// Scripts/research/false_switch_sim.py — pure `junk`/`clean` math is
+/// covered separately by `JunkMeterTests`.
+enum JunkOverrideDetectionTests {
+    static func run() {
+        TestRunner.section("Junk-override — detect() end to end (16.08.2026)")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for junk-override fixtures")
+            return
+        }
+
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let prefs = PreferencesService()
+        let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
+
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+
+        func expectSwitch(
+            _ typed: String, reverse: [Character: UInt16], typedLayout: KeyboardLayout,
+            expectedLang: String, expectedWord: String, label: String
+        ) {
+            guard let strokes = InstantCorrectionFixtures.keystrokes(for: typed, reverse: reverse) else {
+                TestRunner.assertTrue(false, "\(label): fixture layout can type every character")
+                return
+            }
+            switch detector.detect(keystrokes: strokes, typedLayout: typedLayout) {
+            case .switchTo(let layout, let word):
+                TestRunner.assertEqual(layout.languageCode, expectedLang, "\(label): switches to \(expectedLang)")
+                TestRunner.assertEqual(word, expectedWord, "\(label): corrects to «\(expectedWord)»")
+            case .noSwitch:
+                TestRunner.assertTrue(false, "\(label): must switch to \(expectedLang)/\(expectedWord)")
+            }
+        }
+
+        func expectNoSwitch(
+            _ typed: String, reverse: [Character: UInt16], typedLayout: KeyboardLayout, label: String
+        ) {
+            guard let strokes = InstantCorrectionFixtures.keystrokes(for: typed, reverse: reverse) else {
+                TestRunner.assertTrue(false, "\(label): fixture layout can type every character")
+                return
+            }
+            switch detector.detect(keystrokes: strokes, typedLayout: typedLayout) {
+            case .switchTo(let layout, let word):
+                TestRunner.assertTrue(false, "\(label): must stay noSwitch (got switchTo \(layout.languageCode)/\(word))")
+            case .noSwitch:
+                TestRunner.assertTrue(true, "\(label): stays noSwitch")
+            }
+        }
+
+        // --- Fixes: OOV targets, the class that never corrected before
+        //     junk-override existed. Neutral context each time. ---
+        detector.resetContext()
+        expectSwitch("cjplfybtv", reverse: enReverse, typedLayout: enLayout,
+                     expectedLang: "ru", expectedWord: "созданием",
+                     label: "'cjplfybtv' (en keys, OOV ru target)")
+
+        detector.resetContext()
+        expectSwitch("ecvjnhtybt", reverse: enReverse, typedLayout: enLayout,
+                     expectedLang: "ru", expectedWord: "усмотрение",
+                     label: "'ecvjnhtybt' (en keys, OOV ru target)")
+
+        detector.resetContext()
+        expectSwitch("рфвт", reverse: ruReverse, typedLayout: ruLayout,
+                     expectedLang: "en", expectedWord: "hadn",
+                     label: "'рфвт' (ru keys, OOV en target)")
+
+        detector.resetContext()
+        expectSwitch("лштвф", reverse: ruReverse, typedLayout: ruLayout,
+                     expectedLang: "en", expectedWord: "kinda",
+                     label: "'лштвф' (ru keys, OOV en target)")
+
+        // --- Not touched: own is already a dictionary word ("tmp" lives in
+        //     en_US.txt) — scoreWord(own)!=0 rejects the override outright,
+        //     and the ordinary same-layout-wins path never even reaches it.
+        //     Context primed to "en" first, mirroring the Python self-check. ---
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse)!,
+            typedLayout: enLayout
+        )
+        expectNoSwitch("tmp", reverse: enReverse, typedLayout: enLayout,
+                       label: "'tmp' (dictionary word) stays put in an en flow")
+
+        // --- Not touched: own core is nil — "don't"'s apostrophe splits the
+        //     run into two letter groups under `core(of:)`, which the
+        //     override gate rejects up front (own core must exist). Built
+        //     directly from keycodes: apostrophe (39) isn't a letter key
+        //     under EN, so `InstantCorrectionFixtures.reverseMap` (which
+        //     only maps `InputBuffer.isLetterKey` codes) can't produce it. ---
+        detector.resetContext()
+        let dontStrokes = [
+            BufferedKeystroke(keycode: 2, flags: []),  // d
+            BufferedKeystroke(keycode: 38, flags: []), // o
+            BufferedKeystroke(keycode: 45, flags: []), // n
+            BufferedKeystroke(keycode: 39, flags: []), // '
+            BufferedKeystroke(keycode: 17, flags: []), // t
+        ]
+        switch detector.detect(keystrokes: dontStrokes, typedLayout: enLayout) {
+        case .switchTo(let layout, let word):
+            TestRunner.assertTrue(false, "\"don't\" (nil own core) must stay noSwitch (got switchTo \(layout.languageCode)/\(word))")
+        case .noSwitch:
+            TestRunner.assertTrue(true, "\"don't\" (nil own core, apostrophe splits the run) stays noSwitch")
+        }
+
+        // --- Not touched: context gate — the exact same gibberish that gets
+        //     fixed above under neutral context must stay put once an EN
+        //     context is already established (own_lang == context). ---
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse)!,
+            typedLayout: enLayout
+        )
+        expectNoSwitch("cjplfybtv", reverse: enReverse, typedLayout: enLayout,
+                       label: "'cjplfybtv' under an already-established en context stays put (context gate)")
+
+        // --- Not touched: junk on BOTH sides — "klmnp" (en keys) reads as a
+        //     consonant cluster under EITHER layout (no vowel on either
+        //     side), so the target fails `clean()` too. ---
+        detector.resetContext()
+        expectNoSwitch("klmnp", reverse: enReverse, typedLayout: enLayout,
+                       label: "'klmnp' (junk on both sides — target has no vowel either) stays put")
+
+        // --- «ща» ↔ "of" (same physical o+f keys, 16.08.2026 addition).
+        //     Scored the other way round from vs/kb/dj: those EN tokens were
+        //     deliberately kept OUT of `twoLetterWords["en"]` so the Russian
+        //     reading always wins, but "of" is a real, high-frequency word
+        //     that MUST stay scored (84 dict + 7 ngram + 25 freq), while
+        //     «ща» gets 84 alone — "of" wins by ~30 points, past both
+        //     `collisionGap`(10) and `incumbentGap`(25), in EVERY context.
+        //     So the EN-typed direction below never needs `conflictPairs`
+        //     at all; the pair earns its keep in the RU-typed direction,
+        //     where score would otherwise overwrite a word the owner really
+        //     did type (the second pair of assertions). ---
+        guard let ofStrokes = InstantCorrectionFixtures.keystrokes(for: "of", reverse: enReverse) else {
+            TestRunner.assertTrue(false, "'of': en fixture layout can type every character")
+            return
+        }
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse)!,
+            typedLayout: enLayout
+        )
+        switch detector.detect(keystrokes: ofStrokes, typedLayout: enLayout) {
+        case .switchTo:
+            TestRunner.assertTrue(false, "'of' under en-context must stay noSwitch — the live token lives")
+        case .noSwitch:
+            TestRunner.assertTrue(true, "'of' under en-context stays noSwitch")
+        }
+
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse)!,
+            typedLayout: ruLayout
+        )
+        switch detector.detect(keystrokes: ofStrokes, typedLayout: enLayout) {
+        case .switchTo(let layout, let word):
+            TestRunner.assertTrue(
+                false,
+                "'of' unexpectedly lost to «ща» (switchTo \(layout.languageCode)/\(word)) — "
+                    + "score math changed, re-check the 'Аномалии' note in the delivery report"
+            )
+        case .noSwitch:
+            TestRunner.assertTrue(
+                true,
+                "'of' typed on EN under ru-context stays noSwitch — \"of\" outscores «ща» on "
+                    + "dictionary+ngram+frequency in EITHER context, so this direction of the pair is "
+                    + "settled by score, never by conflictPairs"
+            )
+        }
+
+        // The pair from the OTHER end, which is the direction that actually
+        // bites: «ща» typed on RU (a real word, and how a message often
+        // opens) against "of", which outscores it by ~30 points. An
+        // established RU context is covered by the native-context lock; with
+        // NO context the reading on screen is the safer bet, so the run is
+        // left alone (Double Shift still converts it on demand).
+        guard let shchaStrokes = InstantCorrectionFixtures.keystrokes(for: "ща", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "«ща»: ru fixture layout can type every character")
+            return
+        }
+        detector.resetContext()
+        switch detector.detect(keystrokes: shchaStrokes, typedLayout: ruLayout) {
+        case .switchTo(let layout, let word):
+            TestRunner.assertTrue(
+                false,
+                "«ща» as the FIRST word (no context) must stay «ща» — got switchTo \(layout.languageCode)/\(word)"
+            )
+        case .noSwitch:
+            TestRunner.assertTrue(true, "«ща» with no context stays «ща» (conflict pair, reverse direction)")
+        }
+
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse)!,
+            typedLayout: ruLayout
+        )
+        switch detector.detect(keystrokes: shchaStrokes, typedLayout: ruLayout) {
+        case .switchTo(let layout, let word):
+            TestRunner.assertTrue(
+                false,
+                "«ща» mid-Russian must stay «ща» (native-context lock) — got switchTo \(layout.languageCode)/\(word)"
+            )
+        case .noSwitch:
+            TestRunner.assertTrue(true, "«ща» under an established ru context stays «ща» (native-context lock)")
+        }
+    }
+}
+
+/// Pure `junk`/`clean` math, independent of a live `WordDictionary` — the
+/// `possibleBigrams` set is passed in explicitly. End-to-end coverage
+/// against the real bundled dictionaries lives in `JunkOverrideDetectionTests`.
+enum JunkMeterTests {
+    static func run() {
+        TestRunner.section("JunkMeter — junk/clean primitives")
+
+        let possible: Set<String> = ["ст", "то", "по", "ов", "ер", "th", "he", "in"]
+
+        TestRunner.assertTrue(
+            JunkMeter.isJunk("бгв", language: "ru", possibleBigrams: possible),
+            "no vowel at all -> junk regardless of bigrams"
+        )
+        TestRunner.assertTrue(
+            !JunkMeter.isJunk("сто", language: "ru", possibleBigrams: possible),
+            "vowel present and every bigram possible -> not junk"
+        )
+        TestRunner.assertTrue(
+            JunkMeter.isClean("сто", language: "ru", possibleBigrams: possible),
+            "vowel present and every bigram possible -> clean"
+        )
+        TestRunner.assertTrue(
+            JunkMeter.isJunk("стя", language: "ru", possibleBigrams: possible),
+            "vowel present but one bigram ('тя') is impossible -> junk"
+        )
+        TestRunner.assertTrue(
+            !JunkMeter.isClean("стя", language: "ru", possibleBigrams: possible),
+            "vowel present but one bigram impossible -> not clean"
+        )
+        TestRunner.assertTrue(
+            !JunkMeter.isJunk("а", language: "ru", possibleBigrams: possible),
+            "shorter than 2 characters is never junk"
+        )
+        TestRunner.assertTrue(
+            !JunkMeter.isClean("бгв", language: "ru", possibleBigrams: possible),
+            "no vowel -> not clean"
+        )
+        TestRunner.assertTrue(
+            JunkMeter.isJunk("tha", language: "en", possibleBigrams: possible),
+            "en: vowel present but bigram 'ha' impossible -> junk"
+        )
+        TestRunner.assertTrue(
+            !JunkMeter.isJunk("the", language: "en", possibleBigrams: possible),
+            "en: vowel present and every bigram possible -> not junk"
+        )
+        TestRunner.assertTrue(
+            JunkMeter.isClean("the", language: "en", possibleBigrams: possible),
+            "en: vowel present and every bigram possible -> clean"
+        )
     }
 }
 
