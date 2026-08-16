@@ -211,12 +211,23 @@ final class TextReplacer {
                     }
                 }
             }
-            let pacing = axReadable ? self.keystrokeDelay : self.carefulKeystrokeDelay
+            // Overlays swallow keystrokes at the fast burst even when their
+            // AX value is perfectly readable: three field episodes (15.08
+            // "ccccara"/"cchr", 16.08 "ccfhf" — Spotlight, pid-addressed
+            // delivery) each lost exactly one backspace per gesture, and
+            // every one logged "overlay pacing: fast axReadable=true". The
+            // pre-erase model/screen check above can't catch it — the drift
+            // happens DURING delivery, not before it. AX readability says
+            // nothing about how fast an overlay drains its event queue, so
+            // an overlay always gets the careful pace; overlay queries are
+            // short, the cost is ~50-100ms per gesture.
+            let pacing = (axReadable && overlayPid == nil)
+                ? self.keystrokeDelay : self.carefulKeystrokeDelay
             if !axReadable && overlayPid == nil {
                 DebugLog.shared.log("TR", "careful pacing: field not AX-readable")
             } else if overlayPid != nil {
                 DebugLog.shared.log(
-                    "TR", "overlay pacing: \(axReadable ? "fast" : "careful") axReadable=\(axReadable)"
+                    "TR", "overlay pacing: careful (forced; axReadable=\(axReadable))"
                 )
             }
 
