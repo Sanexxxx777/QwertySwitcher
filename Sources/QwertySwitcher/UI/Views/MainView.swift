@@ -243,7 +243,7 @@ struct AppBackground: View {
 /// motifs further down (status header, stats strip) carry color.
 struct SettingsCardModifier: ViewModifier {
     @Environment(\.appTheme) private var theme
-    var cornerRadius: CGFloat = 12
+    var cornerRadius: CGFloat = Radius.card
 
     func body(content: Content) -> some View {
         content
@@ -257,7 +257,7 @@ struct SettingsCardModifier: ViewModifier {
 }
 
 extension View {
-    func settingsCard(cornerRadius: CGFloat = 12) -> some View {
+    func settingsCard(cornerRadius: CGFloat = Radius.card) -> some View {
         modifier(SettingsCardModifier(cornerRadius: cornerRadius))
     }
 }
@@ -278,7 +278,7 @@ struct PillToggleStyle: ToggleStyle {
                 .overlay(
                     Circle()
                         .fill(Color.white)
-                        .padding(3)
+                        .padding(Space.xxs)
                         .offset(x: configuration.isOn ? 7 : -7)
                         .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
                 )
@@ -321,8 +321,8 @@ struct MainView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
+                .padding(.horizontal, Space.xl)
+                .padding(.top, Space.xl)
 
             KeycapTabBar(items: MainTab.allCases, label: \.label, selection: $selectedTab)
                 .padding(.horizontal, Space.xl)
@@ -352,8 +352,8 @@ struct MainView: View {
             .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: selectedTab)
 
             footer
-                .padding(.horizontal, 20)
-                .padding(.top, 16)
+                .padding(.horizontal, Space.xl)
+                .padding(.top, Space.lg)
                 .padding(.bottom, 18)
         }
         .background(AppBackground())
@@ -468,7 +468,7 @@ struct MainView: View {
 
     private var autoSwitchRow: some View {
         Toggle(isOn: $viewModel.isAutoSwitchEnabled) {
-            HStack(spacing: 10) {
+            HStack(spacing: Space.sm) {
                 Image(systemName: "character.cursor.ibeam")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(viewModel.isAutoSwitchEnabled ? theme.accent : theme.textMuted)
@@ -479,7 +479,7 @@ struct MainView: View {
             }
         }
         .toggleStyle(.pill)
-        .padding(.horizontal, 14)
+        .padding(.horizontal, Space.md)
         .padding(.vertical, 11)
         .settingsCard()
         .accessibilityHint("Включает или отключает автоматическое исправление раскладки")
@@ -488,7 +488,7 @@ struct MainView: View {
     // MARK: Tab 1 — Статус: stats + active layouts, everything visible with no scroll.
 
     private var statusTab: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Space.md) {
             statsStrip
             layoutsSection
         }
@@ -496,7 +496,7 @@ struct MainView: View {
     }
 
     private var statsStrip: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.xs) {
             SectionTitle("За всё время")
             ZStack {
                 KeyRowBand(tint: theme.accent)
@@ -520,7 +520,7 @@ struct MainView: View {
     }
 
     private var layoutsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.xs) {
             SectionTitle("Активные раскладки")
             VStack(spacing: 0) {
                 LayoutPickerRow(
@@ -555,7 +555,7 @@ struct MainView: View {
     // MARK: Tab 2 — Клавиши
 
     private var shortcutsTab: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.xs) {
             SectionTitle("Горячие клавиши")
             VStack(spacing: 0) {
                 SettingToggleRow(
@@ -601,8 +601,8 @@ struct MainView: View {
     // MARK: Tab 3 — Ещё
 
     private var moreTab: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Space.md) {
+            VStack(alignment: .leading, spacing: Space.xs) {
                 SectionTitle("Дополнительно")
                 VStack(spacing: 0) {
                     SettingToggleRow(
@@ -730,8 +730,8 @@ struct MainView: View {
             .labelsHidden()
             .frame(width: 190)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, Space.md)
+        .padding(.vertical, Space.sm)
     }
 
     private var rowDivider: some View {
@@ -811,7 +811,7 @@ private struct LayoutPickerRow: View {
     @Binding var selection: String
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Space.sm) {
             Image(systemName: icon)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(theme.accent)
@@ -828,8 +828,8 @@ private struct LayoutPickerRow: View {
             .labelsHidden()
             .frame(width: 170)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, Space.md)
+        .padding(.vertical, Space.sm)
     }
 }
 
@@ -851,7 +851,7 @@ private struct SoundPickerRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: Space.sm) {
             Image(systemName: icon)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(theme.accent)
@@ -890,8 +890,8 @@ private struct SoundPickerRow: View {
             .labelsHidden()
             .frame(width: 130)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, Space.md)
+        .padding(.vertical, Space.sm)
     }
 }
 
@@ -965,7 +965,7 @@ private struct LicenseBadge: View {
                     .fixedSize(horizontal: true, vertical: false)
             }
             .foregroundStyle(color)
-            .padding(.horizontal, 10)
+            .padding(.horizontal, Space.sm)
             .padding(.vertical, 5)
             .background(color.opacity(isHovered ? 0.18 : 0.12))
             .clipShape(Capsule())
@@ -985,7 +985,7 @@ private struct UsageMetric: View {
     let label: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: Space.xxs) {
             Text(value.formatted())
                 .font(.appMono(24, weight: .bold))
                 .foregroundStyle(theme.accent)
@@ -1004,7 +1004,7 @@ private struct UsageMetric: View {
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 14)
+        .padding(.horizontal, Space.md)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(value) \(label)")
     }
@@ -1022,7 +1022,7 @@ private struct SettingToggleRow: View {
 
     var body: some View {
         Toggle(isOn: $isOn) {
-            HStack(spacing: 10) {
+            HStack(spacing: Space.sm) {
                 Image(systemName: icon)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(isOn ? theme.accent : theme.textMuted)
@@ -1044,8 +1044,8 @@ private struct SettingToggleRow: View {
             }
         }
         .toggleStyle(.pill)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, Space.md)
+        .padding(.vertical, Space.sm)
         .accessibilityHint(help ?? subtitle)
     }
 }
