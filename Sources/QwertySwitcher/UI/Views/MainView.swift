@@ -113,14 +113,40 @@ struct AppTheme {
     private static let sysWindowBackground = Color(nsColor: .windowBackgroundColor)
     private static let sysControlBackground = Color(nsColor: .controlBackgroundColor)
     private static let sysTextBackground = Color(nsColor: .textBackgroundColor)
-    private static let sysHover = Color(nsColor:
-        NSColor.controlBackgroundColor.blended(withFraction: 0.08, of: .controlAccentColor)
-            ?? .controlBackgroundColor)
-    private static let sysAccent = Color(nsColor: .controlAccentColor)
-    private static let sysAccentDeep = Color(nsColor:
-        NSColor.controlAccentColor.blended(withFraction: 0.35, of: .black) ?? .controlAccentColor)
-    private static let sysAccentLight = Color(nsColor:
-        NSColor.controlAccentColor.blended(withFraction: 0.35, of: .white) ?? .controlAccentColor)
+    // Brand accent, not `controlAccentColor` (owner's call 19.08): the app
+    // icon is the warm amber "Й→Q" key (#F2A24B→#E88F32) and the owner named
+    // the disconnect himself — the icon's colors were nowhere inside the
+    // window. The system-accent-following behavior this replaces was
+    // reasonable for an anonymous utility; a branded product should look like
+    // its own icon. Dark keeps the icon's amber verbatim; light darkens it —
+    // #C9761A measures ≥3:1 against both light surfaces, which is what the
+    // 24pt-bold stat digits (large text) need. Status colors are unaffected
+    // (StatusInk is a separate system).
+    private static let brandAmberDark = NSColor(srgbRed: 0.949, green: 0.635, blue: 0.294, alpha: 1)  // #F2A24B
+    private static let brandAmberLight = NSColor(srgbRed: 0.788, green: 0.463, blue: 0.102, alpha: 1) // #C9761A
+    private static let brandAmber = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? brandAmberDark : brandAmberLight
+    }
+    /// `blended(withFraction:)` resolves a dynamic color ONCE, at call time —
+    /// derived tones must re-blend inside their own dynamic provider or they
+    /// freeze on whichever appearance was active at static init.
+    private static func brandDerived(_ blend: @escaping (NSColor) -> NSColor?) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let base = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? brandAmberDark : brandAmberLight
+            return blend(base) ?? base
+        }
+    }
+    private static let sysHover = Color(nsColor: brandDerived {
+        NSColor.controlBackgroundColor.blended(withFraction: 0.08, of: $0)
+    })
+    private static let sysAccent = Color(nsColor: brandAmber)
+    private static let sysAccentDeep = Color(nsColor: brandDerived {
+        $0.blended(withFraction: 0.35, of: .black)
+    })
+    private static let sysAccentLight = Color(nsColor: brandDerived {
+        $0.blended(withFraction: 0.35, of: .white)
+    })
     private static let sysTrack = Color(nsColor:
         NSColor.windowBackgroundColor.blended(withFraction: 0.55, of: .separatorColor)
             ?? .windowBackgroundColor)
