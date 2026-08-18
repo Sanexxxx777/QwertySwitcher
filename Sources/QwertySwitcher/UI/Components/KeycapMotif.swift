@@ -211,6 +211,14 @@ struct KeycapTabBar<Item: Hashable>: View {
             // Equal-width cells (every label is maxWidth: .infinity), so the
             // thumb's place is pure arithmetic — no preference plumbing.
             GeometryReader { geo in
+                // Clamp the animated edges to the track's rim: the arrival
+                // springs overshoot on purpose (the splash), and on the first
+                // and last tab that overshoot would poke outside the track —
+                // clamped, it reads as the drop pressing against the wall.
+                let rimLeading = Radius.tabInset
+                let rimTrailing = geo.size.width - Radius.tabInset
+                let lead = min(max(thumbLeading, rimLeading), rimTrailing)
+                let trail = min(max(thumbTrailing, rimLeading), rimTrailing)
                 RoundedRectangle(cornerRadius: Radius.tabThumb, style: .continuous)
                     .fill(theme.bgCard)
                     .overlay(
@@ -219,9 +227,9 @@ struct KeycapTabBar<Item: Hashable>: View {
                     )
                     .shadow(color: .black.opacity(theme.isDark ? 0.35 : 0.12),
                             radius: 1.5, y: 1)
-                    .frame(width: max(0, thumbTrailing - thumbLeading),
+                    .frame(width: max(0, trail - lead),
                            height: geo.size.height - Radius.tabInset * 2)
-                    .offset(x: thumbLeading, y: Radius.tabInset)
+                    .offset(x: lead, y: Radius.tabInset)
                     .onAppear {
                         trackSize = geo.size
                         snapThumb(in: geo.size)
@@ -272,8 +280,15 @@ struct KeycapTabBar<Item: Hashable>: View {
             thumbTrailing = edges.trailing
             return
         }
-        let reach = Animation.spring(response: 0.22, dampingFraction: 0.88)
-        let tail = Animation.spring(response: 0.42, dampingFraction: 0.80)
+        // The "snap-off and splash" the owner described: the tail CLINGS for
+        // a beat (the delay — surface tension), then snaps off underdamped
+        // and collapses in with a wobble; the reaching edge arrives slightly
+        // underdamped too, overshooting a touch and settling back — the
+        // splash. Both springs are deliberately below critical damping; the
+        // render-side clamp keeps the splash inside the track at the edge
+        // tabs, where the overshoot would otherwise poke past the rim.
+        let reach = Animation.spring(response: 0.20, dampingFraction: 0.72)
+        let tail = Animation.spring(response: 0.40, dampingFraction: 0.66).delay(0.05)
         if edges.leading >= thumbLeading {
             // Moving right: trailing edge reaches, leading edge is the tail.
             withAnimation(reach) { thumbTrailing = edges.trailing }
