@@ -143,7 +143,11 @@ final class TextReplacer {
             // backspace per gesture there ("../exit", "...../exit").
             var axReadable = false
             var overlayPid: pid_t?
-            if let element = AXTextSelectionService.focusedElement() {
+            // Hoisted out of the `if let` below so it's still visible at the
+            // erase call site further down — `sendBackspacesVerified` needs
+            // the same element the overlay checks above already probed.
+            let focusedElement = AXTextSelectionService.focusedElement()
+            if let element = focusedElement {
                 // Length + caret only — never the value itself. Asking for
                 // kAXValueAttribute here copied the app's ENTIRE field across
                 // the process boundary just to count it (286 908 characters on
@@ -200,13 +204,25 @@ final class TextReplacer {
                        let word = CaretWordExtractor.wordBeforeCaret(text: text, caretUTF16Offset: caret) {
                         let model = plan.backspaceCount
                         let ax = word.word.count
-                        if ax != model {
+                        if ax < model {
+                            // Screen holds LESS than we intend to erase —
+                            // stirring further would eat text that isn't ours.
                             DebugLog.shared.log(
                                 "TR",
                                 "overlay replacement skipped: screen/model mismatch model=\(model) ax=\(ax)"
                             )
                             self.complete(.cancelled, cancellation: cancellation, completion: completion)
                             return
+                        } else if ax > model {
+                            // Screen holds MORE than the model — cosmetic,
+                            // not destructive: leftover characters to the
+                            // left are the worst case, and the verified
+                            // erase below stops at the caret it can actually
+                            // see rather than trusting this count. Conscious
+                            // v1 boundary, not a fix for the leftover itself.
+                            DebugLog.shared.log(
+                                "TR", "overlay screen longer than model: model=\(model) ax=\(ax)"
+                            )
                         }
                     }
                 }
@@ -231,8 +247,22 @@ final class TextReplacer {
                 )
             }
 
-            guard self.sendBackspaces(count: plan.backspaceCount, pacing: pacing,
-                                      toPid: overlayPid, cancellation: cancellation),
+            // Overlays get the verified erase (reads the caret back between
+            // backspaces) whenever there's a field to read it from; every
+            // other target keeps the original blind burst unchanged.
+            let eraseSucceeded: Bool
+            if let overlayPid, let focusedElement {
+                eraseSucceeded = self.sendBackspacesVerified(
+                    count: plan.backspaceCount, pacing: pacing,
+                    toPid: overlayPid, element: focusedElement, cancellation: cancellation
+                )
+            } else {
+                eraseSucceeded = self.sendBackspaces(
+                    count: plan.backspaceCount, pacing: pacing,
+                    toPid: overlayPid, cancellation: cancellation
+                )
+            }
+            guard eraseSucceeded,
                   self.typeStringFast(plan.payload, pacing: pacing,
                                       toPid: overlayPid, cancellation: cancellation) else {
                 self.complete(.cancelled, cancellation: cancellation, completion: completion)
@@ -293,6 +323,86 @@ final class TextReplacer {
             }
             usleep(pacing)
         }
+        return true
+    }
+
+    /// Overlay-only erase: `sendBackspaces` above loses exactly one
+    /// keystroke per gesture on a Spotlight-class overlay regardless of
+    /// pacing (field episodes "ccccara"/"cchr"/"ccfhf", 15-16.08.2026) — the
+    /// root cause is one of three candidate causes, none confirmed (see
+    /// CLAUDE.md), so this works around all three by reading the caret back
+    /// after every backspace and topping up (or stopping early) instead of
+    /// trusting the count blind. Same atomicity contract as `sendBackspaces`:
+    /// cancellation is checked once, before the first event, and never again
+    /// once erasing has started.
+    private func sendBackspacesVerified(
+        count: Int,
+        pacing: useconds_t,
+        toPid pid: pid_t?,
+        element: AXUIElement,
+        cancellation: ReplacementCancellationToken
+    ) -> Bool {
+        guard !cancellation.isCancelled else { return false }
+        guard let startRange = AXTextSelectionService.selectionRange(element) else {
+            // Can't read the caret at all — the blind burst is still better
+            // than refusing the whole replacement over a probe failure.
+            return sendBackspaces(count: count, pacing: pacing, toPid: pid, cancellation: cancellation)
+        }
+        let start = startRange.location
+        if startRange.length > 0 {
+            // Field data point for the autocomplete-selection hypothesis —
+            // one of the three candidate causes above, not confirmed.
+            DebugLog.shared.log(
+                "TR", "overlay selection before erase: loc=\(start) len=\(startRange.length)"
+            )
+        }
+        let target = max(0, start - count)
+        let maxExtra = 2
+        let src = CGEventSource(stateID: .hidSystemState)
+        var sent = 0
+        var extraSent = 0
+        var noProgress = 0
+        var last = start
+        let deadline = CFAbsoluteTimeGetCurrent() + 0.12
+        while sent < count + maxExtra {
+            if let kd = CGEvent(keyboardEventSource: src, virtualKey: 51, keyDown: true),
+               let ku = CGEvent(keyboardEventSource: src, virtualKey: 51, keyDown: false) {
+                SyntheticEventMarker.mark(kd)
+                SyntheticEventMarker.mark(ku)
+                Self.deliver(kd, toPid: pid)
+                Self.deliver(ku, toPid: pid)
+            }
+            sent += 1
+            usleep(pacing)
+            if CFAbsoluteTimeGetCurrent() >= deadline {
+                if sent < count {
+                    _ = sendBackspaces(count: count - sent, pacing: pacing, toPid: pid, cancellation: cancellation)
+                }
+                break
+            }
+            guard let cur = AXTextSelectionService.selectionRange(element)?.location else {
+                if sent < count {
+                    _ = sendBackspaces(count: count - sent, pacing: pacing, toPid: pid, cancellation: cancellation)
+                }
+                break
+            }
+            if cur <= target { break }
+            if cur == 0 { break }  // never bite into text above the field's start
+            if cur == last {
+                noProgress += 1
+                if noProgress >= 2 { break }
+            } else {
+                noProgress = 0
+                last = cur
+            }
+            if sent >= count { extraSent += 1 }
+        }
+        DebugLog.shared.log(
+            "TR", "erase verified: requested=\(count) sent=\(sent) extra=\(extraSent) caret \(start)→\(last)"
+        )
+        // Never false past this point — the atomicity contract this shares
+        // with `sendBackspaces`: once the first backspace has gone out, the
+        // transaction must finish, so the payload retype always follows.
         return true
     }
 

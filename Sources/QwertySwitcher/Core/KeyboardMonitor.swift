@@ -87,6 +87,13 @@ final class KeyboardMonitor {
     /// `convertWholeRun` call and consumed once by `swapLastWordInBuffer`.
     private var pendingRunResync: Int?
 
+    /// The screen word measured alongside `pendingRunResync` above — needed
+    /// separately because deciding whether to trust a LONGER measurement
+    /// requires seeing the actual characters (does the screen word end with
+    /// what we typed?), not just comparing two counts. Same lifecycle as
+    /// `pendingRunResync`: set together, cleared together.
+    private var pendingRunResyncWord: String?
+
     // Avalanche circuit breaker (see CorrectionAvalancheGuard) — applies only
     // to the two fully-automatic correction entry points (instant + word
     // boundary). Double Shift is intentionally NOT gated by either of these:
@@ -878,6 +885,7 @@ final class KeyboardMonitor {
         // the one branch that produced a real screen measurement, so a stale
         // value from an earlier word can never leak into this one.
         pendingRunResync = nil
+        pendingRunResyncWord = nil
         guard let currentLayout = languageDetector.inputSourceManager.currentLayout,
               let targetLayout = languageDetector.activeLayouts.first(where: { $0.id != currentLayout.id })
         else { return false }
@@ -939,7 +947,10 @@ final class KeyboardMonitor {
             // The AX measurement above is real regardless of which branch
             // uses it — stash it for the scored path about to run
             // (`swapLastWordInBuffer`, right after this call returns).
-            if resynced { pendingRunResync = onScreen.count }
+            if resynced {
+                pendingRunResync = onScreen.count
+                pendingRunResyncWord = onScreen
+            }
             DebugLog.shared.log("KM", "run check: letters only — falls through to the scored path")
             return false
         }
@@ -1098,11 +1109,24 @@ final class KeyboardMonitor {
         // measurement only ever comes from the run just typed, never from a
         // `lastCompletedWord` snapshot pulled out of history.
         var length = leadingSymbols.count + keystrokes.count
-        if source == "buffer", let measured = pendingRunResync, measured != length {
-            DebugLog.shared.log("KM", "run check: erase resynced \(length)→\(measured)")
+        // Safe direction — unconditional: erasing LESS than modelled can
+        // only leave a stray character behind (self-heals on the next
+        // correction), never eat real text.
+        if let measured = pendingRunResync,
+           KeyboardMonitor.shouldClampToScreen(model: length, measured: measured) {
+            DebugLog.shared.log("KM", "run check: erase resynced \(length)→\(measured) (source=\(source))")
+            length = measured
+        // Dangerous direction — only with proof the extra characters on
+        // screen are OUR OWN artifact, not text the user already had.
+        } else if let measured = pendingRunResync, let screenWord = pendingRunResyncWord,
+                  KeyboardMonitor.shouldExtendToScreen(
+                      model: length, measured: measured, modelWord: originalWordOnly, screenWord: screenWord
+                  ) {
+            DebugLog.shared.log("KM", "run check: erase resynced \(length)→\(measured) (source=\(source))")
             length = measured
         }
         pendingRunResync = nil
+        pendingRunResyncWord = nil
 
         textReplacer.replaceCurrentWord(
             length: length,
@@ -1434,6 +1458,33 @@ final class KeyboardMonitor {
             }
             event.post(tap: .cgAnnotatedSessionEventTap)
         }
+    }
+
+    // MARK: - Run-resync erase-length decision
+
+    /// Pure decisions extracted from `swapLastWordInBuffer`'s erase-length
+    /// override so they're directly unit-testable without a live AX element
+    /// (same rationale as `shouldWarnSlowCallback` below).
+    ///
+    /// Safe direction: the AX-measured screen word is SHORTER than modelled
+    /// — always adopt it. Erasing less than the model never eats real text;
+    /// the worst case is a stray character that self-heals on the next
+    /// correction (the "ccccara"/"cchr" class this replaced).
+    static func shouldClampToScreen(model: Int, measured: Int) -> Bool {
+        measured < model
+    }
+
+    /// Dangerous direction: the screen measured LONGER than modelled. Only
+    /// adopt it when there's proof the extra characters are OUR OWN
+    /// artifact (an overlay's autocomplete/predictive text) and not real
+    /// text the user already had: the measured word must literally end with
+    /// what we typed, and the gap must be small — an overlay drops at most
+    /// a couple of keystrokes, it doesn't insert a whole extra word.
+    static func shouldExtendToScreen(
+        model: Int, measured: Int, modelWord: String, screenWord: String
+    ) -> Bool {
+        guard measured > model, measured - model <= 2, !modelWord.isEmpty else { return false }
+        return screenWord.hasSuffix(modelWord)
     }
 
     // MARK: - Callback-duration watchdog

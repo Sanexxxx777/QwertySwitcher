@@ -185,7 +185,12 @@ enum AXTextSelectionService {
         guard AXUIElementCopyAttributeValue(
             appElement, kAXFocusedUIElementAttribute as CFString, &focusedRef
         ) == .success else { return nil }
-        return unsafeBitCast(focusedRef, to: AXUIElement.self)
+        let focusedElement = unsafeBitCast(focusedRef, to: AXUIElement.self)
+        // `sendBackspacesVerified` does one round-trip PER backspace instead
+        // of one per replacement — without a bound on this specific element
+        // it inherits the AX default of 6s per call on an unresponsive app.
+        _ = AXUIElementSetMessagingTimeout(focusedElement, axTimeoutSeconds)
+        return focusedElement
     }
 
     /// Non-empty selected text, or nil if there is none / the app's AX tree
@@ -222,6 +227,24 @@ enum AXTextSelectionService {
         ) == .success, let length = countRef as? Int else { return nil }
         guard let caret = caretOffset(element) else { return nil }
         return (length, caret)
+    }
+
+    /// Selection location + length, with NO requirement on the length — used
+    /// by `TextReplacer.sendBackspacesVerified` to watch the caret move
+    /// during an overlay erase, where a live (non-zero) selection can appear
+    /// mid-gesture (e.g. an overlay's own autocomplete). `caretOffset` below
+    /// stays untouched: `valueAndCaret`/`lengthAndCaret` are built on its
+    /// zero-length contract and must not change behavior.
+    static func selectionRange(_ element: AXUIElement) -> (location: Int, length: Int)? {
+        var rangeRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(
+            element, kAXSelectedTextRangeAttribute as CFString, &rangeRef
+        ) == .success else { return nil }
+        let axRange = unsafeBitCast(rangeRef, to: AXValue.self)
+        var cfRange = CFRange()
+        guard AXValueGetType(axRange) == .cfRange,
+              AXValueGetValue(axRange, .cfRange, &cfRange) else { return nil }
+        return (cfRange.location, cfRange.length)
     }
 
     /// Caret position for a ZERO-length selection (a plain caret, nothing
