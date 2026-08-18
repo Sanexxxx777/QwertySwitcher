@@ -163,8 +163,15 @@ struct KeycapTabBar<Item: Hashable>: View {
 
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Namespace private var thumb
 
+    // The thumb is its own layer BELOW the labels, positioned by the selected
+    // index, and it is the ONLY thing in this control with an animation. The
+    // first version put the thumb in the selected item's background with
+    // matchedGeometryEffect, which needs a container-level `.animation(value:
+    // selection)` to glide — and that animation also interpolated the labels'
+    // weight and color, so the whole row swam on every switch (owner's report,
+    // 19.08, twice). Structure over suppression: labels can't animate because
+    // nothing animated ever touches them.
     var body: some View {
         HStack(spacing: 0) {
             ForEach(items, id: \.self) { item in
@@ -179,29 +186,9 @@ struct KeycapTabBar<Item: Hashable>: View {
                     Text(label(item))
                         .font(.appText(12, weight: isOn ? .semibold : .medium))
                         .foregroundStyle(isOn ? theme.textPrimary : theme.textSecondary)
-                        // The container's spring below exists for the thumb's
-                        // matchedGeometryEffect glide. Left alone it also
-                        // interpolates the label's weight and color — semibold
-                        // to medium changes the text's width mid-flight, so
-                        // the whole row appears to swim (owner's report,
-                        // 19.08). Labels snap; only the thumb travels.
-                        .transaction { $0.animation = nil }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 5)
                         .contentShape(Rectangle())
-                        .background {
-                            if isOn {
-                                RoundedRectangle(cornerRadius: Radius.tabThumb, style: .continuous)
-                                    .fill(theme.bgCard)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: Radius.tabThumb, style: .continuous)
-                                            .strokeBorder(theme.border, lineWidth: 1)
-                                    )
-                                    .shadow(color: .black.opacity(theme.isDark ? 0.35 : 0.12),
-                                            radius: 1.5, y: 1)
-                                    .matchedGeometryEffect(id: "tabThumb", in: thumb)
-                            }
-                        }
                 }
                 .buttonStyle(KeycapPressStyle(reduceMotion: reduceMotion))
                 // A hand-built control has to re-declare what the stock Picker gave for
@@ -210,11 +197,30 @@ struct KeycapTabBar<Item: Hashable>: View {
             }
         }
         .padding(Radius.tabInset)
+        .background {
+            // Equal-width cells (every label is maxWidth: .infinity), so the
+            // thumb's place is pure arithmetic — no preference plumbing.
+            GeometryReader { geo in
+                let count = max(1, CGFloat(items.count))
+                let cell = (geo.size.width - Radius.tabInset * 2) / count
+                let index = CGFloat(items.firstIndex(of: selection) ?? 0)
+                RoundedRectangle(cornerRadius: Radius.tabThumb, style: .continuous)
+                    .fill(theme.bgCard)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Radius.tabThumb, style: .continuous)
+                            .strokeBorder(theme.border, lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(theme.isDark ? 0.35 : 0.12),
+                            radius: 1.5, y: 1)
+                    .frame(width: cell, height: geo.size.height - Radius.tabInset * 2)
+                    .offset(x: Radius.tabInset + cell * index, y: Radius.tabInset)
+                    .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.86),
+                               value: selection)
+            }
+        }
         .background(
             RoundedRectangle(cornerRadius: Radius.tabTrack, style: .continuous)
                 .fill(theme.trackFill)
         )
-        .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.86),
-                   value: selection)
     }
 }
