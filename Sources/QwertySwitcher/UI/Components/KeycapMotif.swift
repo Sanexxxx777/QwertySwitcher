@@ -164,14 +164,24 @@ struct KeycapTabBar<Item: Hashable>: View {
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    // The thumb is its own layer BELOW the labels, positioned by the selected
-    // index, and it is the ONLY thing in this control with an animation. The
-    // first version put the thumb in the selected item's background with
-    // matchedGeometryEffect, which needs a container-level `.animation(value:
-    // selection)` to glide — and that animation also interpolated the labels'
-    // weight and color, so the whole row swam on every switch (owner's report,
-    // 19.08, twice). Structure over suppression: labels can't animate because
-    // nothing animated ever touches them.
+    // The thumb tracks its two EDGES independently — that's the whole droplet
+    // trick (owner's request 19.08): on every switch the edge facing the
+    // target gets the faster spring and the far edge trails on a slower one,
+    // so the thumb stretches toward the destination and its tail flows in
+    // after, like a drop of liquid. Both edges land on the same cell, so the
+    // resting shape is exactly the old static thumb.
+    @State private var thumbLeading: CGFloat = 0
+    @State private var thumbTrailing: CGFloat = 0
+    @State private var trackSize: CGSize = .zero
+
+    // The thumb is its own layer BELOW the labels, and it is the ONLY thing
+    // in this control that animates. The first version put the thumb in the
+    // selected item's background with matchedGeometryEffect, which needs a
+    // container-level `.animation(value: selection)` to glide — and that
+    // animation also interpolated the labels' weight and color, so the whole
+    // row swam on every switch (owner's report, 19.08, twice). Structure over
+    // suppression: labels can't animate because nothing animated ever touches
+    // them.
     var body: some View {
         HStack(spacing: 0) {
             ForEach(items, id: \.self) { item in
@@ -201,9 +211,6 @@ struct KeycapTabBar<Item: Hashable>: View {
             // Equal-width cells (every label is maxWidth: .infinity), so the
             // thumb's place is pure arithmetic — no preference plumbing.
             GeometryReader { geo in
-                let count = max(1, CGFloat(items.count))
-                let cell = (geo.size.width - Radius.tabInset * 2) / count
-                let index = CGFloat(items.firstIndex(of: selection) ?? 0)
                 RoundedRectangle(cornerRadius: Radius.tabThumb, style: .continuous)
                     .fill(theme.bgCard)
                     .overlay(
@@ -212,15 +219,68 @@ struct KeycapTabBar<Item: Hashable>: View {
                     )
                     .shadow(color: .black.opacity(theme.isDark ? 0.35 : 0.12),
                             radius: 1.5, y: 1)
-                    .frame(width: cell, height: geo.size.height - Radius.tabInset * 2)
-                    .offset(x: Radius.tabInset + cell * index, y: Radius.tabInset)
-                    .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.86),
-                               value: selection)
+                    .frame(width: max(0, thumbTrailing - thumbLeading),
+                           height: geo.size.height - Radius.tabInset * 2)
+                    .offset(x: thumbLeading, y: Radius.tabInset)
+                    .onAppear {
+                        trackSize = geo.size
+                        snapThumb(in: geo.size)
+                    }
+                    .onChange(of: geo.size) { size in
+                        // Window resize (tab heights differ) must not replay
+                        // the flow — reposition silently.
+                        trackSize = size
+                        snapThumb(in: size)
+                    }
+                    .onChange(of: selection) { newValue in
+                        flowThumb(to: newValue)
+                    }
             }
         }
         .background(
             RoundedRectangle(cornerRadius: Radius.tabTrack, style: .continuous)
                 .fill(theme.trackFill)
         )
+    }
+
+    private func cellWidth(in size: CGSize) -> CGFloat {
+        (size.width - Radius.tabInset * 2) / max(1, CGFloat(items.count))
+    }
+
+    private func targetEdges(of item: Item, in size: CGSize) -> (leading: CGFloat, trailing: CGFloat) {
+        let cell = cellWidth(in: size)
+        let index = CGFloat(items.firstIndex(of: item) ?? 0)
+        let leading = Radius.tabInset + cell * index
+        return (leading, leading + cell)
+    }
+
+    /// No-animation placement: first layout and window resizes.
+    private func snapThumb(in size: CGSize) {
+        let edges = targetEdges(of: selection, in: size)
+        thumbLeading = edges.leading
+        thumbTrailing = edges.trailing
+    }
+
+    /// The droplet: the edge facing the target moves on the fast spring, the
+    /// far edge follows on the slow one — stretch first, then the tail flows
+    /// in. Slightly underdamped so the arrival has a soft settle, not a snap.
+    private func flowThumb(to item: Item) {
+        guard trackSize != .zero else { return }
+        let edges = targetEdges(of: item, in: trackSize)
+        if reduceMotion {
+            thumbLeading = edges.leading
+            thumbTrailing = edges.trailing
+            return
+        }
+        let reach = Animation.spring(response: 0.22, dampingFraction: 0.88)
+        let tail = Animation.spring(response: 0.42, dampingFraction: 0.80)
+        if edges.leading >= thumbLeading {
+            // Moving right: trailing edge reaches, leading edge is the tail.
+            withAnimation(reach) { thumbTrailing = edges.trailing }
+            withAnimation(tail) { thumbLeading = edges.leading }
+        } else {
+            withAnimation(reach) { thumbLeading = edges.leading }
+            withAnimation(tail) { thumbTrailing = edges.trailing }
+        }
     }
 }
