@@ -71,7 +71,9 @@ enum TestRunner {
         ReplacementAtomicityGuardTests.run()
         DoubleShiftSelectionGuardTests.run()
         RunResyncStructuralGuardTests.run()
+        RunResyncPredicateTests.run()
         OverlayMismatchGuardTests.run()
+        VerifiedEraseGuardTests.run()
         PasteNoFormatGuardTests.run()
         StatusInkContrastTests.run()
         SecureInputAXTierTests.run()
@@ -3972,6 +3974,7 @@ enum ReplacementAtomicityGuardTests {
 
         for (function, loopHeader) in [
             ("sendBackspaces", "for _ in 0..<count {"),
+            ("sendBackspacesVerified", "while sent < count + maxExtra {"),
             ("typeStringFast", "for char in text {")
         ] {
             guard let loopStart = text.range(of: loopHeader) else {
@@ -4125,9 +4128,17 @@ enum RunResyncStructuralGuardTests {
             return
         }
         let overrideBlock = String(text[lengthMarker.upperBound..<callSite.lowerBound])
+        // 4) The override is asymmetric (16.08.2026 fix): erasing LESS than
+        //    modelled is adopted unconditionally (clamp), erasing MORE is
+        //    gated on proof the extra characters are our own artifact
+        //    (extend) — a bare `measured != length` comparison is gone.
         TestRunner.assertTrue(
-            overrideBlock.contains("if source == \"buffer\", let measured = pendingRunResync"),
-            "the override is gated to the live run (source == \"buffer\"), never applied to a history word"
+            overrideBlock.contains("KeyboardMonitor.shouldClampToScreen(model: length, measured: measured)"),
+            "the safe direction (erase LESS) is adopted unconditionally via shouldClampToScreen"
+        )
+        TestRunner.assertTrue(
+            overrideBlock.contains("KeyboardMonitor.shouldExtendToScreen("),
+            "the dangerous direction (erase MORE) is gated through shouldExtendToScreen, not a bare comparison"
         )
         TestRunner.assertTrue(
             overrideBlock.contains("length = measured"),
@@ -4140,19 +4151,93 @@ enum RunResyncStructuralGuardTests {
     }
 }
 
+/// Pure unit coverage for `KeyboardMonitor.shouldClampToScreen`/
+/// `shouldExtendToScreen` — no AX involved, so unlike the structural guards
+/// above this exercises the actual decision logic with real inputs.
+enum RunResyncPredicateTests {
+    static func run() {
+        TestRunner.section("Run-resync erase-length predicate — clamp always, extend only with a suffix match")
+
+        TestRunner.assertTrue(
+            KeyboardMonitor.shouldClampToScreen(model: 5, measured: 4),
+            "measured < model → clamp (safe direction, unconditional)"
+        )
+        TestRunner.assertTrue(
+            !KeyboardMonitor.shouldClampToScreen(model: 5, measured: 5),
+            "measured == model → nothing to clamp"
+        )
+        TestRunner.assertTrue(
+            !KeyboardMonitor.shouldClampToScreen(model: 5, measured: 6),
+            "measured > model is the OTHER predicate's business, not clamp's"
+        )
+
+        // modelWord="ghbdt" (typed keycodes), screenWord="gghbdt" (one extra
+        // character on screen) — measured−model=1, the screen word ends with
+        // what we typed → accept.
+        TestRunner.assertTrue(
+            KeyboardMonitor.shouldExtendToScreen(
+                model: 5, measured: 6, modelWord: "ghbdt", screenWord: "gghbdt"
+            ),
+            "measured−model=1 and the screen word ends with the typed word → extend"
+        )
+        TestRunner.assertTrue(
+            !KeyboardMonitor.shouldExtendToScreen(
+                model: 5, measured: 8, modelWord: "ghbdt", screenWord: "xxxghbdt"
+            ),
+            "measured−model=3 exceeds the 2-character budget → reject even with a matching suffix"
+        )
+        TestRunner.assertTrue(
+            !KeyboardMonitor.shouldExtendToScreen(
+                model: 3, measured: 4, modelWord: "ghb", screenWord: "ghx"
+            ),
+            "screen word does NOT end with the typed word → reject"
+        )
+        // "x/ghb" ends with "ghb" — hasSuffix is a plain string check and
+        // cannot tell that "/" separates an unrelated path segment from the
+        // typed word. The design does not pretend otherwise: this predicate
+        // alone would accept it (delta=1 ≤ 2, suffix matches). What actually
+        // keeps "x/ghb"-style cases safe is that a "/" makes the on-screen
+        // text non-letters-only, which routes it through `convertWholeRun`
+        // (whole-run conversion) rather than through this scored-path
+        // predicate at all — a different guard, not a smarter suffix check.
+        // Documenting the honest behavior here rather than inventing a
+        // protection this function doesn't have.
+        TestRunner.assertTrue(
+            KeyboardMonitor.shouldExtendToScreen(
+                model: 3, measured: 4, modelWord: "ghb", screenWord: "x/ghb"
+            ),
+            "hasSuffix alone accepts \"x/ghb\" ending in \"ghb\" at delta=1 — the actual guard against this"
+                + " case is convertWholeRun routing non-letter screen text away from this predicate entirely"
+        )
+        TestRunner.assertTrue(
+            !KeyboardMonitor.shouldExtendToScreen(
+                model: 3, measured: 6, modelWord: "ghb", screenWord: "xxx/ghb"
+            ),
+            "same suffix match but delta=3 > 2 → the budget rejects it regardless"
+        )
+        TestRunner.assertTrue(
+            !KeyboardMonitor.shouldExtendToScreen(
+                model: 0, measured: 1, modelWord: "", screenWord: "g"
+            ),
+            "empty modelWord (nothing typed to compare against) → reject"
+        )
+    }
+}
+
 /// Second line of defense for the same drift class: `convertWholeRun`'s
 /// resync only covers ONE call site (`RunResyncStructuralGuardTests` above).
 /// Any OTHER replacement that ends up delivered to an overlay field still
 /// hands `TextReplacer` a `length` derived purely from its caller's typed
-/// model — this pins that `TextReplacer` refuses to erase on a mismatch
-/// instead of trusting the caller blindly (erasing the wrong count is worse
-/// than doing nothing: a stray character self-heals on the next correction,
-/// a wrong erase eats real text). No live overlay window inside the headless
-/// harness, so this reads the source, same precedent as
-/// `ReplacementAtomicityGuardTests`.
+/// model. The guard is now ASYMMETRIC (16.08.2026 overlay-verified-erase
+/// work): the screen holding LESS than the model still aborts — erasing
+/// further would eat text that isn't ours — but the screen holding MORE is
+/// cosmetic, not destructive, and is left to the verified erase
+/// (`sendBackspacesVerified`) to sort out by watching the caret instead of
+/// guessing a count. No live overlay window inside the headless harness, so
+/// this reads the source, same precedent as `ReplacementAtomicityGuardTests`.
 enum OverlayMismatchGuardTests {
     static func run() {
-        TestRunner.section("TextReplacer — an overlay delivery aborts on a screen/model mismatch instead of guessing")
+        TestRunner.section("TextReplacer — an overlay delivery aborts only when the screen holds LESS than the model")
 
         let source = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()      // Tests/
@@ -4181,24 +4266,42 @@ enum OverlayMismatchGuardTests {
             overlayBlock.contains("plan.backspaceCount"),
             "the guard compares against what the caller actually intends to erase"
         )
+
+        guard let ltBranch = overlayBlock.range(of: "if ax < model {"),
+              let gtBranch = overlayBlock.range(of: "} else if ax > model {", range: ltBranch.upperBound..<overlayBlock.endIndex)
+        else {
+            TestRunner.assertTrue(false, "ax < model / ax > model branches not found — test needs updating")
+            return
+        }
+        let lessBranchBody = String(overlayBlock[ltBranch.upperBound..<gtBranch.lowerBound])
+        let moreBranchBody = String(overlayBlock[gtBranch.upperBound...])
+
         TestRunner.assertTrue(
-            overlayBlock.contains("overlay replacement skipped: screen/model mismatch"),
-            "a mismatch is logged with the specific 'overlay replacement skipped' message"
+            lessBranchBody.contains("overlay replacement skipped: screen/model mismatch"),
+            "screen holding LESS than the model is logged with the specific 'overlay replacement skipped' message"
         )
         TestRunner.assertTrue(
-            overlayBlock.contains("self.complete(.cancelled, cancellation: cancellation, completion: completion)"),
-            "a mismatch aborts the replacement (.cancelled) instead of erasing the wrong count"
+            lessBranchBody.contains("self.complete(.cancelled, cancellation: cancellation, completion: completion)"),
+            "screen holding LESS than the model aborts the replacement (.cancelled)"
+        )
+        TestRunner.assertTrue(
+            moreBranchBody.contains("overlay screen longer than model:"),
+            "screen holding MORE than the model is logged with the specific 'overlay screen longer than model' message"
+        )
+        TestRunner.assertTrue(
+            !moreBranchBody.contains(".cancelled"),
+            "screen holding MORE than the model must NOT cancel the replacement — it's cosmetic, not destructive"
         )
 
         // Pacing diagnostics are no longer suppressed for the overlay path —
         // TextReplacer.swift used to log nothing at all there.
-        guard let sendBackspacesMarker = text.range(
-            of: "guard self.sendBackspaces", range: pacingMarker.upperBound..<text.endIndex
+        guard let eraseDecisionMarker = text.range(
+            of: "let eraseSucceeded: Bool", range: pacingMarker.upperBound..<text.endIndex
         ) else {
             TestRunner.assertTrue(false, "pacing block not found — test needs updating")
             return
         }
-        let pacingBlock = String(text[pacingMarker.upperBound..<sendBackspacesMarker.lowerBound])
+        let pacingBlock = String(text[pacingMarker.upperBound..<eraseDecisionMarker.lowerBound])
         TestRunner.assertTrue(
             pacingBlock.contains("careful pacing: field not AX-readable"),
             "the non-overlay careful-pacing log is untouched"
@@ -4212,6 +4315,87 @@ enum OverlayMismatchGuardTests {
         TestRunner.assertTrue(
             !pacingBlock.contains("axReadable ? \"fast\" : \"careful\""),
             "the old readability-driven fast/careful switch for overlays is gone"
+        )
+    }
+}
+
+/// `sendBackspacesVerified` (16.08.2026, the "one backspace per gesture"
+/// class this closes) reads the caret back between backspaces instead of
+/// trusting a fixed count — pinned structurally, same precedent as
+/// `ReplacementAtomicityGuardTests`: no live overlay window inside the
+/// headless harness.
+enum VerifiedEraseGuardTests {
+    static func run() {
+        TestRunner.section("TextReplacer — verified erase for overlay panels")
+
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()      // Tests/
+            .deletingLastPathComponent()      // QwertySwitcher/
+            .appendingPathComponent("Core/TextReplacer.swift")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            TestRunner.skip("TextReplacer.swift not readable from \(source.path)")
+            return
+        }
+
+        // (a) the overlay branch calls the verified erase, the plain branch
+        // keeps calling the original blind burst — never the other way round.
+        guard let eraseDecisionStart = text.range(of: "let eraseSucceeded: Bool"),
+              let typeStringCall = text.range(
+                of: "self.typeStringFast(plan.payload", range: eraseDecisionStart.upperBound..<text.endIndex
+              )
+        else {
+            TestRunner.assertTrue(false, "erase decision block not found — test needs updating")
+            return
+        }
+        let eraseDecisionBlock = String(text[eraseDecisionStart.upperBound..<typeStringCall.lowerBound])
+        TestRunner.assertTrue(
+            eraseDecisionBlock.contains("self.sendBackspacesVerified("),
+            "the overlay branch calls the verified erase"
+        )
+        TestRunner.assertTrue(
+            eraseDecisionBlock.contains("self.sendBackspaces("),
+            "the non-overlay branch still calls the original blind burst"
+        )
+
+        // (b)-(e) the verified erase's own safety budget.
+        guard let verifiedFuncStart = text.range(of: "private func sendBackspacesVerified(") else {
+            TestRunner.assertTrue(false, "sendBackspacesVerified not found — test needs updating")
+            return
+        }
+        let verifiedFuncTail = String(text[verifiedFuncStart.lowerBound...])
+        let verifiedFuncBody = verifiedFuncTail.range(of: "\n    private func typeStringFast")
+            .map { String(verifiedFuncTail[..<$0.lowerBound]) } ?? verifiedFuncTail
+
+        TestRunner.assertTrue(
+            verifiedFuncBody.contains("count + maxExtra"),
+            "the erase loop is bounded to count + maxExtra events, never unbounded"
+        )
+        TestRunner.assertTrue(
+            verifiedFuncBody.contains("maxExtra = 2"),
+            "at most 2 extra backspaces are allowed to catch up on a measured drift"
+        )
+        TestRunner.assertTrue(
+            verifiedFuncBody.contains("noProgress >= 2"),
+            "the loop gives up once the caret stops moving for 2 consecutive events"
+        )
+        TestRunner.assertTrue(
+            verifiedFuncBody.contains("deadline"),
+            "the verification loop is bounded by a wall-clock budget, not just an event count"
+        )
+        TestRunner.assertTrue(
+            verifiedFuncBody.contains("erase verified:"),
+            "the outcome is logged with the specific 'erase verified:' format"
+        )
+
+        // (f) the payload retype is never verified via AX — only the erase is.
+        guard let typeFuncStart = text.range(of: "private func typeStringFast(") else {
+            TestRunner.assertTrue(false, "typeStringFast not found — test needs updating")
+            return
+        }
+        let typeFuncBody = String(text[typeFuncStart.lowerBound...])
+        TestRunner.assertTrue(
+            !typeFuncBody.contains("selectionRange"),
+            "typeStringFast never verifies via AX — the payload is not read back"
         )
     }
 }
