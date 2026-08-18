@@ -165,6 +165,13 @@ struct KeycapTabBar<Item: Hashable>: View {
                     Text(label(item))
                         .font(.appText(12, weight: isOn ? .semibold : .medium))
                         .foregroundStyle(isOn ? theme.textPrimary : theme.textSecondary)
+                        // The container's spring below exists for the thumb's
+                        // matchedGeometryEffect glide. Left alone it also
+                        // interpolates the label's weight and color — semibold
+                        // to medium changes the text's width mid-flight, so
+                        // the whole row appears to swim (owner's report,
+                        // 19.08). Labels snap; only the thumb travels.
+                        .transaction { $0.animation = nil }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 5)
                         .contentShape(Rectangle())
