@@ -225,13 +225,29 @@ extension Font {
     }
 }
 
-/// Flat window background — no blur, no texture, no glow. A settings window's canvas
-/// should be quiet; the accent color does the one job of drawing the eye.
+/// Quiet window background: flat canvas plus ONE ambient glow pinned to the
+/// top-trailing corner, in the accent hue at 3-5% — depth without texture.
+/// The cap matters: at this alpha the glow reads as light in the room, not
+/// as a graphic; anything stronger starts competing with the status cover,
+/// which owns the window's only meaningful color.
 struct AppBackground: View {
     @Environment(\.appTheme) private var theme
 
     var body: some View {
-        theme.bgPrimary.ignoresSafeArea()
+        theme.bgPrimary
+            .overlay(alignment: .topTrailing) {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [theme.accent.opacity(theme.isDark ? 0.05 : 0.035), .clear],
+                            center: .center, startRadius: 0, endRadius: 170
+                        )
+                    )
+                    .frame(width: 340, height: 340)
+                    .offset(x: 90, y: -110)
+                    .allowsHitTesting(false)
+            }
+            .ignoresSafeArea()
     }
 }
 
@@ -423,8 +439,11 @@ struct MainView: View {
                     // Color still carries the state, but through the mark next
                     // to it, where a low-contrast hue is legitimate (a glyph
                     // isn't read letter by letter) and where it reads faster.
+                    // 22pt, not 19: the squint test put the status word on
+                    // par with the section content — one step up makes it
+                    // unambiguously the first thing the window says.
                     Text(heroWord)
-                        .font(.appText(19, weight: .semibold))
+                        .font(.appText(22, weight: .semibold))
                         .foregroundStyle(theme.textPrimary)
                 }
                 Text("Определяет язык и исправляет раскладку во время набора")
