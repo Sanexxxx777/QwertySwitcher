@@ -197,10 +197,18 @@ final class StatusBarController {
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        let pauseTitle = prefsService.isAutoSwitchEnabled ? "Пауза" : "Возобновить"
-        let pauseItem = NSMenuItem(title: pauseTitle, action: #selector(toggleAutoSwitch(_:)), keyEquivalent: "")
-        pauseItem.target = self
-        menu.addItem(pauseItem)
+        // Owner's request 19.08: the item names the FEATURE and its state,
+        // not the action ("Пауза"/"Возобновить" read as player controls and
+        // hid what was actually being toggled). The checkmark carries the
+        // state for a glance; the title spells it out for certainty.
+        let autoSwitchOn = prefsService.isAutoSwitchEnabled
+        let autoSwitchItem = NSMenuItem(
+            title: autoSwitchOn ? "Автопереключение: включено" : "Автопереключение: выключено",
+            action: #selector(toggleAutoSwitch(_:)), keyEquivalent: ""
+        )
+        autoSwitchItem.state = autoSwitchOn ? .on : .off
+        autoSwitchItem.target = self
+        menu.addItem(autoSwitchItem)
 
         let permissionsItem = NSMenuItem(title: "Настройка разрешений…",
                                          action: #selector(openPermissions), keyEquivalent: "")
@@ -369,7 +377,7 @@ final class StatusBarController {
 
     @objc private func toggleAutoSwitch(_ sender: NSMenuItem) {
         prefsService.isAutoSwitchEnabled.toggle()
-        // Title ("Пауза"/"Возобновить") is recomputed by rebuildMenu(), which
+        // Title/state ("Автопереключение: …") is recomputed by rebuildMenu(), which
         // the .autoSwitchToggled observer already triggers via refreshMenu().
         NotificationCenter.default.post(name: .autoSwitchToggled, object: nil)
     }
