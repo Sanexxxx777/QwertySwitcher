@@ -41,6 +41,7 @@ enum TestRunner {
         InstantCorrectionUndoTests.run()
         InstantCorrectionAnalyzerTests.run()
         InstantCorrectionCorpusTests.run()
+        InstantCorrectionJunkGateTests.run()
         LicenseServiceTests.run()
         FileLicenseStoreTests.run()
         DebugLogTests.run()
@@ -1878,7 +1879,6 @@ enum InstantCorrectionAnalyzerTests {
               otherLayout: KeyboardLayout, label: String)] = [
                 ("ghbdtn", enLayout, enReverse, ruLayout, "ghbdtn (en keys) → привет"),
                 ("cgfcb,j", enLayout, enReverse, ruLayout, "cgfcb,j (en keys) → спасибо"),
-                ("руддщ", ruLayout, ruReverse, enLayout, "руддщ (ru keys) → hello"),
                 ("цщкв", ruLayout, ruReverse, enLayout, "цщкв (ru keys) → word"),
             ]
 
@@ -1899,6 +1899,37 @@ enum InstantCorrectionAnalyzerTests {
                 "\(goldenCase.label): instant correction fires by length \(ceiling)"
                     + " (fired at \(fired.map(String.init) ?? "never"))"
             )
+        }
+
+        // "руддщ" (ru keys) → "hello" moved OUT of the golden always-fires
+        // list by the 19.08.2026 junk-gate: its own ru reading ("рудд...")
+        // has a vowel and only bigrams that occur in real ru words — CLEAN —
+        // so instant now defers to the boundary path here on purpose. This
+        // is the measured trade-off (Scripts/research/instant_junk_gate_sim.py
+        // measure [1]: 40.4% of honest EN-typed-while-ru-active corrections
+        // are deferred this way, 97.5% of those — this one included —
+        // recoverable at the boundary path). Confirmed both halves: instant
+        // stays silent, and `LanguageDetector.detect` (boundary/space) still
+        // corrects it, so nothing is actually lost.
+        if let strokes = InstantCorrectionFixtures.keystrokes(for: "руддщ", reverse: ruReverse) {
+            let fired = InstantCorrectionFixtures.firedAt(
+                strokes: strokes, wrongLayout: ruLayout, otherLayouts: [enLayout],
+                analyzer: analyzer, inputSources: inputSources
+            )
+            TestRunner.assertNil(
+                fired, "'руддщ' (ru keys) → hello: instant defers to the boundary path (own reading is CLEAN)"
+            )
+            let prefs = PreferencesService()
+            let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
+            switch detector.detect(keystrokes: strokes, typedLayout: ruLayout) {
+            case .switchTo(let layout, let word):
+                TestRunner.assertEqual(layout.languageCode, "en", "'руддщ' still recovers at the boundary path")
+                TestRunner.assertEqual(word, "hello", "boundary path corrects to the same word instant used to")
+            case .noSwitch:
+                TestRunner.assertTrue(false, "'руддщ' must still switch at the boundary path — recoverable, not lost")
+            }
+        } else {
+            TestRunner.assertTrue(false, "'руддщ': ru fixture can type every character")
         }
 
         // Below MIN_INSTANT: never evaluated, even on an otherwise-golden prefix.
@@ -1998,6 +2029,74 @@ enum InstantCorrectionCorpusTests {
             return words
         }
         return nil
+    }
+}
+
+enum InstantCorrectionJunkGateTests {
+    static func run() {
+        TestRunner.section("Instant correction — own-clean junk gate (field defect 19.08.2026)")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the junk-gate fixtures")
+            return
+        }
+
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let analyzer = InstantCorrectionAnalyzer(dictionary: dictionary)
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+
+        // Repro from the stand (Scripts/research/instant_junk_gate_sim.py,
+        // measure [3] "ru_50k mutated" corpus): "пусть" typo'd as "еусть"
+        // (п→е at position 0), typed honestly while ru is active. The
+        // 4-letter own reading "еуст" is CLEAN by JunkMeter — has a vowel,
+        // every bigram possible — a real-looking ru prefix, not the
+        // gibberish instant correction exists to catch. BEFORE this fix, en's
+        // 'tecn' (a bundled-word prefix) cleared candidateFloor/margin and
+        // won, flipping the layout mid-word on an honest typo.
+        if let strokes = InstantCorrectionFixtures.keystrokes(for: "еусть", reverse: ruReverse) {
+            let prefix = Array(strokes.prefix(4))
+            TestRunner.assertEqual(
+                inputSources.convertKeystrokes(prefix, toLayout: ruLayout), "еуст",
+                "sanity: the 4-letter own reading matches the stand's repro"
+            )
+            let result = analyzer.evaluate(
+                keystrokes: prefix, currentLayout: ruLayout, otherLayouts: [enLayout],
+                convert: { layout in inputSources.convertKeystrokes(prefix, toLayout: layout) }
+            )
+            TestRunner.assertNil(
+                result,
+                "own-clean OOV prefix 'еуст' (typo of 'пусть') no longer misfires instant correction to EN"
+            )
+        } else {
+            TestRunner.assertTrue(false, "'еусть': ru fixture can type every character")
+        }
+
+        // Regression (mirrors sanity check [5] on the stand): the gate must
+        // not touch honest mid-word corrections whose own reading is junk —
+        // no vowel at all — exactly the mistake instant correction exists to
+        // fix. Both keep firing, same as before this change.
+        if let ghbdtn = InstantCorrectionFixtures.keystrokes(for: "ghbdtn", reverse: enReverse) {
+            let fired = InstantCorrectionFixtures.firedAt(
+                strokes: ghbdtn, wrongLayout: enLayout, otherLayouts: [ruLayout],
+                analyzer: analyzer, inputSources: inputSources
+            )
+            TestRunner.assertTrue(fired != nil, "junk own-reading 'ghbdtn' (привет) still fires instant correction")
+        } else {
+            TestRunner.assertTrue(false, "'ghbdtn': EN fixture can type every character")
+        }
+        if let rabota = InstantCorrectionFixtures.keystrokes(for: "работа", reverse: ruReverse) {
+            let fired = InstantCorrectionFixtures.firedAt(
+                strokes: rabota, wrongLayout: enLayout, otherLayouts: [ruLayout],
+                analyzer: analyzer, inputSources: inputSources
+            )
+            TestRunner.assertTrue(fired != nil, "junk own-reading 'hf,jnf' (работа) still fires instant correction")
+        } else {
+            TestRunner.assertTrue(false, "'работа': ru fixture can type every character")
+        }
     }
 }
 
@@ -2674,32 +2773,35 @@ enum LeadingSymbolRunGuardTests {
             )
         }
 
-        // Positive: the literal reported "/model" case + the "$GRAF" citation
-        // — the letter core, typed in the WRONG layout, must still be
+        // Positive: the letter core, typed in the WRONG layout, must still be
         // recognized as needing a switch. The leading symbol is folded in
         // only AFTER this decision (never fed to the analyzer), so this
         // proves the decision itself is unaffected by a symbol in front of it.
-        // `enReverse` recovers the PHYSICAL keycodes for "model"/"graf" (EN
-        // text); `wrongLayout: ruLayout` simulates those same physical keys
-        // being pressed while RU was mistakenly active.
-        if let modelResult = evaluateAtFirstFire("model", wrongLayout: ruLayout, reverse: enReverse, otherLayout: enLayout) {
+        // `enReverse` recovers the PHYSICAL keycodes for the EN word;
+        // `wrongLayout: ruLayout` simulates those same physical keys being
+        // pressed while RU was mistakenly active.
+        // ⚠️Originally "model" (the literal "/model" citation) and "hello"
+        // ("$GRAF"-style stand-in) — both now DEFER to the boundary path
+        // under the 19.08.2026 junk-gate (own ru reading is CLEAN, same
+        // class InstantCorrectionAnalyzerTests' "руддщ" case documents), so
+        // they no longer demonstrate "instant fires despite a leading
+        // symbol" — only that this UNRELATED gate applies before the symbol
+        // is even considered. Swapped for "world"/"window", real words whose
+        // own ru reading stays junk, to keep testing what this guard is
+        // actually about.
+        if let worldResult = evaluateAtFirstFire("world", wrongLayout: ruLayout, reverse: enReverse, otherLayout: enLayout) {
             TestRunner.assertTrue(
-                modelResult.layout.isEnglish, "'/model' letter core (wrong ru layout) is recognized and switches to EN"
+                worldResult.layout.isEnglish, "'/world' letter core (wrong ru layout) is recognized and switches to EN"
             )
         } else {
-            TestRunner.assertTrue(false, "'/model' letter core should be recognized as needing a switch to EN")
+            TestRunner.assertTrue(false, "'world' letter core should be recognized as needing a switch to EN")
         }
-        // "graf" itself is too short/uncommon for the dictionary to score
-        // confidently at minLength=4 (a property of the calibrated analyzer,
-        // unrelated to this fix) — "hello" is one of the suite's existing
-        // proven golden words and stands in for the same "$XXX"-style
-        // leading-symbol scenario the diagnosis illustrated with "$GRAF".
-        if let helloResult = evaluateAtFirstFire("hello", wrongLayout: ruLayout, reverse: enReverse, otherLayout: enLayout) {
+        if let windowResult = evaluateAtFirstFire("window", wrongLayout: ruLayout, reverse: enReverse, otherLayout: enLayout) {
             TestRunner.assertTrue(
-                helloResult.layout.isEnglish, "'$hello'-style letter core (wrong ru layout) is recognized and switches to EN"
+                windowResult.layout.isEnglish, "'$window'-style letter core (wrong ru layout) is recognized and switches to EN"
             )
         } else {
-            TestRunner.assertTrue(false, "'hello' letter core should be recognized as needing a switch to EN")
+            TestRunner.assertTrue(false, "'window' letter core should be recognized as needing a switch to EN")
         }
 
         // Negative/guard: the letter core is ALREADY a valid word in the
@@ -3514,8 +3616,15 @@ enum KeyboardMonitorIntegrationTests {
             h.press(44) // "/"
             if let model = InstantCorrectionFixtures.keystrokes(for: "model", reverse: enReverse) {
                 h.type(model)
+                // Trailing space flushes the boundary path if instant didn't
+                // already fire — since 19.08.2026 "model" is exactly that
+                // case: its own ru reading is CLEAN (junk-gate), so instant
+                // now defers here (same trade-off InstantCorrectionAnalyzerTests'
+                // "руддщ" case documents) and the boundary path is what
+                // actually folds the leading "/" in this run.
+                h.press(49)
                 TestRunner.assertEqual(
-                    h.screen, "/model",
+                    h.screen, "/model ",
                     "'/model' converts with the leading '/' intact (Ghostty 03.08.2026 regression, integration level)"
                 )
             } else {
