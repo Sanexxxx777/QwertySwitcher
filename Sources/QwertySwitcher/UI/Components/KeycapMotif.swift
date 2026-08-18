@@ -142,6 +142,20 @@ struct KeyRowBand: View {
 // track, in the same keycap language as the header mark. Selection now costs zero color —
 // it reads by elevation and weight, which is what the rest of macOS does too.
 
+/// The physical half of the keycap metaphor: a tab dips under the finger
+/// like a key travels. Scale (not opacity) so the press reads as depth, and
+/// small enough that it never fights the thumb glide that follows.
+private struct KeycapPressStyle: ButtonStyle {
+    let reduceMotion: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.965 : 1)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12),
+                       value: configuration.isPressed)
+    }
+}
+
 struct KeycapTabBar<Item: Hashable>: View {
     let items: [Item]
     let label: (Item) -> String
@@ -189,7 +203,7 @@ struct KeycapTabBar<Item: Hashable>: View {
                             }
                         }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(KeycapPressStyle(reduceMotion: reduceMotion))
                 // A hand-built control has to re-declare what the stock Picker gave for
                 // free, or VoiceOver announces three unrelated buttons.
                 .accessibilityAddTraits(traits)
