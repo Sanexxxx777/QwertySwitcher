@@ -57,6 +57,26 @@ final class InstantCorrectionAnalyzer {
         let currentText = convert(currentLayout)
         guard !currentText.isEmpty, !LanguageDetector.shouldSkip(currentText) else { return nil }
 
+        // Junk-gate (field defect 19.08.2026, measured
+        // Scripts/research/instant_junk_gate_sim.py `first_instant_fire_gated`):
+        // if the OWN reading of the prefix typed so far already looks like a
+        // real word by the junk metric — has a vowel AND every bigram is
+        // possible in this language (`JunkMeter.isClean`, same test the
+        // boundary-path junk-override uses) — instant does not fire at this
+        // prefix length. Without this, out-of-dictionary Russian (jargon/
+        // typo/name) stays silent on the ru-prefix gate below while an en
+        // candidate still clears the floor/margin and wins, flipping the
+        // layout mid-word. Stand: 93.5% (ru→en) / 87.5% (en→ru) false
+        // switches removed at ~1% hard loss (the rest recovers at the
+        // boundary path once the word is a real dictionary word). A junk own
+        // reading (no vowel — "работа"=hf,jnf, "привет"=ghbdtn) is untouched,
+        // and nil bigrams (prefix index still building) leave the gate
+        // silent — never blocking on a guess.
+        if let bigrams = dictionary.possibleBigrams(language: currentLayout.languageCode),
+           JunkMeter.isClean(currentText, language: currentLayout.languageCode, possibleBigrams: bigrams) {
+            return nil
+        }
+
         let current = combinedScore(currentText, language: currentLayout.languageCode)
         // A dictionary/prefix match on the CURRENT side always wins, even if
         // a heuristic n-gram penalty (e.g. a "forbidden" bigram that is
