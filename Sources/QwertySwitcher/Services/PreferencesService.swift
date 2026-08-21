@@ -1,8 +1,12 @@
 import Foundation
 
 final class PreferencesService {
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     private let keyPrefix = AppIdentity.keyPrefix
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
 
     var isAutoSwitchEnabled: Bool {
         get { defaults.object(forKey: keyPrefix + "autoEnabled") as? Bool ?? true }
@@ -69,6 +73,20 @@ final class PreferencesService {
     var isInstantCorrectionEnabled: Bool {
         get { defaults.object(forKey: keyPrefix + "instantCorrection") as? Bool ?? true }
         set { defaults.set(newValue, forKey: keyPrefix + "instantCorrection") }
+    }
+
+    /// Expands user-authored short triggers into local text snippets when a
+    /// word boundary is typed. The snippet content never leaves the Mac.
+    var isSnippetExpansionEnabled: Bool {
+        get { defaults.object(forKey: keyPrefix + "snippetExpansion") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: keyPrefix + "snippetExpansion") }
+    }
+
+    /// Normalizes an accidentally held Shift in the first two letters and
+    /// capitalizes the next plain word after `.?!`. Off by default.
+    var isSmartCaseEnabled: Bool {
+        get { defaults.object(forKey: keyPrefix + "smartCase") as? Bool ?? false }
+        set { defaults.set(newValue, forKey: keyPrefix + "smartCase") }
     }
 
     /// Adds per-word telemetry (`detect: noSwitch`, `word too short`) to the

@@ -1,11 +1,36 @@
 import Foundation
 import AppKit
 
+struct AppProfile: Codable, Equatable {
+    var blockAutoSwitch: Bool
+    var blockInstantCorrection: Bool
+    var blockHotkeys: Bool
+
+    init(
+        blockAutoSwitch: Bool = true,
+        blockInstantCorrection: Bool = false,
+        blockHotkeys: Bool = false
+    ) {
+        self.blockAutoSwitch = blockAutoSwitch
+        self.blockInstantCorrection = blockInstantCorrection
+        self.blockHotkeys = blockHotkeys
+    }
+
+    var isEmpty: Bool {
+        !blockAutoSwitch && !blockInstantCorrection && !blockHotkeys
+    }
+}
+
 final class ExceptionsService {
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     private let wordExceptionsKey = AppIdentity.keyPrefix + "wordExceptions"
     private let appExceptionsKey = AppIdentity.keyPrefix + "appExceptions"
+    private let appProfilesKey = AppIdentity.keyPrefix + "appProfiles.v1"
     private let autoLearnedKey = AppIdentity.keyPrefix + "autoLearned"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
 
     // MARK: - Word Exceptions (user-added words to never switch)
 
@@ -43,9 +68,37 @@ final class ExceptionsService {
 
     // MARK: - App Exceptions (bundle IDs to skip auto-switch)
 
+    var appProfiles: [String: AppProfile] {
+        get {
+            if let data = defaults.data(forKey: appProfilesKey),
+               let decoded = try? JSONDecoder().decode([String: AppProfile].self, from: data) {
+                return decoded
+            }
+            let legacy = defaults.stringArray(forKey: appExceptionsKey) ?? defaultAppExceptions
+            return Dictionary(uniqueKeysWithValues: legacy.map { ($0, AppProfile()) })
+        }
+        set {
+            let normalized = newValue.filter { !$0.key.isEmpty && !$0.value.isEmpty }
+            guard let data = try? JSONEncoder().encode(normalized) else { return }
+            defaults.set(data, forKey: appProfilesKey)
+            defaults.removeObject(forKey: appExceptionsKey)
+        }
+    }
+
+    /// Compatibility surface for the old all-or-nothing app exception list.
+    /// Existing installs migrate lazily into profiles on the first mutation.
     var appExceptions: Set<String> {
-        get { Set(defaults.stringArray(forKey: appExceptionsKey) ?? defaultAppExceptions) }
-        set { defaults.set(Array(newValue).sorted(), forKey: appExceptionsKey) }
+        get { Set(appProfiles.compactMap { $0.value.blockAutoSwitch ? $0.key : nil }) }
+        set {
+            var profiles = appProfiles
+            for bundleID in Array(profiles.keys) {
+                profiles[bundleID]?.blockAutoSwitch = newValue.contains(bundleID)
+            }
+            for bundleID in newValue where profiles[bundleID] == nil {
+                profiles[bundleID] = AppProfile()
+            }
+            appProfiles = profiles
+        }
     }
 
     private let defaultAppExceptions = [
@@ -58,21 +111,64 @@ final class ExceptionsService {
     ]
 
     func addAppException(_ bundleID: String) {
-        var current = appExceptions
-        current.insert(bundleID)
-        appExceptions = current
+        var profiles = appProfiles
+        var profile = profiles[bundleID] ?? AppProfile()
+        profile.blockAutoSwitch = true
+        profiles[bundleID] = profile
+        appProfiles = profiles
     }
 
     func removeAppException(_ bundleID: String) {
-        var current = appExceptions
-        current.remove(bundleID)
-        appExceptions = current
+        var profiles = appProfiles
+        guard var profile = profiles[bundleID] else { return }
+        profile.blockAutoSwitch = false
+        profiles[bundleID] = profile.isEmpty ? nil : profile
+        appProfiles = profiles
+    }
+
+    func setProfile(_ profile: AppProfile, for bundleID: String) {
+        guard !bundleID.isEmpty else { return }
+        var profiles = appProfiles
+        profiles[bundleID] = profile.isEmpty ? nil : profile
+        appProfiles = profiles
+    }
+
+    func removeProfiles(for bundleIDs: Set<String>) {
+        var profiles = appProfiles
+        for bundleID in bundleIDs { profiles.removeValue(forKey: bundleID) }
+        appProfiles = profiles
+    }
+
+    func profile(for bundleID: String) -> AppProfile? {
+        appProfiles[bundleID]
+    }
+
+    func blocksAutoSwitch(bundleID: String) -> Bool {
+        appProfiles[bundleID]?.blockAutoSwitch ?? false
+    }
+
+    func blocksInstantCorrection(bundleID: String) -> Bool {
+        appProfiles[bundleID]?.blockInstantCorrection ?? false
+    }
+
+    func blocksHotkeys(bundleID: String) -> Bool {
+        appProfiles[bundleID]?.blockHotkeys ?? false
     }
 
     func isCurrentAppExcepted() -> Bool {
         guard let frontApp = NSWorkspace.shared.frontmostApplication,
               let bundleID = frontApp.bundleIdentifier else { return false }
-        return appExceptions.contains(bundleID)
+        return blocksAutoSwitch(bundleID: bundleID)
+    }
+
+    func isInstantCorrectionBlockedForCurrentApp() -> Bool {
+        guard let bundleID = currentAppBundleID() else { return false }
+        return blocksInstantCorrection(bundleID: bundleID)
+    }
+
+    func areHotkeysBlockedForCurrentApp() -> Bool {
+        guard let bundleID = currentAppBundleID() else { return false }
+        return blocksHotkeys(bundleID: bundleID)
     }
 
     func currentAppBundleID() -> String? {

@@ -512,18 +512,37 @@ struct MainView: View {
     }
 
     private var autoSwitchRow: some View {
-        Toggle(isOn: $viewModel.isAutoSwitchEnabled) {
-            HStack(spacing: Space.sm) {
-                Image(systemName: "character.cursor.ibeam")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(viewModel.isAutoSwitchEnabled ? theme.accent : theme.textMuted)
-                    .frame(width: 20)
-                Text("Автопереключение")
-                    .font(.appText(13, weight: .medium))
-                    .foregroundStyle(theme.textPrimary)
+        HStack(spacing: Space.sm) {
+            Toggle(isOn: $viewModel.isAutoSwitchEnabled) {
+                HStack(spacing: Space.sm) {
+                    Image(systemName: "character.cursor.ibeam")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(viewModel.isAutoSwitchEnabled ? theme.accent : theme.textMuted)
+                        .frame(width: 20)
+                    Text("Автопереключение")
+                        .font(.appText(13, weight: .medium))
+                        .foregroundStyle(theme.textPrimary)
+                }
+            }
+            .toggleStyle(.pill)
+
+            if let label = viewModel.timedPauseLabel {
+                Button(label) { viewModel.resumeTimedPause() }
+                    .buttonStyle(.borderless)
+                    .font(.appText(10, weight: .medium))
+                    .foregroundStyle(theme.accent)
+                    .help("Нажмите, чтобы возобновить сейчас")
+            } else if viewModel.isAutoSwitchEnabled {
+                Menu("Пауза") {
+                    Button("15 минут") { viewModel.pauseAutoSwitch(minutes: 15) }
+                    Button("1 час") { viewModel.pauseAutoSwitch(minutes: 60) }
+                    Button("2 часа") { viewModel.pauseAutoSwitch(minutes: 120) }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .font(.appText(10, weight: .medium))
             }
         }
-        .toggleStyle(.pill)
         .padding(.horizontal, Space.md)
         .padding(.vertical, 11)
         .settingsCard()
@@ -660,6 +679,25 @@ struct MainView: View {
                     )
                     rowDivider
                     SettingToggleRow(
+                        icon: "text.badge.plus",
+                        title: "Текстовые шаблоны",
+                        subtitle: "разворачивать короткие команды из окна «Исключения»",
+                        help: "Например, trigger «addr» может вставлять полный адрес. "
+                            + "Шаблоны хранятся только локально и поддерживают несколько строк.",
+                        isOn: $viewModel.isSnippetExpansionEnabled
+                    )
+                    rowDivider
+                    SettingToggleRow(
+                        icon: "textformat.size",
+                        title: "Умный регистр",
+                        subtitle: "ПРивет → Привет; заглавная после точки",
+                        help: "Исправляет случайно удержанный Shift в первых двух буквах и "
+                            + "делает заглавной следующее обычное слово после точки, ! или ?. "
+                            + "Выключено по умолчанию.",
+                        isOn: $viewModel.isSmartCaseEnabled
+                    )
+                    rowDivider
+                    SettingToggleRow(
                         icon: "textformat",
                         title: "Ёфикатор",
                         subtitle: "добавлять букву ё по правилам языка",
@@ -700,6 +738,7 @@ struct MainView: View {
                 .settingsCard()
             }
             logsSection
+            dataSection
         }
         .padding(.bottom, 4)
     }
@@ -752,6 +791,31 @@ struct MainView: View {
                 .padding(.horizontal, Space.md)
                 .padding(.vertical, Space.sm + 1)
             }
+            .settingsCard()
+        }
+    }
+
+    private var dataSection: some View {
+        VStack(alignment: .leading, spacing: Space.xs) {
+            SectionTitle("Резервная копия")
+            VStack(alignment: .leading, spacing: Space.xs + 2) {
+                HStack(spacing: Space.md) {
+                    Button("Экспортировать…") { viewModel.exportSettings() }
+                    Button("Импортировать…") { viewModel.importSettings() }
+                    Spacer()
+                }
+                .buttonStyle(.borderless)
+                .font(.appText(11, weight: .medium))
+                .foregroundStyle(theme.accent)
+
+                Text(viewModel.settingsBackupMessage
+                    ?? "Настройки, исключения и профили. Лицензия, логи и набранный текст не экспортируются.")
+                    .font(.appText(10))
+                    .foregroundStyle(theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, Space.md)
+            .padding(.vertical, Space.sm + 1)
             .settingsCard()
         }
     }

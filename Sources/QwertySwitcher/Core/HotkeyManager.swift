@@ -9,6 +9,7 @@ final class HotkeyManager {
     private let textReplacer: TextReplacer
     private let statsService: StatisticsService
     private let prefsService: PreferencesService
+    private let exceptionsService: ExceptionsService
     weak var keyboardMonitor: KeyboardMonitor?
     var switchUndoManager: SwitchUndoManager?
 
@@ -46,12 +47,14 @@ final class HotkeyManager {
 
     init(inputSourceManager: InputSourceManager, languageDetector: LanguageDetector,
          textReplacer: TextReplacer, statsService: StatisticsService,
-         prefsService: PreferencesService) {
+         prefsService: PreferencesService,
+         exceptionsService: ExceptionsService = ExceptionsService()) {
         self.inputSourceManager = inputSourceManager
         self.languageDetector = languageDetector
         self.textReplacer = textReplacer
         self.statsService = statsService
         self.prefsService = prefsService
+        self.exceptionsService = exceptionsService
     }
 
     /// Whether a modifier present on THIS flagsChanged event disqualifies the
@@ -118,7 +121,8 @@ final class HotkeyManager {
         }
 
         // Left+Right Shift combo — toggle auto-switch
-        if shiftState.bothDown && prefsService.isSplitShiftEnabled {
+        if shiftState.bothDown && prefsService.isSplitShiftEnabled
+            && !exceptionsService.areHotkeysBlockedForCurrentApp() {
             let comboLatency = CFAbsoluteTimeGetCurrent() - firstComboShiftTime
             guard comboLatency <= comboWindow else {
                 // The model thinks both keys are held, but the first one went
@@ -274,6 +278,7 @@ final class HotkeyManager {
         // may be mid-flight (backspacing/retyping) — switching the active
         // layout out from under it would corrupt that transaction.
         guard keyboardMonitor?.isPaused != true else { return }
+        guard !exceptionsService.areHotkeysBlockedForCurrentApp() else { return }
         let layouts = languageDetector.activeLayouts
         guard layouts.count >= 2, let current = inputSourceManager.currentLayout else { return }
 
@@ -315,6 +320,7 @@ final class HotkeyManager {
     private func handleDoubleShift() {
         DebugLog.shared.log("HK", "doubleShift triggered")
         guard keyboardMonitor?.isPaused != true else { return }
+        guard !exceptionsService.areHotkeysBlockedForCurrentApp() else { return }
 
         switch convertAXSelection() {
         case .converted:

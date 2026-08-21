@@ -5,6 +5,9 @@ struct ExceptionsView: View {
     @Environment(\.appTheme) private var theme
     @State private var newWord = ""
     @State private var selectedTab = 0
+    @State private var selectedApps: Set<String> = []
+    @State private var newSnippetTrigger = ""
+    @State private var newSnippetReplacement = ""
 
     var body: some View {
         ZStack {
@@ -36,6 +39,7 @@ struct ExceptionsView: View {
                 Text("Слова").tag(0)
                 Text("Приложения").tag(1)
                 Text("Авто-обучение").tag(2)
+                Text("Шаблоны").tag(3)
             }
             .pickerStyle(.segmented)
             .tint(theme.accent)
@@ -48,6 +52,7 @@ struct ExceptionsView: View {
                 case 0: wordExceptionsTab
                 case 1: appExceptionsTab
                 case 2: autoLearnedTab
+                case 3: snippetsTab
                 default: EmptyView()
                 }
             }
@@ -108,7 +113,7 @@ struct ExceptionsView: View {
     private var appExceptionsTab: some View {
         VStack(spacing: 8) {
             HStack {
-                Text("Автопереключение отключено для:")
+                Text("Профили приложений")
                     .font(.caption)
                     .foregroundColor(theme.textSecondary)
                 Spacer()
@@ -118,14 +123,84 @@ struct ExceptionsView: View {
             }
             .padding(.horizontal, 16)
 
+            HStack(spacing: 8) {
+                Button("Выбрать все") {
+                    selectedApps = Set(viewModel.appProfiles.keys)
+                }
+                .disabled(viewModel.appProfiles.isEmpty)
+
+                Menu("Для выбранных") {
+                    Button("Запретить автопереключение") {
+                        viewModel.setFlag(.autoSwitch, blocked: true, for: selectedApps)
+                    }
+                    Button("Запретить мгновенную коррекцию") {
+                        viewModel.setFlag(.instantCorrection, blocked: true, for: selectedApps)
+                    }
+                    Button("Запретить горячие клавиши") {
+                        viewModel.setFlag(.hotkeys, blocked: true, for: selectedApps)
+                    }
+                    Divider()
+                    Button("Разрешить все функции") {
+                        viewModel.allowAll(for: selectedApps)
+                        selectedApps.removeAll()
+                    }
+                    Button("Удалить профили") {
+                        viewModel.removeApps(selectedApps)
+                        selectedApps.removeAll()
+                    }
+                }
+                .disabled(selectedApps.isEmpty)
+
+                Spacer()
+                Text("A · I · H")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(theme.textSecondary)
+                    .help("A — автопереключение, I — мгновенная коррекция, H — горячие клавиши")
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
+            .padding(.horizontal, 16)
+
             List {
-                ForEach(viewModel.appExceptions.sorted(), id: \.self) { bundleID in
+                ForEach(viewModel.appProfiles.keys.sorted(), id: \.self) { bundleID in
+                    let profile = viewModel.appProfiles[bundleID] ?? AppProfile()
                     HStack {
+                        Button {
+                            if selectedApps.contains(bundleID) {
+                                selectedApps.remove(bundleID)
+                            } else {
+                                selectedApps.insert(bundleID)
+                            }
+                        } label: {
+                            Image(systemName: selectedApps.contains(bundleID) ? "checkmark.square.fill" : "square")
+                                .foregroundColor(selectedApps.contains(bundleID) ? theme.accent : theme.textSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Выбрать профиль \(bundleID)")
+
                         Text(bundleID)
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(theme.textPrimary)
+                            .lineLimit(1)
                         Spacer()
-                        Button(action: { withAnimation { viewModel.removeApp(bundleID) } }) {
+
+                        ProfileFlagButton(
+                            label: "A", help: "Запретить автопереключение",
+                            isBlocked: profile.blockAutoSwitch
+                        ) { viewModel.toggleFlag(.autoSwitch, for: bundleID) }
+                        ProfileFlagButton(
+                            label: "I", help: "Запретить мгновенную коррекцию",
+                            isBlocked: profile.blockInstantCorrection
+                        ) { viewModel.toggleFlag(.instantCorrection, for: bundleID) }
+                        ProfileFlagButton(
+                            label: "H", help: "Запретить горячие клавиши",
+                            isBlocked: profile.blockHotkeys
+                        ) { viewModel.toggleFlag(.hotkeys, for: bundleID) }
+
+                        Button(action: {
+                            withAnimation { viewModel.removeApp(bundleID) }
+                            selectedApps.remove(bundleID)
+                        }) {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(theme.textSecondary.opacity(0.5))
                         }
@@ -137,7 +212,7 @@ struct ExceptionsView: View {
             }
             .scrollContentBackground(.hidden)
 
-            Text("\(viewModel.appExceptions.count) приложений в исключениях")
+            Text("\(viewModel.appProfiles.count) профилей · цветная буква означает запрет")
                 .font(.caption)
                 .foregroundColor(theme.textSecondary)
                 .padding(.bottom, 8)
@@ -205,20 +280,125 @@ struct ExceptionsView: View {
             }
         }
     }
+
+    private var snippetsTab: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                TextField("Команда, например addr", text: $newSnippetTrigger)
+                    .textFieldStyle(.roundedBorder)
+                Button("Добавить") {
+                    if viewModel.addSnippet(
+                        trigger: newSnippetTrigger, replacement: newSnippetReplacement
+                    ) {
+                        newSnippetTrigger = ""
+                        newSnippetReplacement = ""
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(theme.accent)
+                .disabled(
+                    newSnippetTrigger.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || newSnippetReplacement.isEmpty
+                )
+            }
+            .padding(.horizontal, 16)
+
+            TextEditor(text: $newSnippetReplacement)
+                .font(.system(size: 12))
+                .foregroundColor(theme.textPrimary)
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .frame(height: 72)
+                .background(theme.bgInput)
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .overlay(alignment: .topLeading) {
+                    if newSnippetReplacement.isEmpty {
+                        Text("Текст замены; можно несколько строк")
+                            .font(.system(size: 12))
+                            .foregroundColor(theme.textSecondary.opacity(0.65))
+                            .padding(11)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .padding(.horizontal, 16)
+
+            List {
+                ForEach(viewModel.snippets.keys.sorted(), id: \.self) { trigger in
+                    HStack(spacing: 8) {
+                        Text(trigger)
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(theme.accentDeep)
+                        Image(systemName: "arrow.right")
+                            .font(.caption)
+                            .foregroundColor(theme.textSecondary.opacity(0.5))
+                        Text(viewModel.snippets[trigger] ?? "")
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.textSecondary)
+                            .lineLimit(2)
+                        Spacer()
+                        Button(action: { viewModel.removeSnippet(trigger) }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(theme.textSecondary.opacity(0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Удалить шаблон \(trigger)")
+                    }
+                    .listRowBackground(theme.bgCard)
+                }
+            }
+            .scrollContentBackground(.hidden)
+
+            Text("Срабатывает после пробела или знака · данные остаются на Mac")
+                .font(.caption)
+                .foregroundColor(theme.textSecondary)
+                .padding(.bottom, 8)
+        }
+    }
+}
+
+private struct ProfileFlagButton: View {
+    @Environment(\.appTheme) private var theme
+    let label: String
+    let help: String
+    let isBlocked: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundColor(isBlocked ? theme.accentDeep : theme.textSecondary)
+                .frame(width: 20, height: 20)
+                .background(isBlocked ? theme.accent.opacity(0.16) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
+enum AppProfileFlag {
+    case autoSwitch
+    case instantCorrection
+    case hotkeys
 }
 
 final class ExceptionsViewModel: ObservableObject {
     private let exceptionsService: ExceptionsService
+    private let snippetService: SnippetService
 
     @Published var wordExceptions: Set<String>
-    @Published var appExceptions: Set<String>
+    @Published var appProfiles: [String: AppProfile]
     @Published var autoLearned: [String: String]
+    @Published var snippets: [String: String]
 
-    init(exceptionsService: ExceptionsService) {
+    init(exceptionsService: ExceptionsService, snippetService: SnippetService = SnippetService()) {
         self.exceptionsService = exceptionsService
+        self.snippetService = snippetService
         self.wordExceptions = exceptionsService.wordExceptions
-        self.appExceptions = exceptionsService.appExceptions
+        self.appProfiles = exceptionsService.appProfiles
         self.autoLearned = exceptionsService.autoLearned
+        self.snippets = snippetService.snippets
     }
 
     func addWord(_ word: String) {
@@ -234,13 +414,47 @@ final class ExceptionsViewModel: ObservableObject {
     func addCurrentApp() {
         if let bundleID = exceptionsService.currentAppBundleID() {
             exceptionsService.addAppException(bundleID)
-            appExceptions = exceptionsService.appExceptions
+            appProfiles = exceptionsService.appProfiles
         }
     }
 
     func removeApp(_ bundleID: String) {
-        exceptionsService.removeAppException(bundleID)
-        appExceptions = exceptionsService.appExceptions
+        exceptionsService.removeProfiles(for: [bundleID])
+        appProfiles = exceptionsService.appProfiles
+    }
+
+    func removeApps(_ bundleIDs: Set<String>) {
+        exceptionsService.removeProfiles(for: bundleIDs)
+        appProfiles = exceptionsService.appProfiles
+    }
+
+    func toggleFlag(_ flag: AppProfileFlag, for bundleID: String) {
+        var profile = appProfiles[bundleID] ?? AppProfile()
+        switch flag {
+        case .autoSwitch: profile.blockAutoSwitch.toggle()
+        case .instantCorrection: profile.blockInstantCorrection.toggle()
+        case .hotkeys: profile.blockHotkeys.toggle()
+        }
+        exceptionsService.setProfile(profile, for: bundleID)
+        appProfiles = exceptionsService.appProfiles
+    }
+
+    func setFlag(_ flag: AppProfileFlag, blocked: Bool, for bundleIDs: Set<String>) {
+        for bundleID in bundleIDs {
+            var profile = appProfiles[bundleID] ?? AppProfile()
+            switch flag {
+            case .autoSwitch: profile.blockAutoSwitch = blocked
+            case .instantCorrection: profile.blockInstantCorrection = blocked
+            case .hotkeys: profile.blockHotkeys = blocked
+            }
+            exceptionsService.setProfile(profile, for: bundleID)
+        }
+        appProfiles = exceptionsService.appProfiles
+    }
+
+    func allowAll(for bundleIDs: Set<String>) {
+        exceptionsService.removeProfiles(for: bundleIDs)
+        appProfiles = exceptionsService.appProfiles
     }
 
     func clearAutoLearned() {
@@ -251,5 +465,19 @@ final class ExceptionsViewModel: ObservableObject {
     func removeAutoLearned(_ key: String) {
         exceptionsService.removeAutoLearned(key)
         autoLearned = exceptionsService.autoLearned
+    }
+
+    @discardableResult
+    func addSnippet(trigger: String, replacement: String) -> Bool {
+        guard snippetService.setSnippet(trigger: trigger, replacement: replacement) else {
+            return false
+        }
+        snippets = snippetService.snippets
+        return true
+    }
+
+    func removeSnippet(_ trigger: String) {
+        snippetService.removeSnippet(trigger: trigger)
+        snippets = snippetService.snippets
     }
 }

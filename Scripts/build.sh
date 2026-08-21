@@ -61,6 +61,8 @@ fi
 
 echo "=== Building $PRODUCT_NAME (mode: $MODE) ==="
 
+bash "$PROJECT_DIR/Scripts/release-secret-scan.sh" "$PROJECT_DIR/Resources"
+
 # ── 1. Compile Swift ──
 echo "[1/4] Compiling Swift..."
 cd "$PROJECT_DIR"
@@ -103,6 +105,8 @@ if [ -d "$PROJECT_DIR/Resources/Fonts" ]; then
     mkdir -p "$APP_BUNDLE/Contents/Resources/Fonts"
     cp "$PROJECT_DIR/Resources/Fonts/"*.ttf "$APP_BUNDLE/Contents/Resources/Fonts/" 2>/dev/null || true
 fi
+
+bash "$PROJECT_DIR/Scripts/release-secret-scan.sh" "$APP_BUNDLE"
 
 
 # ── 3. Code sign ──

@@ -6,7 +6,7 @@
 - bundle ID: `tech.sasha.qwertyswitch`;
 - внутренний Swift executable: `QwertySwitcher` (переименован из `SashaSwitcher` 03.08.2026; это не видно пользователю);
 - signing identity: "SashaSwitcher Developer" (не переименовывать — смена сбросит TCC);
-- версия после ребрендинга: `0.3.0` (`CFBundleVersion = 3`).
+- текущая версия: `0.7.0` (`CFBundleVersion = 31`).
 
 ## 1. Локальная beta
 
@@ -68,9 +68,10 @@ xcrun notarytool store-credentials notarize-sasha \
 App Store-сборка подготовлена как отдельный sandboxed вариант:
 
 - `Resources/QwertySwitcher.appstore.entitlements` включает только App Sandbox;
-- сеть, Apple Events, JIT и debug-entitlements не запрашиваются;
-- `PrivacyInfo.xcprivacy` объявляет отсутствие tracking/collection и использование
-  UserDefaults для функций приложения;
+- сеть и доступ только к выбранным пользователем JSON-файлам запрашиваются;
+  Apple Events, JIT и debug-entitlements не запрашиваются;
+- `PrivacyInfo.xcprivacy` объявляет отсутствие tracking, использование
+  UserDefaults для функций приложения и передачу device ID для лицензирования;
 - CGEventTap по-прежнему защищён системными разрешениями Accessibility/Input
   Monitoring.
 

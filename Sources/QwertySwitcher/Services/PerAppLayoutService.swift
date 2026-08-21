@@ -21,6 +21,14 @@ final class PerAppLayoutService {
         set { defaults.set(newValue, forKey: key + ".remembered") }
     }
 
+    var rememberedLayouts: [String: String] { remembered }
+
+    func replaceRememberedLayouts(_ layouts: [String: String]) {
+        remembered = layouts
+        lastRememberedApp = nil
+        lastRememberedLayout = nil
+    }
+
     var isEnabled: Bool {
         get { defaults.object(forKey: key + ".enabled") as? Bool ?? false }
         set { defaults.set(newValue, forKey: key + ".enabled") }

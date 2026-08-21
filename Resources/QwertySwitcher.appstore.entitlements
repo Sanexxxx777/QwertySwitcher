@@ -6,7 +6,9 @@
     <true/>
     <!-- App Sandbox blocks all outbound network by default; the license
          check needs this to reach the license server. -->
-    <key>com.apple.security.network.client</key>
-    <true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
 </dict>
 </plist>

@@ -9,8 +9,8 @@ correct layout automatically.
 
 It's a from-scratch macOS analog of Punto Switcher / Caramba Switcher: menu-bar
 only (no Dock icon). All typing analysis is 100% local — keystrokes never
-leave the Mac; the only network call is a license check that sends an
-anonymous device id (14-day free trial, then a subscription key).
+leave the Mac; the only network call is a license check that sends a stable
+Mac identifier and the app version (14-day free trial, then a subscription key).
 
 ## How it works
 
@@ -31,6 +31,13 @@ anonymous device id (14-day free trial, then a subscription key).
 - A ring buffer plus a short-lived "last completed word" slot let the Double
   Shift hotkey convert a word you already finished typing, even after
   auto-correct already fired on it.
+- Per-app profiles independently disable auto-switching, instant correction,
+  or hotkeys. Auto-switching can also be paused for 15, 60, or 120 minutes.
+- Local text snippets expand after a word boundary, and optional smart case
+  fixes accidental `ПРивет` capitalization and sentence starts.
+- Settings, exceptions, app profiles, learned pairs, snippets, and per-app
+  layouts can be exported to a validated, versioned JSON backup. License and
+  diagnostic state are deliberately excluded.
 
 Full pipeline, scoring formula and file layout: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
@@ -83,11 +90,17 @@ Code signing, notarization and the App Store distribution path (blocked today
 by `CGEventTap` being incompatible with the App Sandbox) are documented in
 [`docs/SIGNING.md`](docs/SIGNING.md).
 
+The KeyRay comparison is documented as a static-only clean-room capsule in
+[`docs/KEYRAY_CLEANROOM.md`](docs/KEYRAY_CLEANROOM.md). The voice-input decision
+and release gates are in [`docs/VOICE_SPIKE.md`](docs/VOICE_SPIKE.md).
+
 ## Privacy
 
 All typing analysis runs locally: no analytics, no keystroke logging. The
-license check transmits only an anonymous hardware id and the app version. `PrivacyService` audits `UserDefaults` on launch for anything that
-looks like it could be leaking typed text.
+license check transmits a stable Mac identifier and the app version for trial,
+activation, and subscription validation. It never transmits typed text.
+`PrivacyService` audits `UserDefaults` on launch for anything that looks like
+it could be leaking typed text.
 
 ## About this repo
 

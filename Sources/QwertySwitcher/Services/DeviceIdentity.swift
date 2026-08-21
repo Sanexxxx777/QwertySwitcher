@@ -43,8 +43,8 @@ enum KeychainStore {
     }
 }
 
-/// Stable per-Mac identifier used by the license layer. Never sent anywhere
-/// except as an opaque hwid string to the license server.
+/// Stable per-Mac identifier used by the license layer and sent to the
+/// Qwerty Switcher license server as `hwid`.
 enum DeviceIdentity {
     private static let fallbackService = AppIdentity.bundleIdentifier + ".deviceid"
     private static let fallbackAccount = "fallback-uuid"
