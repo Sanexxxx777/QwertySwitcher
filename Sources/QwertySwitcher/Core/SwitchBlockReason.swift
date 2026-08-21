@@ -13,6 +13,18 @@ enum SwitchBlockReason: Equatable {
     case interceptionStopped
     case autoSwitchDisabled
     case subscriptionExpired
+    /// The 0.7.0 per-app profile (`ExceptionsService.AppProfile`) blocks
+    /// something for the frontmost app specifically — everything else (tap,
+    /// global toggle, license) is fine. Without this case the badge/menu/
+    /// tooltip went silent here (`.none`) even though nothing actually
+    /// happens while typing in that app, which reads as "broken" rather than
+    /// "configured off for this app".
+    case blockedForApp(AppProfileBlockKind, appName: String?)
+
+    enum AppProfileBlockKind: Equatable {
+        case autoSwitch
+        case instantCorrectionOnly
+    }
 
     /// Human-readable Russian line. `nil` for `.none` — "everything is fine"
     /// is expressed by the ABSENCE of a line, never a reassuring filler.
@@ -31,6 +43,14 @@ enum SwitchBlockReason: Equatable {
             return "Автопереключение выключено"
         case .subscriptionExpired:
             return "Подписка истекла"
+        case .blockedForApp(let kind, let appName):
+            let app = appName ?? "этого приложения"
+            switch kind {
+            case .autoSwitch:
+                return "Автопереключение выключено для \(app)"
+            case .instantCorrectionOnly:
+                return "Мгновенная коррекция выключена для \(app)"
+            }
         }
     }
 
@@ -40,12 +60,18 @@ enum SwitchBlockReason: Equatable {
     /// (missing permissions / event tap down) always wins over a soft one
     /// (auto-switch toggled off / license lapsed), and secure input — a
     /// deliberately transient, self-resolving pause — is checked first since
-    /// it needs no user action at all.
+    /// it needs no user action at all. The per-app profile block is checked
+    /// LAST and only reported when nothing more global already explains the
+    /// silence — no point saying "off for Terminal" when auto-switch is off
+    /// everywhere anyway. `autoSwitch` outranks `instantCorrectionOnly`
+    /// within the app-profile case itself: a full block is the more complete
+    /// explanation of "nothing happens here".
     static func resolve(
         health: EventTapHealth,
         isAutoSwitchEnabled: Bool,
         isEntitled: Bool,
-        secureInputAppName: String?
+        secureInputAppName: String?,
+        appProfileBlock: (kind: AppProfileBlockKind, appName: String?)? = nil
     ) -> SwitchBlockReason {
         switch health {
         case .secureInput:
@@ -59,6 +85,9 @@ enum SwitchBlockReason: Equatable {
         }
         guard isAutoSwitchEnabled else { return .autoSwitchDisabled }
         guard isEntitled else { return .subscriptionExpired }
+        if let appProfileBlock {
+            return .blockedForApp(appProfileBlock.kind, appName: appProfileBlock.appName)
+        }
         return .none
     }
 }

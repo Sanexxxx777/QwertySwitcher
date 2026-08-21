@@ -93,14 +93,28 @@ final class StatusBarController {
     /// the menu's diagnostic line and the tooltip. The app-name refinement
     /// for secure input is only looked up when actually needed — this runs
     /// on notification-driven refreshes (≤ every ~500ms via the health
-    /// timer), never from the keystroke hot path.
+    /// timer), never from the keystroke hot path. Same budget covers the
+    /// per-app profile check below: without it, an app with `blockAutoSwitch`
+    /// or `blockInstantCorrection` set left this badge on `.none` — silence
+    /// that reads as "broken" rather than "configured off for this app".
     private func currentBlockReason() -> SwitchBlockReason {
         SwitchBlockReason.resolve(
             health: keyboardMonitor.health,
             isAutoSwitchEnabled: prefsService.isAutoSwitchEnabled,
             isEntitled: LicenseService.shared.isEntitled,
-            secureInputAppName: keyboardMonitor.health == .secureInput ? secureInputAppName() : nil
+            secureInputAppName: keyboardMonitor.health == .secureInput ? secureInputAppName() : nil,
+            appProfileBlock: appProfileBlock()
         )
+    }
+
+    private func appProfileBlock() -> (kind: SwitchBlockReason.AppProfileBlockKind, appName: String?)? {
+        if exceptionsService.isCurrentAppExcepted() {
+            return (.autoSwitch, exceptionsService.currentAppName())
+        }
+        if exceptionsService.isInstantCorrectionBlockedForCurrentApp() {
+            return (.instantCorrectionOnly, exceptionsService.currentAppName())
+        }
+        return nil
     }
 
     /// Best-effort label for whichever app is holding secure input —

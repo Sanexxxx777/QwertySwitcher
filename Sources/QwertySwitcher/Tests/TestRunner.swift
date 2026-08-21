@@ -5210,6 +5210,48 @@ enum SwitchBlockReasonTests {
             "Нет разрешения Универсального доступа",
             "missing permissions outranks auto-switch-off AND expired license together"
         )
+
+        // Per-app profile block (0.7.0's per-app profiles otherwise leave
+        // this badge silent while the app itself is effectively disabled).
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                appProfileBlock: (.autoSwitch, "Terminal")
+            ).title,
+            "Автопереключение выключено для Terminal",
+            "app-profile auto-switch block names the app"
+        )
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                appProfileBlock: (.autoSwitch, nil)
+            ).title,
+            "Автопереключение выключено для этого приложения",
+            "unknown app name falls back to generic wording, same as secure input"
+        )
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                appProfileBlock: (.instantCorrectionOnly, "Ghostty")
+            ).title,
+            "Мгновенная коррекция выключена для Ghostty",
+            "instant-correction-only block is worded as a partial restriction, not a full stop"
+        )
+        TestRunner.assertNil(
+            SwitchBlockReason.resolve(
+                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                appProfileBlock: nil
+            ).title,
+            "no app-profile block passed → still '.none', unchanged from before 0.7.0"
+        )
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .running, isAutoSwitchEnabled: false, isEntitled: true, secureInputAppName: nil,
+                appProfileBlock: (.autoSwitch, "Terminal")
+            ).title,
+            "Автопереключение выключено",
+            "global auto-switch-off outranks an app-profile block — no point naming one app when it's off everywhere"
+        )
     }
 }
 
