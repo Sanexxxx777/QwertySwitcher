@@ -9,6 +9,7 @@ final class MainViewModel: ObservableObject {
     private let keyboardMonitor: KeyboardMonitor
     private let autoStartService: AutoStartService
     private let permissionsService = PermissionsService()
+    private var isSyncingAutoSwitch = false
     var onOpenAbout: (() -> Void)?
     var onOpenExceptions: (() -> Void)?
     var onOpenLicense: (() -> Void)?
@@ -21,6 +22,14 @@ final class MainViewModel: ObservableObject {
     @Published var isAutoSwitchEnabled: Bool {
         didSet {
             prefsService.isAutoSwitchEnabled = isAutoSwitchEnabled
+            // `onAutoSwitchUpdated` below reassigns this same property to sync
+            // it after a toggle that came from the menu or the L+R Shift combo
+            // — without the guard, that reassignment would fire `didSet` again
+            // and mislabel someone else's toggle as "(window)" in the log,
+            // defeating the point of tagging the source at all.
+            if !isSyncingAutoSwitch {
+                DebugLog.shared.log("UI", "auto-switch → \(isAutoSwitchEnabled ? "ON" : "OFF") (window)")
+            }
             NotificationCenter.default.post(name: .autoSwitchToggled, object: nil)
         }
     }
@@ -140,7 +149,9 @@ final class MainViewModel: ObservableObject {
         self.keyboardMonitor = keyboardMonitor
         self.autoStartService = autoStartService
 
+        isSyncingAutoSwitch = true
         self.isAutoSwitchEnabled = prefsService.isAutoSwitchEnabled
+        isSyncingAutoSwitch = false
         self.isSplitShiftEnabled = prefsService.isSplitShiftEnabled
         self.isPasteNoFormatEnabled = prefsService.isPasteNoFormatEnabled
         self.isYoficatorEnabled = prefsService.isYoficatorEnabled
@@ -192,7 +203,11 @@ final class MainViewModel: ObservableObject {
     @objc private func onAutoSwitchUpdated() {
         DispatchQueue.main.async {
             let value = self.prefsService.isAutoSwitchEnabled
-            if self.isAutoSwitchEnabled != value { self.isAutoSwitchEnabled = value }
+            if self.isAutoSwitchEnabled != value {
+                self.isSyncingAutoSwitch = true
+                self.isAutoSwitchEnabled = value
+                self.isSyncingAutoSwitch = false
+            }
         }
     }
 

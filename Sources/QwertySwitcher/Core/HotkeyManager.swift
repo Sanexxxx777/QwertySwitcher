@@ -19,6 +19,23 @@ final class HotkeyManager {
     private var anyKeyBetweenShifts = false
     private var anyModifierWithShift = false
 
+    // L+R Shift combo — 21.08.2026 field incident: the combo fired on a
+    // lone Shift press hours after the last real one, silently disabling
+    // auto-switch for up to 2.5h (debug.log 15:31→18:03). `ShiftStateTracker`
+    // has no ground truth for which physical key is down — it only flips a
+    // flag per keycode transition, so ONE missed keyUp (secure input, a
+    // Cmd+Tab/Space switch swallowing the release) latches it forever, and
+    // the next solo Shift reads as "both held". `firstComboShiftTime` is
+    // tracked separately from `shiftDownTime` (which the `.down` branch below
+    // overwrites before this check runs, so by the time `bothDown` is true it
+    // already holds the SECOND shift's time, not the first's).
+    private var firstComboShiftTime: CFAbsoluteTime = 0
+    private let comboWindow: CFAbsoluteTime = 0.5 // 500ms — real two-hand taps land well under this; a stuck model doesn't.
+    /// Diagnostic-only: ms since the previous shift-down, logged on every
+    /// transition so a stuck model is visible in the field log (`shift:` /
+    /// `combo rejected:`) instead of only inferred from `auto-switch →` gaps.
+    private var lastShiftDownLogTime: CFAbsoluteTime = 0
+
     // Double-tap detection
     private var pendingSingleShift: DispatchWorkItem?
     private let doubleTapWindow: CFAbsoluteTime = 0.45  // 450ms — give user more room for 2nd tap
@@ -59,6 +76,7 @@ final class HotkeyManager {
         let shiftTransition = shiftState.transition(
             keycode: keycode, aggregateShiftPressed: shiftPressed
         )
+        logShiftTransition(keycode: keycode, transition: shiftTransition, flags: flags)
         if shiftTransition == .suppressedRelease { return }
 
         // Only track "modifier appeared WHILE a shift is held" — otherwise a
@@ -91,11 +109,34 @@ final class HotkeyManager {
             if !wasAlreadyHeld {
                 anyKeyBetweenShifts = false
                 anyModifierWithShift = Self.modifierDisqualifiesShiftTap(flags)
+                // First half of a potential combo — see `firstComboShiftTime`
+                // doc above. `shiftDownTime` isn't reusable here: it gets
+                // overwritten by the SECOND shift's own `.down` a few lines up
+                // by the time the combo check below runs.
+                firstComboShiftTime = shiftDownTime
             }
         }
 
         // Left+Right Shift combo — toggle auto-switch
         if shiftState.bothDown && prefsService.isSplitShiftEnabled {
+            let comboLatency = CFAbsoluteTimeGetCurrent() - firstComboShiftTime
+            guard comboLatency <= comboWindow else {
+                // The model thinks both keys are held, but the first one went
+                // down too long ago to be a real two-hand tap — almost
+                // certainly a stuck flag from an earlier missed keyUp (field
+                // incident 21.08, see doc above). Skip the toggle; leave
+                // `shiftState` untouched so it self-corrects on the next real
+                // up/down for either key instead of risking a second wrong
+                // guess (e.g. `suppressComboReleases()` would misattribute a
+                // future genuine press of the stuck key as its own release).
+                DebugLog.shared.log(
+                    "HK",
+                    "combo rejected: dt=\(Int((comboLatency * 1000).rounded()))ms"
+                        + " > \(Int(comboWindow * 1000))ms",
+                    level: .verbose
+                )
+                return
+            }
             pendingSingleShift?.cancel()
             pendingSingleShift = nil
             shiftTapResolver.cancel()
@@ -114,6 +155,7 @@ final class HotkeyManager {
             // qualify as taps (holdDuration would look ~0 otherwise and fire a
             // ghost singleShift ~450ms later that flips the layout).
             shiftDownTime = 0
+            firstComboShiftTime = 0
             return
         }
 
@@ -192,6 +234,37 @@ final class HotkeyManager {
                     + " — likely blocked on AX/clipboard IPC to the focused app"
             )
         }
+    }
+
+    /// Field diagnostic for the 21.08 stuck-combo incident: `ShiftStateTracker`
+    /// had no visibility at all before this — every conclusion about it came
+    /// from inference, not a log line. `model` is `shiftState.leftDown/rightDown`
+    /// AFTER this transition applied; `bits` are the raw device-dependent
+    /// flag bits (NX_DEVICE{L,R}SHIFTKEYMASK-ish) straight off the event —
+    /// logged so a future fix can check they actually reflect physical state
+    /// on this macOS before anything depends on them. Only real shift-key
+    /// events reach here: `transition()` returns `.none` immediately for any
+    /// other keycode, so this can't double the per-keystroke log volume.
+    private func logShiftTransition(keycode: UInt16, transition: ShiftStateTracker.Transition, flags: CGEventFlags) {
+        guard transition != .none else { return }
+        let model = (shiftState.leftDown ? "L" : "-") + (shiftState.rightDown ? "R" : "-")
+        let bits = String(format: "0x%02x", flags.rawValue & 0xff)
+        let t: String
+        switch transition {
+        case .down: t = "down"
+        case .up: t = "up"
+        case .suppressedRelease: t = "suppressed"
+        case .none: t = "none"
+        }
+        var dtSuffix = ""
+        if transition == .down {
+            if lastShiftDownLogTime > 0 {
+                let dt = CFAbsoluteTimeGetCurrent() - lastShiftDownLogTime
+                dtSuffix = " dt=\(Int((dt * 1000).rounded()))ms"
+            }
+            lastShiftDownLogTime = CFAbsoluteTimeGetCurrent()
+        }
+        DebugLog.shared.log("HK", "shift: kc=\(keycode) t=\(t) model=\(model) bits=\(bits)\(dtSuffix)", level: .verbose)
     }
 
     // MARK: - Single Shift: switch layout
@@ -460,7 +533,7 @@ final class HotkeyManager {
 
         // No NSLog here: it is a synchronous IPC hop to logd and it duplicated
         // the DebugLog line below (DebugLog writes asynchronously).
-        DebugLog.shared.log("HK", "auto-switch → \(enabled ? "ON" : "OFF")")
+        DebugLog.shared.log("HK", "auto-switch → \(enabled ? "ON" : "OFF") (combo)")
     }
 
     // MARK: - Cmd+Shift+V
