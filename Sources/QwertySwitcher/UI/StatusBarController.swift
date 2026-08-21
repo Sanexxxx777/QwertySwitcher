@@ -377,6 +377,8 @@ final class StatusBarController {
 
     @objc private func toggleAutoSwitch(_ sender: NSMenuItem) {
         prefsService.isAutoSwitchEnabled.toggle()
+        let enabled = prefsService.isAutoSwitchEnabled
+        DebugLog.shared.log("UI", "auto-switch → \(enabled ? "ON" : "OFF") (menu)")
         // Title/state ("Автопереключение: …") is recomputed by rebuildMenu(), which
         // the .autoSwitchToggled observer already triggers via refreshMenu().
         NotificationCenter.default.post(name: .autoSwitchToggled, object: nil)
