@@ -155,17 +155,6 @@ final class ExceptionsService {
         appProfiles[bundleID]?.blockHotkeys ?? false
     }
 
-    func isCurrentAppExcepted() -> Bool {
-        guard let frontApp = NSWorkspace.shared.frontmostApplication,
-              let bundleID = frontApp.bundleIdentifier else { return false }
-        return blocksAutoSwitch(bundleID: bundleID)
-    }
-
-    func isInstantCorrectionBlockedForCurrentApp() -> Bool {
-        guard let bundleID = currentAppBundleID() else { return false }
-        return blocksInstantCorrection(bundleID: bundleID)
-    }
-
     func areHotkeysBlockedForCurrentApp() -> Bool {
         guard let bundleID = currentAppBundleID() else { return false }
         return blocksHotkeys(bundleID: bundleID)
