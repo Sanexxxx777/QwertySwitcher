@@ -33,6 +33,24 @@ final class InstantCorrectionAnalyzer {
         let correctedWord: String
     }
 
+    /// Why `evaluate` did NOT fire, for verbose-log observability only (field
+    /// defect 21.08.2026: the log recorded every instant SUCCESS but nothing
+    /// about a refusal, so "instant fires rarely" was undiagnosable — every
+    /// silent word looked identical from outside). One case per existing
+    /// early-return in `evaluate`, plus two gates that live in
+    /// `KeyboardMonitor` and short-circuit before `evaluate` is even called.
+    enum SilenceReason: String {
+        case shouldSkip            // currentText empty or LanguageDetector.shouldSkip
+        case junkGate              // own reading already passes JunkMeter.isClean
+        case ownIsWord             // current text itself scores as a real/prefix word
+        case mixedScript           // candidate conversion produced mixed-script garbage
+        case candidateNotValidated // no candidate has a dictionary/prefix hit (wordLevel==0)
+        case belowFloor            // best candidate's total score < candidateFloor
+        case belowMargin           // best candidate didn't clear current text by `margin`
+        case alreadyCorrected      // KeyboardMonitor: this word was already instant-corrected
+        case ambiguousKeyRecent    // KeyboardMonitor: alphabet-ambiguous key too recent
+    }
+
     private let dictionary: WordDictionary
     private let ngramAnalyzer = NGramAnalyzer()
     private let wordFrequency = WordFrequency()
@@ -51,11 +69,11 @@ final class InstantCorrectionAnalyzer {
         currentLayout: KeyboardLayout,
         otherLayouts: [KeyboardLayout],
         convert: (KeyboardLayout) -> String
-    ) -> Result? {
-        guard keystrokes.count >= Self.minLength else { return nil }
+    ) -> (result: Result?, silence: SilenceReason?) {
+        guard keystrokes.count >= Self.minLength else { return (nil, nil) }
 
         let currentText = convert(currentLayout)
-        guard !currentText.isEmpty, !LanguageDetector.shouldSkip(currentText) else { return nil }
+        guard !currentText.isEmpty, !LanguageDetector.shouldSkip(currentText) else { return (nil, .shouldSkip) }
 
         // Junk-gate (field defect 19.08.2026, measured
         // Scripts/research/instant_junk_gate_sim.py `first_instant_fire_gated`):
@@ -74,7 +92,7 @@ final class InstantCorrectionAnalyzer {
         // silent — never blocking on a guess.
         if let bigrams = dictionary.possibleBigrams(language: currentLayout.languageCode),
            JunkMeter.isClean(currentText, language: currentLayout.languageCode, possibleBigrams: bigrams) {
-            return nil
+            return (nil, .junkGate)
         }
 
         let current = combinedScore(currentText, language: currentLayout.languageCode)
@@ -83,28 +101,54 @@ final class InstantCorrectionAnalyzer {
         // actually a legitimate morphological pattern, like ъ+я in Russian)
         // would otherwise drag the total score down. Confirmed real text is
         // never "impossible", no matter what the bigram table thinks.
-        guard current.wordLevel == 0, current.total <= Self.currentCeiling else { return nil }
+        guard current.wordLevel == 0, current.total <= Self.currentCeiling else { return (nil, .ownIsWord) }
 
         var best: (layout: KeyboardLayout, word: String, score: Int)?
+        // Tracks the rejected candidate that got FURTHEST — ranked by its raw
+        // score, not by which guard tripped — so the reported silence reason
+        // reflects the closest near-miss when multiple other layouts exist
+        // (normally exactly one). A candidate thrown out for mixed script
+        // never had a real score, so it ranks lowest (0) and never masks a
+        // more informative rejection from another layout.
+        var bestSilence: (reason: SilenceReason, score: Int)?
+        func recordSilence(_ reason: SilenceReason, score: Int) {
+            if bestSilence == nil || score > bestSilence!.score {
+                bestSilence = (reason, score)
+            }
+        }
 
         for layout in otherLayouts where layout.id != currentLayout.id {
             let candidateText = convert(layout)
-            guard !candidateText.isEmpty, !LanguageDetector.isMixedScript(candidateText) else { continue }
+            guard !candidateText.isEmpty, !LanguageDetector.isMixedScript(candidateText) else {
+                recordSilence(.mixedScript, score: 0)
+                continue
+            }
 
             let candidate = combinedScore(candidateText, language: layout.languageCode)
             // Must be independently validated (dictionary / spellcheck / a
             // real prefix) — a raw n-gram score alone is never enough.
-            guard candidate.wordLevel > 0 else { continue }
-            guard candidate.total >= Self.candidateFloor else { continue }
-            guard candidate.total - current.total >= Self.margin else { continue }
+            guard candidate.wordLevel > 0 else {
+                recordSilence(.candidateNotValidated, score: candidate.total)
+                continue
+            }
+            guard candidate.total >= Self.candidateFloor else {
+                recordSilence(.belowFloor, score: candidate.total)
+                continue
+            }
+            guard candidate.total - current.total >= Self.margin else {
+                recordSilence(.belowMargin, score: candidate.total)
+                continue
+            }
 
             if best == nil || candidate.total > best!.score {
                 best = (layout, candidateText, candidate.total)
             }
         }
 
-        guard let winner = best else { return nil }
-        return Result(layout: winner.layout, correctedWord: winner.word)
+        guard let winner = best else {
+            return (nil, bestSilence?.reason ?? .candidateNotValidated)
+        }
+        return (Result(layout: winner.layout, correctedWord: winner.word), nil)
     }
 
     // MARK: - Scoring (Dictionary(+SpellCheck confirm) / bundled-Prefix + N-gram + Frequency)
