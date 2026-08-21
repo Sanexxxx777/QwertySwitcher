@@ -175,19 +175,32 @@ final class KeyboardMonitor {
     /// `lastAmbiguousKeyIndex` whenever a new word starts.
     private var lastLoggedInstantSilence: InstantCorrectionAnalyzer.SilenceReason?
 
-    /// True while an alphabet-ambiguous key is still within the last 2
-    /// keystrokes of the buffered word — i.e. fewer than 2 plain letters
-    /// have followed it since. Instant correction has its own, looser
-    /// scorer than the word-boundary path, so while the ambiguous key's
-    /// alphabet is still genuinely unsettled ("key." reads as the real
-    /// Russian word "луню" the instant "." lands), it must wait for the
-    /// boundary. Once 2 more letters have been typed, the run is
-    /// overwhelmingly one alphabet or the other and instant correction may
-    /// resume — unlike a sticky flag, this stays accurate for a key that
-    /// happens to sit in the MIDDLE of a long word.
+    /// True while an alphabet-ambiguous key is still within the last
+    /// keystroke of the buffered word — i.e. no plain letter has followed
+    /// it yet. Instant correction has its own, looser scorer than the
+    /// word-boundary path, so right as the ambiguous key lands ("key."
+    /// reads as the real Russian word "луню" the instant "." lands), it
+    /// must wait for the boundary. Once even 1 more letter has been typed,
+    /// the run is overwhelmingly one alphabet or the other and instant
+    /// correction may resume — unlike a sticky flag, this stays accurate
+    /// for a key that happens to sit in the MIDDLE of a long word.
+    ///
+    /// Narrowed from "last 2 keystrokes" to "last 1" on 21.08.2026: the
+    /// real field corpus (Scripts/research/kc_trace_words.py, 26h trace)
+    /// found this gate was the 2nd-largest cause (31% of samples, after the
+    /// junk-gate's 62%) of instant staying silent on words the boundary
+    /// path then had to fix. The 1-key width was measured to add ZERO new
+    /// false positives (instant_minlen_sim.py measures 1/1b/2/2b unchanged
+    /// at minLength=4; instant_junk_gate_sim.py's FP-protection measures
+    /// 3/4 unchanged) while improving en→ru recall (measure [2]: 2257→2227
+    /// words newly fire instantly instead of waiting for the boundary, all
+    /// of them recoverable there anyway — zero hard loss either way). The
+    /// "key." test (TestRunner.swift) still passes: the ambiguous key
+    /// itself is always its own most-recent keystroke (diff=0), which
+    /// blocks under any window ≥1.
     private var ambiguousKeyRecent: Bool {
         guard let idx = lastAmbiguousKeyIndex else { return false }
-        return buffer.count - idx < 2
+        return buffer.count - idx < 1
     }
 
 

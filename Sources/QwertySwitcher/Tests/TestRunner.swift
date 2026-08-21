@@ -3246,16 +3246,16 @@ enum KeyboardMonitorIntegrationTests {
             )
         }
 
-        // --- ambiguousKeyRecent unblocks mid-word once 2 plain letters follow
+        // --- ambiguousKeyRecent unblocks mid-word once 1 plain letter follows
+        // (narrowed from 2 on 21.08.2026 — see the property's doc comment)
         // "работа" = "hf,jnf" on EN keys — the ambiguous ',' ('б') sits at
-        // index 3. Instant correction stays gated through indices 3 and 4
-        // (the ambiguous key is still within the last 2 keystrokes) and is
-        // free to fire again at index 5 ("hf,jn" = "работ", a confident
-        // dictionary prefix) — i.e. before the word is even finished, let
-        // alone before a word boundary. A sticky whole-run flag (the old
-        // `runHasAmbiguousKey`) would keep this blocked all the way to the
-        // end of the word instead.
-        TestRunner.section("Instant correction unblocks past an ambiguous key once 2 letters follow — \"работа\"")
+        // index 3. Instant correction stays gated at index 3 (the ambiguous
+        // key IS the last keystroke) and is free to fire again at index 4
+        // ("hf,j" = "рабо", a confident dictionary prefix) — i.e. before the
+        // word is even finished, let alone before a word boundary. A sticky
+        // whole-run flag (the old `runHasAmbiguousKey`) would keep this
+        // blocked all the way to the end of the word instead.
+        TestRunner.section("Instant correction unblocks past an ambiguous key once 1 letter follows — \"работа\"")
         inputSources.switchTo(enLayout)
         do {
             let h = harness(autoSwitch: true)

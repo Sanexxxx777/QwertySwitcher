@@ -70,16 +70,22 @@ def convert(keys, layout):
 
 def ambiguous_recent(keys_prefix):
     """KeyboardMonitor.ambiguousKeyRecent: true while an alphabet-ambiguous
-    physical key is still within the last 2 keystrokes of the run typed so
+    physical key is still within the last keystroke of the run typed so
     far (lastAmbiguousKeyIndex bookkeeping, reset per word — keys_prefix here
-    IS the whole word-so-far, so no separate reset needed)."""
+    IS the whole word-so-far, so no separate reset needed). Narrowed from
+    "last 2 keystrokes" to "last 1" on 21.08.2026 — the real field corpus
+    (Scripts/research/kc_trace_words.py, 26h trace) found ambiguousKeyRecent
+    was the 2nd-largest cause (31%, after the junk-gate's 62%) of instant
+    staying silent on words the boundary path then had to fix; the 2-key
+    window was measured to add zero new false positives at the 1-key width
+    (see this file's own measures 1/1b/2/2b + instant_junk_gate_sim.py)."""
     last_idx = None
     for i, k in enumerate(keys_prefix, start=1):
         if k in AMBIGUOUS_KEYS:
             last_idx = i
     if last_idx is None:
         return False
-    return (len(keys_prefix) - last_idx) < 2
+    return (len(keys_prefix) - last_idx) < 1
 
 
 # ============================================================================
