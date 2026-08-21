@@ -28,11 +28,12 @@ final class LanguageDetector {
     /// `NSWorkspace.didActivateApplicationNotification` (event-driven, off
     /// the CGEventTap callback) rather than querying `NSWorkspace` inside
     /// `detect()` itself — `detect()` runs synchronously in the callback and
-    /// AppKit calls there are exactly what the hot-path ban exists for
-    /// (before 0.7.0, `canAutoCorrect` did a synchronous frontmost-app read
-    /// on every word boundary via the since-removed `isCurrentAppExcepted` —
-    /// this cache is what replaced it there too). Seeded once at init (a
-    /// one-time, non-hot-path read) so the very first word
+    /// AppKit calls there are exactly what the hot-path ban exists for (before
+    /// 0.7.0, `canAutoCorrect` did a synchronous frontmost-app read on every
+    /// word boundary via `ExceptionsService.isCurrentAppExcepted` — this
+    /// cache is what replaced it there; that method now only runs from
+    /// `StatusBarController`'s non-hot-path status refresh). Seeded once at
+    /// init (a one-time, non-hot-path read) so the very first word
     /// of a session — before any activation notification has fired — is
     /// still covered.
     private var currentAppBundleID: String?

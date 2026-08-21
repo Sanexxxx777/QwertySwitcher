@@ -160,6 +160,21 @@ final class ExceptionsService {
         return blocksHotkeys(bundleID: bundleID)
     }
 
+    /// Non-hot-path only: `StatusBarController.currentBlockReason()` calls
+    /// this from its ~500ms health-timer refresh to explain an otherwise
+    /// silent `.none` — never from `KeyboardMonitor`'s per-keystroke path,
+    /// which already has its own cached `activeAppBundleID` for this check.
+    func isCurrentAppExcepted() -> Bool {
+        guard let bundleID = currentAppBundleID() else { return false }
+        return blocksAutoSwitch(bundleID: bundleID)
+    }
+
+    /// Same non-hot-path contract as `isCurrentAppExcepted()` above.
+    func isInstantCorrectionBlockedForCurrentApp() -> Bool {
+        guard let bundleID = currentAppBundleID() else { return false }
+        return blocksInstantCorrection(bundleID: bundleID)
+    }
+
     func currentAppBundleID() -> String? {
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier
     }
