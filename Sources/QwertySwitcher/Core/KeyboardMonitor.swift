@@ -167,6 +167,14 @@ final class KeyboardMonitor {
     /// latched for the whole word — see `ambiguousKeyRecent`.
     private var lastAmbiguousKeyIndex: Int?
 
+    /// De-dup key for `logInstantSilence` — the same silence reason is
+    /// written at most once per word, right when it FIRST applies, instead
+    /// of once per keystroke. Without this a 12-letter internal word would
+    /// write the same `gate=ownIsWord` line 9 times, roughly doubling the
+    /// log's write rate for zero extra signal. Reset alongside
+    /// `lastAmbiguousKeyIndex` whenever a new word starts.
+    private var lastLoggedInstantSilence: InstantCorrectionAnalyzer.SilenceReason?
+
     /// True while an alphabet-ambiguous key is still within the last 2
     /// keystrokes of the buffered word — i.e. fewer than 2 plain letters
     /// have followed it since. Instant correction has its own, looser
@@ -598,6 +606,7 @@ final class KeyboardMonitor {
             if buffer.isEmpty {
                 lastCompletedWord = nil
                 lastAmbiguousKeyIndex = nil
+                lastLoggedInstantSilence = nil
                 instantCorrectionGate.startNewWord()
             }
             buffer.append(keycode, flags: flags)
@@ -611,9 +620,14 @@ final class KeyboardMonitor {
             // followed the ambiguous key — by then its alphabet is settled and
             // it no longer needs to poison the rest of the word. Pure letter
             // runs behave exactly as they did before.
-            if canAutoCorrect && prefsService.isInstantCorrectionEnabled
-                && !instantCorrectionGate.wasCorrected && !ambiguousKeyRecent {
-                tryInstantCorrection(triggerEvent: event)
+            if canAutoCorrect && prefsService.isInstantCorrectionEnabled {
+                if instantCorrectionGate.wasCorrected {
+                    logInstantSilence(.alreadyCorrected, len: buffer.count)
+                } else if ambiguousKeyRecent {
+                    logInstantSilence(.ambiguousKeyRecent, len: buffer.count)
+                } else {
+                    tryInstantCorrection(triggerEvent: event)
+                }
             }
         } else if InputBuffer.isNumberOrSpecial(keycode) {
             switchUndoManager.invalidate()
@@ -695,6 +709,22 @@ final class KeyboardMonitor {
         pendingLeadingSymbols.removeAll()
     }
 
+    /// Verbose-only observability for why instant correction did NOT fire on
+    /// the word currently being typed (field defect 21.08.2026: the log
+    /// recorded every instant SUCCESS but nothing about a refusal, so "instant
+    /// fires rarely" was undiagnosable from the log alone — every silent word
+    /// looked identical from outside). `DebugLog` self-gates on "Подробный
+    /// лог"; the de-dup here additionally caps it at one line per word rather
+    /// than one per keystroke. Reasons below `minLength` are not logged —
+    /// they mean the word simply hasn't reached the point of being eligible
+    /// yet, not that something held it back.
+    private func logInstantSilence(_ reason: InstantCorrectionAnalyzer.SilenceReason?, len: Int) {
+        guard let reason, len >= InstantCorrectionAnalyzer.minLength else { return }
+        guard lastLoggedInstantSilence != reason else { return }
+        lastLoggedInstantSilence = reason
+        DebugLog.shared.log("KM", "instant silent: gate=\(reason.rawValue) len=\(len)", level: .verbose)
+    }
+
     /// Evaluate the word buffered so far for an instant (mid-word) correction.
     /// Unlike `processCurrentWord`, this runs on every buffered letter once the
     /// buffer reaches `InstantCorrectionAnalyzer.minLength` — no word boundary
@@ -711,14 +741,18 @@ final class KeyboardMonitor {
         guard layouts.count >= 2, layouts.contains(where: { $0.id == currentLayout.id }) else { return }
         let otherLayouts = layouts.filter { $0.id != currentLayout.id }
 
-        guard let result = instantCorrectionAnalyzer.evaluate(
+        let evaluation = instantCorrectionAnalyzer.evaluate(
             keystrokes: keystrokes,
             currentLayout: currentLayout,
             otherLayouts: otherLayouts,
             convert: { [languageDetector] layout in
                 languageDetector.inputSourceManager.convertKeystrokes(keystrokes, toLayout: layout)
             }
-        ) else { return }
+        )
+        guard let result = evaluation.result else {
+            logInstantSilence(evaluation.silence, len: keystrokes.count)
+            return
+        }
 
         if exceptionsService.isWordExcepted(result.correctedWord) {
             DebugLog.shared.log("KM", "instant skip: word exception match")

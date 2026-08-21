@@ -1847,7 +1847,7 @@ private enum InstantCorrectionFixtures {
             let result = analyzer.evaluate(
                 keystrokes: prefix, currentLayout: wrongLayout, otherLayouts: otherLayouts,
                 convert: { layout in inputSources.convertKeystrokes(prefix, toLayout: layout) }
-            )
+            ).result
             if result != nil { return length }
         }
         return nil
@@ -1938,7 +1938,7 @@ enum InstantCorrectionAnalyzerTests {
             let result = analyzer.evaluate(
                 keystrokes: short, currentLayout: enLayout, otherLayouts: [ruLayout],
                 convert: { layout in inputSources.convertKeystrokes(short, toLayout: layout) }
-            )
+            ).result
             TestRunner.assertNil(result, "shorter than MIN_INSTANT never fires")
         }
     }
@@ -2066,7 +2066,7 @@ enum InstantCorrectionJunkGateTests {
             let result = analyzer.evaluate(
                 keystrokes: prefix, currentLayout: ruLayout, otherLayouts: [enLayout],
                 convert: { layout in inputSources.convertKeystrokes(prefix, toLayout: layout) }
-            )
+            ).result
             TestRunner.assertNil(
                 result,
                 "own-clean OOV prefix 'еуст' (typo of 'пусть') no longer misfires instant correction to EN"
@@ -2770,7 +2770,7 @@ enum LeadingSymbolRunGuardTests {
             return analyzer.evaluate(
                 keystrokes: prefix, currentLayout: wrongLayout, otherLayouts: [otherLayout],
                 convert: { layout in inputSources.convertKeystrokes(prefix, toLayout: layout) }
-            )
+            ).result
         }
 
         // Positive: the letter core, typed in the WRONG layout, must still be
