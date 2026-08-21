@@ -56,7 +56,7 @@ struct AboutView: View {
 
                 Rectangle().fill(theme.border).frame(height: 1).padding(.horizontal, 40)
 
-                    Text("Весь ввод обрабатывается локально и никогда не покидает Mac.\nЛицензионная проверка отправляет только анонимный идентификатор устройства.")
+                    Text("Весь ввод обрабатывается локально и никогда не покидает Mac.\nЛицензионная проверка отправляет идентификатор Mac и версию приложения.")
                     .font(.appText(11))
                     .foregroundColor(theme.textMuted)
                     .multilineTextAlignment(.center)

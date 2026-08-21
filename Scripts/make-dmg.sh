@@ -63,6 +63,7 @@ DMG_IDENTIFIER="tech.sasha.qwertyswitch.dmg"
 echo "=== Building universal $PRODUCT_NAME (v$VERSION, mode: $MODE) ==="
 
 cd "$PROJECT_DIR"
+bash "$PROJECT_DIR/Scripts/release-secret-scan.sh" "$PROJECT_DIR/Resources"
 
 # ── 1. Compile both architectures ──
 echo "[1/6] Compiling arm64..."
@@ -101,6 +102,8 @@ if [ -d "$PROJECT_DIR/Resources/Fonts" ]; then
     mkdir -p "$APP_BUNDLE/Contents/Resources/Fonts"
     cp "$PROJECT_DIR/Resources/Fonts/"*.ttf "$APP_BUNDLE/Contents/Resources/Fonts/" 2>/dev/null || true
 fi
+
+bash "$PROJECT_DIR/Scripts/release-secret-scan.sh" "$APP_BUNDLE"
 
 
 # ── 3. Code sign ──
@@ -184,6 +187,8 @@ Qwerty Switcher — установка
 
 Приятного использования!
 README_EOF
+
+bash "$PROJECT_DIR/Scripts/release-secret-scan.sh" "$DMG_STAGE"
 
 # Window dressing: backdrop with the drag arrow, icons placed on it, no
 # toolbar or sidebar. Generated from vectors on every build (Scripts/

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 final class MainViewModel: ObservableObject {
     private let statsService: StatisticsService
@@ -8,6 +9,8 @@ final class MainViewModel: ObservableObject {
     private let perAppLayoutService: PerAppLayoutService
     private let keyboardMonitor: KeyboardMonitor
     private let autoStartService: AutoStartService
+    private let timedPauseService: TimedPauseService
+    private let settingsBackupService: SettingsBackupService
     private let permissionsService = PermissionsService()
     private var isSyncingAutoSwitch = false
     var onOpenAbout: (() -> Void)?
@@ -18,6 +21,7 @@ final class MainViewModel: ObservableObject {
     @Published var shiftSwitchCount: Int = 0
     @Published var doubleShiftCount: Int = 0
     @Published var eventTapHealth: EventTapHealth
+    @Published var settingsBackupMessage: String?
 
     @Published var isAutoSwitchEnabled: Bool {
         didSet {
@@ -27,9 +31,9 @@ final class MainViewModel: ObservableObject {
             // — without the guard, that reassignment would fire `didSet` again
             // and mislabel someone else's toggle as "(window)" in the log,
             // defeating the point of tagging the source at all.
-            if !isSyncingAutoSwitch {
-                DebugLog.shared.log("UI", "auto-switch → \(isAutoSwitchEnabled ? "ON" : "OFF") (window)")
-            }
+            guard !isSyncingAutoSwitch else { return }
+            timedPauseService.cancelScheduledResume()
+            DebugLog.shared.log("UI", "auto-switch → \(isAutoSwitchEnabled ? "ON" : "OFF") (window)")
             NotificationCenter.default.post(name: .autoSwitchToggled, object: nil)
         }
     }
@@ -62,6 +66,12 @@ final class MainViewModel: ObservableObject {
     }
     @Published var isInstantCorrectionEnabled: Bool {
         didSet { prefsService.isInstantCorrectionEnabled = isInstantCorrectionEnabled }
+    }
+    @Published var isSnippetExpansionEnabled: Bool {
+        didSet { prefsService.isSnippetExpansionEnabled = isSnippetExpansionEnabled }
+    }
+    @Published var isSmartCaseEnabled: Bool {
+        didSet { prefsService.isSmartCaseEnabled = isSmartCaseEnabled }
     }
     @Published var isVerboseLogEnabled: Bool {
         didSet { prefsService.isVerboseLogEnabled = isVerboseLogEnabled }
@@ -141,13 +151,17 @@ final class MainViewModel: ObservableObject {
          inputSourceManager: InputSourceManager,
          perAppLayoutService: PerAppLayoutService,
          keyboardMonitor: KeyboardMonitor,
-         autoStartService: AutoStartService) {
+         autoStartService: AutoStartService,
+         timedPauseService: TimedPauseService,
+         settingsBackupService: SettingsBackupService) {
         self.statsService = statsService
         self.prefsService = prefsService
         self.inputSourceManager = inputSourceManager
         self.perAppLayoutService = perAppLayoutService
         self.keyboardMonitor = keyboardMonitor
         self.autoStartService = autoStartService
+        self.timedPauseService = timedPauseService
+        self.settingsBackupService = settingsBackupService
 
         isSyncingAutoSwitch = true
         self.isAutoSwitchEnabled = prefsService.isAutoSwitchEnabled
@@ -162,6 +176,8 @@ final class MainViewModel: ObservableObject {
         self.isDoubleShiftEnabled = prefsService.isDoubleShiftEnabled
         self.isCapsLockSwitchEnabled = prefsService.isCapsLockSwitchEnabled
         self.isInstantCorrectionEnabled = prefsService.isInstantCorrectionEnabled
+        self.isSnippetExpansionEnabled = prefsService.isSnippetExpansionEnabled
+        self.isSmartCaseEnabled = prefsService.isSmartCaseEnabled
         self.isVerboseLogEnabled = prefsService.isVerboseLogEnabled
         self.isPerAppLayoutEnabled = perAppLayoutService.isEnabled
         self.isAutoStartEnabled = autoStartService.isEnabled
@@ -176,6 +192,7 @@ final class MainViewModel: ObservableObject {
             ?? inputSourceManager.supportedLayouts.first(where: \.isRussian)?.id
             ?? ""
         self.eventTapHealth = keyboardMonitor.health
+        self.settingsBackupMessage = nil
         refreshStats()
 
         NotificationCenter.default.addObserver(
@@ -228,6 +245,77 @@ final class MainViewModel: ObservableObject {
     /// choices in Settings without needing to trigger a real layout switch.
     func previewLayoutSound() {
         SoundService.shared.previewLayoutSound(named: layoutSoundName)
+    }
+
+    var timedPauseLabel: String? { timedPauseService.resumeLabel() }
+
+    func pauseAutoSwitch(minutes: Int) {
+        timedPauseService.pause(for: TimeInterval(minutes * 60))
+    }
+
+    func resumeTimedPause() {
+        timedPauseService.resumeNow()
+    }
+
+    func exportSettings() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "QwertySwitcher-settings.json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try settingsBackupService.encodedBackup().write(to: url, options: .atomic)
+            settingsBackupMessage = "Резервная копия сохранена"
+        } catch {
+            settingsBackupMessage = "Ошибка экспорта: \(error.localizedDescription)"
+        }
+    }
+
+    func importSettings() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = try Data(contentsOf: url)
+            _ = try settingsBackupService.decodeAndValidate(data)
+            let confirmation = NSAlert()
+            confirmation.messageText = "Импортировать настройки?"
+            confirmation.informativeText = "Текущие настройки, исключения и профили приложений будут заменены. Лицензия и логи не изменятся."
+            confirmation.addButton(withTitle: "Импортировать")
+            confirmation.addButton(withTitle: "Отмена")
+            guard confirmation.runModal() == .alertFirstButtonReturn else { return }
+            try settingsBackupService.importBackup(data)
+            reloadSettingsFromServices()
+            settingsBackupMessage = "Настройки импортированы"
+        } catch {
+            settingsBackupMessage = "Ошибка импорта: \(error.localizedDescription)"
+        }
+    }
+
+    private func reloadSettingsFromServices() {
+        isSyncingAutoSwitch = true
+        isAutoSwitchEnabled = prefsService.isAutoSwitchEnabled
+        isSyncingAutoSwitch = false
+        isSplitShiftEnabled = prefsService.isSplitShiftEnabled
+        isPasteNoFormatEnabled = prefsService.isPasteNoFormatEnabled
+        isYoficatorEnabled = prefsService.isYoficatorEnabled
+        isSoundEnabled = prefsService.isSoundEnabled
+        isLayoutSoundEnabled = prefsService.isLayoutSoundEnabled
+        layoutSoundName = prefsService.layoutSoundName
+        isSingleShiftEnabled = prefsService.isSingleShiftEnabled
+        isDoubleShiftEnabled = prefsService.isDoubleShiftEnabled
+        isCapsLockSwitchEnabled = prefsService.isCapsLockSwitchEnabled
+        isInstantCorrectionEnabled = prefsService.isInstantCorrectionEnabled
+        isSnippetExpansionEnabled = prefsService.isSnippetExpansionEnabled
+        isSmartCaseEnabled = prefsService.isSmartCaseEnabled
+        isVerboseLogEnabled = prefsService.isVerboseLogEnabled
+        isPerAppLayoutEnabled = perAppLayoutService.isEnabled
+        themePreference = prefsService.themePreference
+        let activeLayouts = inputSourceManager.resolvedActiveLayouts(preferredIDs: prefsService.activeLayoutIDs)
+        selectedEnglishLayoutID = activeLayouts.first(where: \.isEnglish)?.id ?? selectedEnglishLayoutID
+        selectedRussianLayoutID = activeLayouts.first(where: \.isRussian)?.id ?? selectedRussianLayoutID
     }
 
     func resetStats() {

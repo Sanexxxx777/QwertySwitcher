@@ -86,6 +86,7 @@ swiftc \
     Sources/QwertySwitcher/Core/SecureInputDetector.swift \
     Sources/QwertySwitcher/Core/ShiftStateTracker.swift \
     Sources/QwertySwitcher/Core/ShiftTapResolver.swift \
+    Sources/QwertySwitcher/Core/SmartCaseNormalizer.swift \
     Sources/QwertySwitcher/Core/SwitchBlockReason.swift \
     Sources/QwertySwitcher/Core/SyntheticEventMarker.swift \
     Sources/QwertySwitcher/Core/TextReplacer.swift \
@@ -104,8 +105,11 @@ swiftc \
     Sources/QwertySwitcher/Services/PreferencesService.swift \
     Sources/QwertySwitcher/Services/PrivacyService.swift \
     Sources/QwertySwitcher/Services/SoundService.swift \
+    Sources/QwertySwitcher/Services/SnippetService.swift \
+    Sources/QwertySwitcher/Services/SettingsBackupService.swift \
     Sources/QwertySwitcher/Services/StatisticsService.swift \
     Sources/QwertySwitcher/Services/StorageMigrationService.swift \
+    Sources/QwertySwitcher/Services/TimedPauseService.swift \
     Sources/QwertySwitcher/Services/YoficatorService.swift \
     Sources/QwertySwitcher/UI/DockIconController.swift \
     Sources/QwertySwitcher/Tests/TestRunner.swift

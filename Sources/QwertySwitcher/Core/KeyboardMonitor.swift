@@ -47,9 +47,12 @@ final class KeyboardMonitor {
     private let switchUndoManager: SwitchUndoManager
     private let perAppLayoutService: PerAppLayoutService
     private let instantCorrectionAnalyzer: InstantCorrectionAnalyzer
+    private let snippetService: SnippetService
+    private var sentenceStartTracker = SentenceStartTracker()
     private var instantCorrectionGate = InstantCorrectionGate()
     private let secureInputDetector: SecureInputDetector
     private let permissionsService = PermissionsService()
+    private var activeAppBundleID: String?
     var hotkeyManager: HotkeyManager?
     private(set) var isRunning = false
     private(set) var health: EventTapHealth = .stopped {
@@ -209,6 +212,7 @@ final class KeyboardMonitor {
          exceptionsService: ExceptionsService, yoficatorService: YoficatorService,
          switchUndoManager: SwitchUndoManager, perAppLayoutService: PerAppLayoutService,
          instantCorrectionAnalyzer: InstantCorrectionAnalyzer,
+         snippetService: SnippetService = SnippetService(),
          // Defaults to the real system check — only the headless integration
          // harness in TestRunner.swift overrides it, to stay deterministic
          // regardless of whatever secure-input state the Mac running the
@@ -225,6 +229,9 @@ final class KeyboardMonitor {
         self.switchUndoManager = switchUndoManager
         self.perAppLayoutService = perAppLayoutService
         self.instantCorrectionAnalyzer = instantCorrectionAnalyzer
+        self.snippetService = snippetService
+        self.activeAppBundleID = CommandLine.arguments.contains("--test")
+            ? nil : NSWorkspace.shared.frontmostApplication?.bundleIdentifier
 
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(appDidActivate),
@@ -241,7 +248,12 @@ final class KeyboardMonitor {
         NotificationCenter.default.removeObserver(self)
     }
 
-    @objc private func appDidActivate() {
+    @objc private func appDidActivate(_ notification: Notification) {
+        if !CommandLine.arguments.contains("--test") {
+            activeAppBundleID = (
+                notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            )?.bundleIdentifier
+        }
         invalidateEditingContext(reason: "app-activated")
     }
 
@@ -259,6 +271,7 @@ final class KeyboardMonitor {
         runKeystrokes.removeAll()
         lastCompletedWord = nil
         instantCorrectionGate.reset()
+        sentenceStartTracker.reset()
         languageDetector.resetContext()
     }
 
@@ -391,17 +404,20 @@ final class KeyboardMonitor {
         let keycode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         if type == .flagsChanged && keycode == 57 {
             return prefsService.isCapsLockSwitchEnabled
+                && !exceptionsService.areHotkeysBlockedForCurrentApp()
         }
         guard type == .keyDown else { return false }
         let flags = event.flags
         if flags.contains(.maskCommand) && flags.contains(.maskShift) && flags.contains(.maskAlternate) && keycode == 9 {
             return prefsService.isPasteNoFormatEnabled
+                && !exceptionsService.areHotkeysBlockedForCurrentApp()
                 && NSPasteboard.general.string(forType: .string) != nil
         }
         return flags.contains(.maskCommand)
             && flags.contains(.maskAlternate)
             && keycode == 6
             && switchUndoManager.canUndo
+            && !exceptionsService.areHotkeysBlockedForCurrentApp()
     }
 
     /// Internal (not fileprivate) so the headless integration-test harness in
@@ -459,6 +475,10 @@ final class KeyboardMonitor {
             // `HotkeyManager`, arming a phantom Double/Single Shift on the
             // NEXT shift-tap within its 450ms window.
             hotkeyManager?.markKeyPressed()
+            if exceptionsService.areHotkeysBlockedForCurrentApp() {
+                invalidateEditingContext(reason: "blocked-app-hotkey")
+                return
+            }
             var started = false
             if prefsService.isPasteNoFormatEnabled {
                 isPaused = true
@@ -485,7 +505,8 @@ final class KeyboardMonitor {
         // Cmd+Option+Z → undo last switch
         // (Plain Cmd+Z is left to the host app to avoid conflicting with its own undo stack.)
         if flags.contains(.maskCommand) && flags.contains(.maskAlternate)
-            && keycode == 6 && switchUndoManager.canUndo {
+            && keycode == 6 && switchUndoManager.canUndo
+            && !exceptionsService.areHotkeysBlockedForCurrentApp() {
             _ = undoLastCorrection()
             return
         }
@@ -533,9 +554,10 @@ final class KeyboardMonitor {
             }
             return
         }
+        let appProfile = activeAppBundleID.flatMap { exceptionsService.profile(for: $0) }
         let canAutoCorrect = prefsService.isAutoSwitchEnabled
             && LicenseService.shared.isEntitled
-            && !exceptionsService.isCurrentAppExcepted()
+            && appProfile?.blockAutoSwitch != true
 
         if InputBuffer.isDeleteKey(keycode) {
             if !pendingLeadingSymbols.isEmpty || lastCompletedWord != nil {
@@ -633,7 +655,8 @@ final class KeyboardMonitor {
             // followed the ambiguous key — by then its alphabet is settled and
             // it no longer needs to poison the rest of the word. Pure letter
             // runs behave exactly as they did before.
-            if canAutoCorrect && prefsService.isInstantCorrectionEnabled {
+            if canAutoCorrect && prefsService.isInstantCorrectionEnabled
+                && appProfile?.blockInstantCorrection != true {
                 if instantCorrectionGate.wasCorrected {
                     logInstantSilence(.alreadyCorrected, len: buffer.count)
                 } else if ambiguousKeyRecent {
@@ -690,6 +713,7 @@ final class KeyboardMonitor {
         triggerKeystroke: BufferedKeystroke? = nil
     ) {
         let captured = buffer.currentWord()
+        let capitalizeSentenceStart = captured.isEmpty ? false : sentenceStartTracker.consumeForWord()
         if captured.isEmpty { switchUndoManager.invalidate() }
         let retyped = languageDetector.lastConvertedWord(keystrokes: captured) ?? ""
         let learned = autoLearnTracker.confirmRetype(word: retyped, trailing: trailing)
@@ -701,10 +725,33 @@ final class KeyboardMonitor {
             DebugLog.shared.log("AUTOLEARN", "exact retype confirmed")
         }
 
-        let replacementStarted = canAutoCorrect
+        let snippetStarted = learned == nil
+            && prefsService.isSnippetExpansionEnabled
+            && LicenseService.shared.isEntitled
+            && pendingLeadingSymbols.isEmpty
+            && !captured.isEmpty
+            && expandSnippet(keystrokes: captured, trigger: trailing, triggerEvent: triggerEvent)
+
+        let languageReplacementStarted = !snippetStarted && canAutoCorrect
             && learned == nil
             && !captured.isEmpty
-            && processCurrentWord(trigger: trailing, triggerKeystroke: triggerKeystroke, triggerEvent: triggerEvent)
+            && processCurrentWord(
+                trigger: trailing, triggerKeystroke: triggerKeystroke, triggerEvent: triggerEvent
+            )
+        let smartCaseStarted = !snippetStarted
+            && !languageReplacementStarted
+            && canAutoCorrect
+            && learned == nil
+            && prefsService.isSmartCaseEnabled
+            && !captured.isEmpty
+            && applySmartCase(
+                keystrokes: captured, trigger: trailing, triggerEvent: triggerEvent,
+                capitalizeSentenceStart: capitalizeSentenceStart
+            )
+        let replacementStarted = snippetStarted || languageReplacementStarted || smartCaseStarted
+        // Empty boundaries can follow punctuation ("Hello." then Space). They
+        // must not clear the sentence-start intent before the next word arrives.
+        if !captured.isEmpty { sentenceStartTracker.observeBoundary(trailing) }
 
         if replacementStarted {
             lastCompletedWord = nil
@@ -720,6 +767,85 @@ final class KeyboardMonitor {
         }
         buffer.clear()
         pendingLeadingSymbols.removeAll()
+    }
+
+    @discardableResult
+    private func expandSnippet(
+        keystrokes: [BufferedKeystroke], trigger: String?, triggerEvent: CGEvent
+    ) -> Bool {
+        guard !isPaused, let trigger,
+              let layout = languageDetector.inputSourceManager.currentLayout else { return false }
+        let typed = languageDetector.inputSourceManager.convertKeystrokes(keystrokes, toLayout: layout)
+        guard let replacement = snippetService.replacement(for: typed), replacement != typed else {
+            return false
+        }
+
+        isPaused = true
+        suppressCurrentEvent = true
+        pendingUserEvents.enqueueFront(QueuedUserEvent(type: .keyDown, event: triggerEvent))
+        textReplacer.replaceCurrentWord(
+            length: keystrokes.count,
+            replacement: replacement,
+            targetLayout: layout,
+            trailing: trigger,
+            trailingAlreadyOnScreen: false
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.pendingUserEvents.discardFront()
+                DebugLog.shared.log(
+                    "SNIPPET",
+                    "expanded triggerLen=\(typed.count) replacementLen=\(replacement.count)"
+                )
+            case .layoutSwitchFailed:
+                DebugLog.shared.log("SNIPPET", "expansion aborted: layout verification failed")
+            case .cancelled:
+                DebugLog.shared.log("SNIPPET", "expansion cancelled: editing context changed")
+            }
+            self.finishReplacement()
+        }
+        return true
+    }
+
+    @discardableResult
+    private func applySmartCase(
+        keystrokes: [BufferedKeystroke], trigger: String?, triggerEvent: CGEvent,
+        capitalizeSentenceStart: Bool
+    ) -> Bool {
+        guard !isPaused, let trigger,
+              let layout = languageDetector.inputSourceManager.currentLayout else { return false }
+        let typed = languageDetector.inputSourceManager.convertKeystrokes(keystrokes, toLayout: layout)
+        guard !exceptionsService.isWordExcepted(typed),
+              let replacement = SmartCaseNormalizer.normalized(
+                  typed, capitalizeSentenceStart: capitalizeSentenceStart
+              ) else { return false }
+
+        isPaused = true
+        suppressCurrentEvent = true
+        pendingUserEvents.enqueueFront(QueuedUserEvent(type: .keyDown, event: triggerEvent))
+        textReplacer.replaceCurrentWord(
+            length: keystrokes.count,
+            replacement: replacement,
+            targetLayout: layout,
+            trailing: trigger,
+            trailingAlreadyOnScreen: false
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.pendingUserEvents.discardFront()
+                DebugLog.shared.log(
+                    "SMARTCASE", "normalized len=\(typed.count) sentenceStart=\(capitalizeSentenceStart)"
+                )
+            case .layoutSwitchFailed:
+                DebugLog.shared.log("SMARTCASE", "normalization aborted: layout verification failed")
+            case .cancelled:
+                DebugLog.shared.log("SMARTCASE", "normalization cancelled: editing context changed")
+            }
+            self.finishReplacement()
+        }
+        return true
     }
 
     /// Verbose-only observability for why instant correction did NOT fire on
@@ -907,6 +1033,7 @@ final class KeyboardMonitor {
         autoLearnTracker.cancel()
         switchUndoManager.invalidate()
         instantCorrectionGate.reset()
+        sentenceStartTracker.reset()
         languageDetector.resetContext()
     }
 

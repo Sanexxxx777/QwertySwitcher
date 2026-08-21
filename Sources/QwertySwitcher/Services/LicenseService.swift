@@ -347,15 +347,13 @@ final class LicenseService: ObservableObject {
     private let hwid: String
     private let appVersion: String
     private let publicKeyHex: String
+    private let baseURL: URL
     private var state: LicenseState?
     private var checkInTimer: Timer?
 
-    var baseURL: URL {
-        let defaultURLString = "https://backend-test.45-82-95-142.nip.io:8443/qsw"
-        let key = AppIdentity.keyPrefix + "licenseServerURL"
-        let stored = UserDefaults.standard.string(forKey: key)
-        return URL(string: stored ?? defaultURLString) ?? URL(string: defaultURLString)!
-    }
+    private static let productionBaseURL = URL(
+        string: "https://backend-test.45-82-95-142.nip.io:8443/qsw"
+    )!
 
     init(
         clock: LicenseClock = SystemClock(),
@@ -363,7 +361,8 @@ final class LicenseService: ObservableObject {
         store: LicenseStateStore = FileLicenseStore(),
         hwid: String = DeviceIdentity.hardwareUUID(),
         appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev",
-        publicKeyHex: String = LicenseService.embeddedPublicKeyHex
+        publicKeyHex: String = LicenseService.embeddedPublicKeyHex,
+        baseURL: URL = LicenseService.productionBaseURL
     ) {
         self.clock = clock
         self.transport = transport
@@ -371,6 +370,7 @@ final class LicenseService: ObservableObject {
         self.hwid = hwid
         self.appVersion = appVersion
         self.publicKeyHex = publicKeyHex
+        self.baseURL = baseURL
         self.state = store.load()
         recordFirstSeenIfNeeded(now: clock.now())
         recomputeEntitlement()
@@ -429,7 +429,9 @@ final class LicenseService: ObservableObject {
     }
 
     func activate(key: String, completion: @escaping (ActivationOutcome) -> Void) {
-        DebugLog.shared.log("LIC", "activate requested key=\(Self.redacted(key))")
+        DebugLog.shared.log(
+            "LIC", "activate requested key=\(key.isEmpty ? "missing" : "present") length=\(key.count)"
+        )
         transport.activate(baseURL: baseURL, hwid: hwid, key: key) { [weak self] result in
             guard let self else { return }
             switch result {
@@ -449,10 +451,6 @@ final class LicenseService: ObservableObject {
                 completion(.network)
             }
         }
-    }
-
-    private static func redacted(_ key: String) -> String {
-        String(key.prefix(6)) + "…"
     }
 
     // MARK: - State transitions

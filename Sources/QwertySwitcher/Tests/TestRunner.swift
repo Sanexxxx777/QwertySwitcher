@@ -10,6 +10,13 @@ enum TestRunner {
     private static var passed = 0
     private static var skipped = 0
 
+    /// macOS 27.0 beta can deadlock in SkyLight while constructing a
+    /// synthetic keyboard CGEvent after TIS layout activity. Keep every pure
+    /// test running and skip only fixtures that require a real CGEvent.
+    static var syntheticKeyboardEventsAreSafe: Bool {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 27
+    }
+
     static func run() -> Int {
         print("=== Qwerty Switcher test suite ===")
         // See InputSourceManager's `layoutSwitchingIsSimulated` doc — real
@@ -38,6 +45,10 @@ enum TestRunner {
         ExceptionsTests.run()
         InstantCorrectionGateTests.run()
         PreferencesServiceTests.run()
+        TimedPauseTests.run()
+        SettingsBackupTests.run()
+        SnippetTests.run()
+        SmartCaseTests.run()
         InstantCorrectionUndoTests.run()
         InstantCorrectionAnalyzerTests.run()
         InstantCorrectionCorpusTests.run()
@@ -715,6 +726,263 @@ enum ExceptionsTests {
         TestRunner.assertTrue(!svc.isValidException("key=value"), "= disallowed")
         TestRunner.assertTrue(!svc.isValidException("path/file"), "/ disallowed")
         TestRunner.assertTrue(!svc.isValidException("123"), "digits-only invalid")
+
+        let suite = AppIdentity.bundleIdentifier + ".tests.exceptions." + UUID().uuidString
+        guard let isolatedDefaults = UserDefaults(suiteName: suite) else {
+            TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+            return
+        }
+        defer { isolatedDefaults.removePersistentDomain(forName: suite) }
+        isolatedDefaults.set(["legacy.example"], forKey: AppIdentity.keyPrefix + "appExceptions")
+        let isolated = ExceptionsService(defaults: isolatedDefaults)
+        TestRunner.assertTrue(
+            isolated.blocksAutoSwitch(bundleID: "legacy.example"),
+            "legacy app exceptions migrate into block-auto profiles"
+        )
+        isolated.setProfile(
+            AppProfile(blockAutoSwitch: false, blockInstantCorrection: true, blockHotkeys: true),
+            for: "editor.example"
+        )
+        TestRunner.assertTrue(
+            !isolated.blocksAutoSwitch(bundleID: "editor.example"),
+            "profile can allow boundary correction"
+        )
+        TestRunner.assertTrue(
+            isolated.blocksInstantCorrection(bundleID: "editor.example"),
+            "profile can independently block instant correction"
+        )
+        TestRunner.assertTrue(
+            isolated.blocksHotkeys(bundleID: "editor.example"),
+            "profile can independently block hotkeys"
+        )
+        isolated.removeProfiles(for: ["editor.example"])
+        TestRunner.assertNil(isolated.profile(for: "editor.example"), "profile removal is exact")
+    }
+}
+
+enum TimedPauseTests {
+    static func run() {
+        TestRunner.section("TimedPauseService")
+        let suite = AppIdentity.bundleIdentifier + ".tests.pause." + UUID().uuidString
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let prefs = PreferencesService(defaults: defaults)
+        prefs.isAutoSwitchEnabled = true
+        let start = Date(timeIntervalSince1970: 1_000)
+        let service = TimedPauseService(
+            prefsService: prefs, defaults: defaults, schedulesTimers: false, now: start
+        )
+        service.pause(for: 900, now: start)
+        TestRunner.assertTrue(service.isActive, "timed pause persists a resume deadline")
+        TestRunner.assertTrue(!prefs.isAutoSwitchEnabled, "timed pause disables auto-switch")
+        TestRunner.assertTrue(
+            !service.reconcile(now: Date(timeIntervalSince1970: 1_899)),
+            "pause remains active before its deadline"
+        )
+        TestRunner.assertTrue(
+            service.reconcile(now: Date(timeIntervalSince1970: 1_900)),
+            "pause resumes exactly at its deadline"
+        )
+        TestRunner.assertTrue(prefs.isAutoSwitchEnabled, "deadline restores auto-switch")
+        TestRunner.assertTrue(!service.isActive, "deadline clears the stored schedule")
+
+        service.pause(for: 900, now: start)
+        prefs.isAutoSwitchEnabled = true
+        NotificationCenter.default.post(name: .autoSwitchToggled, object: nil)
+        TestRunner.assertTrue(
+            !service.isActive,
+            "a manual toggle cancels the pending automatic resume"
+        )
+
+        let viewModelURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("UI/Views/MainViewModel.swift")
+        let viewModelSource = (try? String(contentsOf: viewModelURL, encoding: .utf8)) ?? ""
+        TestRunner.assertTrue(
+            viewModelSource.contains("guard !isSyncingAutoSwitch else { return }"),
+            "settings-window synchronization does not echo and cancel a timed pause"
+        )
+    }
+}
+
+enum SettingsBackupTests {
+    static func run() {
+        TestRunner.section("SettingsBackupService")
+        let suite = AppIdentity.bundleIdentifier + ".tests.backup." + UUID().uuidString
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let prefs = PreferencesService(defaults: defaults)
+        let exceptions = ExceptionsService(defaults: defaults)
+        let perApp = PerAppLayoutService(inputSourceManager: InputSourceManager(), prefsService: prefs)
+        let snippets = SnippetService(defaults: defaults)
+        let service = SettingsBackupService(
+            prefsService: prefs, exceptionsService: exceptions, perAppLayoutService: perApp,
+            snippetService: snippets
+        )
+
+        prefs.isInstantCorrectionEnabled = false
+        prefs.activeLayoutIDs = ["layout.en", "layout.ru"]
+        exceptions.wordExceptions = ["qwerty", "привет"]
+        exceptions.setProfile(
+            AppProfile(blockAutoSwitch: false, blockInstantCorrection: true, blockHotkeys: false),
+            for: "app.example"
+        )
+        perApp.isEnabled = true
+        perApp.manualOverrides = ["app.example": "layout.ru"]
+        _ = snippets.setSnippet(trigger: "addr", replacement: "Владивосток")
+
+        guard let data = try? service.encodedBackup(now: Date(timeIntervalSince1970: 1_000)) else {
+            TestRunner.assertTrue(false, "settings backup encodes")
+            return
+        }
+        let json = String(data: data, encoding: .utf8) ?? ""
+        TestRunner.assertTrue(!json.contains("hwid"), "backup excludes the license device identifier")
+        TestRunner.assertTrue(!json.contains("licenseFirstSeen"), "backup excludes license anti-tamper state")
+
+        prefs.isInstantCorrectionEnabled = true
+        exceptions.wordExceptions = []
+        exceptions.appProfiles = [:]
+        perApp.isEnabled = false
+        perApp.manualOverrides = [:]
+        snippets.snippets = [:]
+        do {
+            try service.importBackup(data)
+            TestRunner.assertTrue(!prefs.isInstantCorrectionEnabled, "import restores preferences")
+            TestRunner.assertTrue(exceptions.wordExceptions.contains("привет"), "import restores word exceptions")
+            TestRunner.assertTrue(
+                exceptions.blocksInstantCorrection(bundleID: "app.example"),
+                "import restores per-feature app profiles"
+            )
+            TestRunner.assertEqual(
+                perApp.manualOverrides["app.example"] ?? "", "layout.ru",
+                "import restores manual per-app layout overrides"
+            )
+            TestRunner.assertEqual(
+                snippets.replacement(for: "addr") ?? "", "Владивосток",
+                "import restores local text snippets"
+            )
+        } catch {
+            TestRunner.assertTrue(false, "valid settings backup imports: \(error.localizedDescription)")
+        }
+
+        if let valid = try? service.decodeAndValidate(data),
+           let badData = try? JSONEncoder().encode(SettingsBackup(
+                formatVersion: 99, createdAt: valid.createdAt, preferences: valid.preferences,
+                wordExceptions: valid.wordExceptions, appProfiles: valid.appProfiles,
+                autoLearned: valid.autoLearned, snippets: valid.snippets,
+                perAppLayoutEnabled: valid.perAppLayoutEnabled,
+                manualLayoutOverrides: valid.manualLayoutOverrides,
+                rememberedLayouts: valid.rememberedLayouts
+           )) {
+            do {
+                _ = try service.decodeAndValidate(badData)
+                TestRunner.assertTrue(false, "unsupported backup version is rejected")
+            } catch SettingsBackupService.BackupError.unsupportedVersion(99) {
+                TestRunner.assertTrue(true, "unsupported backup version is rejected")
+            } catch {
+                TestRunner.assertTrue(false, "unsupported version reports the expected error")
+            }
+        } else {
+            TestRunner.assertTrue(false, "unsupported-version fixture encodes")
+        }
+    }
+}
+
+enum SnippetTests {
+    static func run() {
+        TestRunner.section("SnippetService")
+        let suite = AppIdentity.bundleIdentifier + ".tests.snippets." + UUID().uuidString
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let service = SnippetService(defaults: defaults)
+
+        TestRunner.assertTrue(service.isValidTrigger("addr"), "letter-only trigger is valid")
+        TestRunner.assertTrue(!service.isValidTrigger("a"), "one-letter trigger is rejected")
+        TestRunner.assertTrue(!service.isValidTrigger("addr 1"), "trigger with whitespace/digits is rejected")
+        TestRunner.assertTrue(
+            service.setSnippet(trigger: "ADDR", replacement: "line one\nline two"),
+            "multiline snippet is stored"
+        )
+        TestRunner.assertEqual(
+            service.replacement(for: "addr") ?? "", "line one\nline two",
+            "snippet lookup is case-insensitive"
+        )
+        service.removeSnippet(trigger: "addr")
+        TestRunner.assertNil(service.replacement(for: "addr"), "snippet removal is exact")
+
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Core/KeyboardMonitor.swift")
+        let monitorSource = (try? String(contentsOf: source, encoding: .utf8)) ?? ""
+        TestRunner.assertTrue(
+            monitorSource.contains("expandSnippet(keystrokes: captured"),
+            "word-boundary path checks snippets before language correction"
+        )
+        TestRunner.assertTrue(
+            monitorSource.contains("trailingAlreadyOnScreen: false"),
+            "snippet expansion suppresses and retypes the boundary in one transaction"
+        )
+    }
+}
+
+enum SmartCaseTests {
+    static func run() {
+        TestRunner.section("SmartCaseNormalizer")
+        TestRunner.assertEqual(
+            SmartCaseNormalizer.normalized("ПРивет", capitalizeSentenceStart: false) ?? "",
+            "Привет", "accidentally held Shift is normalized"
+        )
+        TestRunner.assertNil(
+            SmartCaseNormalizer.normalized("USA", capitalizeSentenceStart: false),
+            "all-caps acronym is preserved"
+        )
+        TestRunner.assertEqual(
+            SmartCaseNormalizer.normalized("hello", capitalizeSentenceStart: true) ?? "",
+            "Hello", "plain word after sentence punctuation is capitalized"
+        )
+        TestRunner.assertNil(
+            SmartCaseNormalizer.normalized("iPhone", capitalizeSentenceStart: true),
+            "camelCase brand is preserved"
+        )
+        TestRunner.assertNil(
+            SmartCaseNormalizer.normalized("hello-world", capitalizeSentenceStart: true),
+            "non-word token is preserved"
+        )
+
+        var tracker = SentenceStartTracker()
+        tracker.observeBoundary(".")
+        TestRunner.assertTrue(
+            tracker.shouldCapitalizeNextWord,
+            "sentence punctuation keeps capitalization armed across following whitespace"
+        )
+        TestRunner.assertTrue(tracker.consumeForWord(), "period arms capitalization for one word")
+        TestRunner.assertTrue(!tracker.consumeForWord(), "capitalization intent is consumed once")
+        tracker.observeBoundary("!")
+        tracker.reset()
+        TestRunner.assertTrue(!tracker.consumeForWord(), "context reset clears sentence intent")
+
+        let monitorSource = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Core/KeyboardMonitor.swift")
+        let source = (try? String(contentsOf: monitorSource, encoding: .utf8)) ?? ""
+        TestRunner.assertTrue(
+            source.contains("if !captured.isEmpty { sentenceStartTracker.observeBoundary(trailing) }"),
+            "empty whitespace boundaries do not clear sentence capitalization"
+        )
     }
 }
 
@@ -2118,11 +2386,13 @@ private final class InMemoryLicenseStore: LicenseStateStore {
 private final class StubLicenseTransport: LicenseTransport {
     var helloResult: LicenseService.ServerResult = .failure(.network)
     var activateResult: LicenseService.ServerResult = .failure(.network)
+    private(set) var lastBaseURL: URL?
 
     func hello(
         baseURL: URL, hwid: String, appVersion: String,
         completion: @escaping (LicenseService.ServerResult) -> Void
     ) {
+        lastBaseURL = baseURL
         completion(helloResult)
     }
 
@@ -2130,6 +2400,7 @@ private final class StubLicenseTransport: LicenseTransport {
         baseURL: URL, hwid: String, key: String,
         completion: @escaping (LicenseService.ServerResult) -> Void
     ) {
+        lastBaseURL = baseURL
         completion(activateResult)
     }
 }
@@ -2145,7 +2416,7 @@ enum LicenseServiceTests {
         // Anti-tamper first-seen marks are scoped by hwid in UserDefaults —
         // clean up every fake hwid this suite touches so re-runs stay isolated.
         defer {
-            for hwid in ["TRIALHW", "ACTHW", "ANTITAMPERHW"] {
+            for hwid in ["TRIALHW", "ACTHW", "ANTITAMPERHW", "ENDPOINTHW"] {
                 UserDefaults.standard.removeObject(forKey: AppIdentity.keyPrefix + "licenseFirstSeen." + hwid)
             }
         }
@@ -2158,6 +2429,19 @@ enum LicenseServiceTests {
             golden.canonicalString,
             "{\"hwid\":\"ABC-123\",\"issued\":1754200000,\"plan\":\"trial\",\"start\":1754100000,\"until\":1755309600}",
             "canonical payload string matches the golden vector"
+        )
+
+        let endpointTransport = StubLicenseTransport()
+        let injectedEndpoint = URL(string: "https://license.invalid/qsw-test")!
+        let endpointService = LicenseService(
+            clock: TestLicenseClock(1_000), transport: endpointTransport,
+            store: InMemoryLicenseStore(), hwid: "ENDPOINTHW", appVersion: "test",
+            baseURL: injectedEndpoint
+        )
+        endpointService.checkIn()
+        TestRunner.assertEqual(
+            endpointTransport.lastBaseURL?.absoluteString ?? "", injectedEndpoint.absoluteString,
+            "license endpoint is constructor-injected, not read from mutable UserDefaults"
         )
 
         let testKey = Curve25519.Signing.PrivateKey()
@@ -3026,12 +3310,17 @@ final class KeyboardMonitorHarness {
         )
         let analyzer = InstantCorrectionAnalyzer(dictionary: dictionary)
         let perApp = PerAppLayoutService(inputSourceManager: inputSources, prefsService: prefs)
+        let snippetDefaults = UserDefaults(
+            suiteName: AppIdentity.bundleIdentifier + ".tests.keyboard-monitor-snippets"
+        )!
+        let snippets = SnippetService(defaults: snippetDefaults)
+        snippets.snippets = [:]
         monitor = KeyboardMonitor(
             languageDetector: detector, textReplacer: replacer,
             statsService: StatisticsService(), prefsService: prefs,
             exceptionsService: exceptions, yoficatorService: YoficatorService(),
             switchUndoManager: SwitchUndoManager(), perAppLayoutService: perApp,
-            instantCorrectionAnalyzer: analyzer,
+            instantCorrectionAnalyzer: analyzer, snippetService: snippets,
             // The real IsSecureEventInputEnabled() is a GLOBAL OS flag, not
             // scoped to this test process — forcing it off here is what
             // makes this harness deterministic regardless of whatever's
@@ -3116,6 +3405,16 @@ private final class KeyboardMonitorTestEnvironment {
 enum KeyboardMonitorIntegrationTests {
     static func run() {
         TestRunner.section("KeyboardMonitor integration — headless typed-sequence → screen (no GUI)")
+
+        // On macOS 27.0 beta, CGEvent(keyboardEventSource:) can deadlock inside
+        // SkyLight after the harness changes the active input source. A live
+        // stack sample showed SLEventCreateKeyboardEvent waiting forever on
+        // CGSEventSourceShutdown's mutex. Pure state-machine coverage still
+        // runs; skip only this synthetic-GUI integration layer.
+        if !TestRunner.syntheticKeyboardEventsAreSafe {
+            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
+            return
+        }
 
         guard LicenseService.shared.isEntitled else {
             TestRunner.skip(
@@ -3910,6 +4209,11 @@ enum QueueReplacementActiveTests {
     static func run() {
         TestRunner.section("KeyboardMonitor.queueIfReplacementActive — flagsChanged is never queued for replay")
 
+        guard TestRunner.syntheticKeyboardEventsAreSafe else {
+            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
+            return
+        }
+
         let inputSources = InputSourceManager()
         let dictionary = WordDictionary()
         dictionary.waitUntilPrefixIndexReady()
@@ -3956,6 +4260,11 @@ enum QueueReplacementActiveTests {
 enum AvalancheGuardWiringTests {
     static func run() {
         TestRunner.section("KeyboardMonitor — avalanche guard is wired into the real correction path")
+
+        guard TestRunner.syntheticKeyboardEventsAreSafe else {
+            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
+            return
+        }
 
         let inputSources = InputSourceManager()
         guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
@@ -4009,6 +4318,11 @@ enum HotPathStructuralGuardTests {
         TestRunner.section(
             "Hot path structural guard — handleEvent for an ordinary letter never runs AX/replacement work"
         )
+
+        guard TestRunner.syntheticKeyboardEventsAreSafe else {
+            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
+            return
+        }
 
         let inputSources = InputSourceManager()
         guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }) else {
@@ -4202,7 +4516,7 @@ enum ComboWindowGuardTests {
         // observable (toggling the preference, playing a sound, posting the
         // notification) — a guard that returns early, not a check that only
         // logs.
-        guard let comboBranch = text.range(of: "if shiftState.bothDown && prefsService.isSplitShiftEnabled {") else {
+        guard let comboBranch = text.range(of: "if shiftState.bothDown && prefsService.isSplitShiftEnabled") else {
             TestRunner.assertTrue(false, "L+R combo branch not found — test needs updating")
             return
         }
@@ -4781,6 +5095,10 @@ enum CallbackDurationThresholdTests {
 enum TapTimeoutCounterTests {
     static func run() {
         TestRunner.section("KeyboardMonitor — tapDisabledByTimeout increments an observable counter")
+        guard TestRunner.syntheticKeyboardEventsAreSafe else {
+            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
+            return
+        }
         let inputSources = InputSourceManager()
         let dictionary = WordDictionary()
         dictionary.waitUntilPrefixIndexReady()

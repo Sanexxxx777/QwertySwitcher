@@ -10,6 +10,8 @@ final class StatusBarController {
     private let keyboardMonitor: KeyboardMonitor
     private let inputSourceManager: InputSourceManager
     private let perAppLayoutService: PerAppLayoutService
+    private let timedPauseService: TimedPauseService
+    private let snippetService: SnippetService
     private let autoStartService = AutoStartService()
     private var mainWindow: NSWindow?
     private var exceptionsWindow: NSWindow?
@@ -24,13 +26,17 @@ final class StatusBarController {
     init(statsService: StatisticsService, prefsService: PreferencesService,
          exceptionsService: ExceptionsService, keyboardMonitor: KeyboardMonitor,
          inputSourceManager: InputSourceManager,
-         perAppLayoutService: PerAppLayoutService) {
+         perAppLayoutService: PerAppLayoutService,
+         timedPauseService: TimedPauseService,
+         snippetService: SnippetService) {
         self.statsService = statsService
         self.prefsService = prefsService
         self.exceptionsService = exceptionsService
         self.keyboardMonitor = keyboardMonitor
         self.inputSourceManager = inputSourceManager
         self.perAppLayoutService = perAppLayoutService
+        self.timedPauseService = timedPauseService
+        self.snippetService = snippetService
         setupStatusItem()
 
         NotificationCenter.default.addObserver(
@@ -210,6 +216,25 @@ final class StatusBarController {
         autoSwitchItem.target = self
         menu.addItem(autoSwitchItem)
 
+        if timedPauseService.isActive {
+            let resumeItem = NSMenuItem(
+                title: "Возобновить сейчас", action: #selector(resumeTimedPause), keyEquivalent: ""
+            )
+            resumeItem.target = self
+            menu.addItem(resumeItem)
+        } else if autoSwitchOn {
+            let pauseItem = NSMenuItem(title: "Пауза на…", action: nil, keyEquivalent: "")
+            let pauseMenu = NSMenu(title: "Пауза на…")
+            for (title, seconds) in [("15 минут", 15 * 60.0), ("1 час", 60 * 60.0), ("2 часа", 2 * 60 * 60.0)] {
+                let item = NSMenuItem(title: title, action: #selector(startTimedPause(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = seconds
+                pauseMenu.addItem(item)
+            }
+            pauseItem.submenu = pauseMenu
+            menu.addItem(pauseItem)
+        }
+
         let permissionsItem = NSMenuItem(title: "Настройка разрешений…",
                                          action: #selector(openPermissions), keyEquivalent: "")
         permissionsItem.target = self
@@ -242,7 +267,14 @@ final class StatusBarController {
             inputSourceManager: inputSourceManager,
             perAppLayoutService: perAppLayoutService,
             keyboardMonitor: keyboardMonitor,
-            autoStartService: autoStartService
+            autoStartService: autoStartService,
+            timedPauseService: timedPauseService,
+            settingsBackupService: SettingsBackupService(
+                prefsService: prefsService,
+                exceptionsService: exceptionsService,
+                perAppLayoutService: perAppLayoutService,
+                snippetService: snippetService
+            )
         )
         vm.onOpenAbout = { [weak self] in self?.openAbout() }
         vm.onOpenExceptions = { [weak self] in self?.openExceptions() }
@@ -273,7 +305,9 @@ final class StatusBarController {
             return
         }
 
-        let vm = ExceptionsViewModel(exceptionsService: exceptionsService)
+        let vm = ExceptionsViewModel(
+            exceptionsService: exceptionsService, snippetService: snippetService
+        )
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 440),
             styleMask: [.titled, .closable],
@@ -382,6 +416,15 @@ final class StatusBarController {
         // Title/state ("Автопереключение: …") is recomputed by rebuildMenu(), which
         // the .autoSwitchToggled observer already triggers via refreshMenu().
         NotificationCenter.default.post(name: .autoSwitchToggled, object: nil)
+    }
+
+    @objc private func startTimedPause(_ sender: NSMenuItem) {
+        guard let seconds = sender.representedObject as? TimeInterval else { return }
+        timedPauseService.pause(for: seconds)
+    }
+
+    @objc private func resumeTimedPause() {
+        timedPauseService.resumeNow()
     }
 
     @objc private func openPermissions() {

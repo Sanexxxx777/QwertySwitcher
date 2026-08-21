@@ -1,4 +1,4 @@
-# Qwerty Switcher — архитектура (v0.3.0)
+# Qwerty Switcher — архитектура
 
 Нативное menu-bar приложение для macOS 13+, которое локально определяет неверную
 раскладку набираемого слова, переключает источник ввода и исправляет текст.
@@ -18,9 +18,10 @@
 | Хранение | `UserDefaults`, локальный Bloom-кэш и локальный debug log |
 | Дистрибуция | self-signed beta, Developer ID DMG, отдельная App Store sandbox-ветка |
 
-Сетевого и телеметрического клиента в приложении нет. Набираемые слова не пишутся
-в debug log; сохранение текста возможно только как явно управляемые пользователем
-исключения и автообученные исключения.
+Телеметрии нет. Единственный сетевой клиент — лицензионная проверка; она отправляет
+стабильный идентификатор Mac и версию приложения, но не набираемый текст. Слова не
+пишутся в debug log; текст сохраняется только в явно управляемых пользователем
+исключениях, автообученных парах и текстовых шаблонах.
 
 ## Основные компоненты
 
@@ -41,7 +42,8 @@ Sources/QwertySwitcher/
 ├── Dictionary/
 │   ├── BloomFilter.swift           SSBF v2 + fingerprint и строгая валидация кэша
 │   └── WordDictionary.swift        словари EN/RU + системный spell checker
-├── Services/                       настройки, исключения, статистика, privacy
+├── Services/                       настройки, профили приложений, snippets,
+│                                  timed pause, backup, лицензия и privacy
 ├── UI/                             status bar, onboarding и окна настроек
 └── Tests/TestRunner.swift          автономный test runner без XCTest
 ```
@@ -115,8 +117,9 @@ Undo не имеет таймера, но инвалидируется след�
 активация password field не скрывалась fail-open окном. При отсутствии системных
 разрешений event tap не запускается и health state сообщает причину.
 
-`PrivacyInfo.xcprivacy` объявляет локальные `UserDefaults` и доступ к file metadata
-для ротации локального журнала. Tracking и collected-data categories отсутствуют.
+`PrivacyInfo.xcprivacy` объявляет доступ к `UserDefaults`, file metadata и связанный
+с аккаунтом device ID для лицензирования. Tracking выключен. Release-скрипты перед
+упаковкой блокируют env/private-key файлы и credential-like assignments.
 
 ## Сборка и проверка
 
@@ -137,5 +140,6 @@ timestamp, после чего именно DMG отправляется чер�
 получает stapled ticket. App Store workflow описан в `docs/SIGNING.md` и отдельно
 проверяет profile, bundle ID, sandbox entitlement и Apple Distribution signature.
 
-На аудите 2026-08-02 прошли 111 автоматических проверок; одна проверка создания
-живого `CGEvent` намеренно остаётся `SKIP` вне интерактивной GUI-сессии.
+На macOS 27 системное создание синтетического `CGEvent` может зависнуть внутри
+SkyLight. Test runner пропускает только зависящие от него GUI/integration checks;
+чистые state-machine, storage и release-contract проверки продолжают выполняться.

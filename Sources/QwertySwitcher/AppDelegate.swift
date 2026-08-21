@@ -14,6 +14,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var yoficatorService: YoficatorService!
     private var perAppLayoutService: PerAppLayoutService!
     private var switchUndoManager: SwitchUndoManager!
+    private var timedPauseService: TimedPauseService!
+    private var snippetService: SnippetService!
     private var onboardingController: OnboardingWindowController?
     private var healthTimer: Timer?
 
@@ -22,9 +24,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = PrivacyService.auditStorage()
 
         prefsService = PreferencesService()
+        timedPauseService = TimedPauseService(prefsService: prefsService)
         SoundService.prefs = prefsService
         statsService = StatisticsService()
         exceptionsService = ExceptionsService()
+        snippetService = SnippetService()
         yoficatorService = YoficatorService()
         inputSourceManager = InputSourceManager()
         switchUndoManager = SwitchUndoManager()
@@ -52,7 +56,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             yoficatorService: yoficatorService,
             switchUndoManager: switchUndoManager,
             perAppLayoutService: perAppLayoutService,
-            instantCorrectionAnalyzer: instantCorrectionAnalyzer
+            instantCorrectionAnalyzer: instantCorrectionAnalyzer,
+            snippetService: snippetService
         )
 
         hotkeyManager = HotkeyManager(
@@ -60,7 +65,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             languageDetector: languageDetector,
             textReplacer: textReplacer,
             statsService: statsService,
-            prefsService: prefsService
+            prefsService: prefsService,
+            exceptionsService: exceptionsService
         )
         hotkeyManager.switchUndoManager = switchUndoManager
         hotkeyManager.keyboardMonitor = keyboardMonitor
@@ -72,7 +78,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exceptionsService: exceptionsService,
             keyboardMonitor: keyboardMonitor,
             inputSourceManager: inputSourceManager,
-            perAppLayoutService: perAppLayoutService
+            perAppLayoutService: perAppLayoutService,
+            timedPauseService: timedPauseService,
+            snippetService: snippetService
         )
 
         // Status-bar escape hatch: onboarding can always be re-opened, so a
@@ -95,7 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSLog("[QwertySwitcher] v\(version) Started. Dictionary: \(dictionary.stats)")
         NSLog("[QwertySwitcher] Layouts: \(inputSourceManager.availableLayouts.map(\.name))")
         NSLog("[QwertySwitcher] Privacy: all input processed locally, never leaves the Mac. "
-            + "License check sends only an anonymous device identifier.")
+            + "License check sends a device identifier and app version.")
         LicenseService.shared.start()
 
         let layoutsStr = inputSourceManager.availableLayouts
