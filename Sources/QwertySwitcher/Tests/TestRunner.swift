@@ -95,6 +95,9 @@ enum TestRunner {
         SwitchBlockReasonTests.run()
         SoundServiceToggleCueTests.run()
         DockIconPolicyTests.run()
+        LearnedWordsStoreTests.run()
+        PersonalFrequencyStoreTests.run()
+        CorrectionFeedbackTrackerTests.run()
         print("---")
         print("\(passed) passed, \(failed) failed, \(skipped) skipped")
         return failed == 0 ? 0 : 1
@@ -5322,5 +5325,406 @@ enum DockIconPolicyTests {
         // first open (regression guard: a stale count from a earlier close
         // 5-window session should never suppress the icon on the next open).
         TestRunner.assertTrue(policy.windowOpened(), "re-opening after a full close shows the icon again")
+    }
+}
+
+// MARK: - Wave 1 "learning" modules (learning_spec.md) — pure, no AX/live input
+
+enum LearnedWordsStoreTests {
+    static func run() {
+        TestRunner.section("LearnedWordsStore")
+
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let day: TimeInterval = 86_400
+
+        let suite = AppIdentity.bundleIdentifier + ".tests.learnedWords." + UUID().uuidString
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = LearnedWordsStore(defaults: defaults)
+
+        // record -> count, not yet active
+        TestRunner.assertEqual(
+            store.recordManualFix(word: "clear", lang: "en", originApp: "com.app.one", at: t0),
+            .recorded, "first confirmation is just recorded"
+        )
+        TestRunner.assertEqual(store.allEntries["en:clear"]?.count, 1, "count is 1 after first confirmation")
+        TestRunner.assertTrue(!store.isActive(word: "clear", lang: "en"), "single confirmation is not yet active")
+
+        // promote = 2 within the 30-day window
+        TestRunner.assertEqual(
+            store.recordManualFix(word: "clear", lang: "en", originApp: "com.app.one", at: t0.addingTimeInterval(5 * day)),
+            .promoted, "second confirmation within the window promotes the entry"
+        )
+        TestRunner.assertTrue(store.isActive(word: "clear", lang: "en"), "promoted entry is active")
+        TestRunner.assertTrue(store.activeKeys(lang: "en").contains("clear"), "activeKeys surfaces the bare word")
+
+        // NOT promoted outside the 30-day window -> resets to count 1
+        TestRunner.assertEqual(
+            store.recordManualFix(word: "vmc", lang: "en", originApp: nil, at: t0),
+            .recorded, "vmc first confirmation"
+        )
+        TestRunner.assertEqual(
+            store.recordManualFix(word: "vmc", lang: "en", originApp: nil, at: t0.addingTimeInterval(31 * day)),
+            .recorded, "a confirmation past the 30-day window resets rather than promotes"
+        )
+        TestRunner.assertTrue(!store.isActive(word: "vmc", lang: "en"), "reset entry is not active")
+        TestRunner.assertEqual(store.allEntries["en:vmc"]?.count, 1, "reset entry count is back to 1")
+
+        // unlearn
+        store.unlearn(word: "clear", lang: "en")
+        TestRunner.assertTrue(!store.isActive(word: "clear", lang: "en"), "unlearn removes activity")
+        TestRunner.assertNil(store.allEntries["en:clear"], "unlearn removes the entry entirely")
+
+        // revoke never drops below zero, and a count reaching zero removes the entry.
+        // vmc is still count 1 (firstConfirmed = t0+31day) from the reset above — one
+        // more confirmation inside its (new) window promotes it to count 2.
+        TestRunner.assertEqual(
+            store.recordManualFix(word: "vmc", lang: "en", originApp: nil, at: t0.addingTimeInterval(32 * day)),
+            .promoted, "vmc promoted to count 2"
+        )
+        store.revokeRecord(word: "vmc", lang: "en")
+        TestRunner.assertEqual(store.allEntries["en:vmc"]?.count, 1, "revoke decrements by exactly one")
+        TestRunner.assertTrue(!store.isActive(word: "vmc", lang: "en"), "count 1 after revoke is not active")
+        store.revokeRecord(word: "vmc", lang: "en")
+        TestRunner.assertNil(store.allEntries["en:vmc"], "revoke down to zero removes the entry")
+        store.revokeRecord(word: "vmc", lang: "en")
+        TestRunner.assertNil(store.allEntries["en:vmc"], "revoke on a missing entry is a safe no-op")
+
+        // disabled mutes both recording and application
+        store.recordManualFix(word: "bnb", lang: "en", originApp: nil, at: t0)
+        store.recordManualFix(word: "bnb", lang: "en", originApp: nil, at: t0.addingTimeInterval(day))
+        TestRunner.assertTrue(store.isActive(word: "bnb", lang: "en"), "bnb promoted before disabling")
+        store.isEnabled = false
+        TestRunner.assertTrue(!store.isActive(word: "bnb", lang: "en"), "disabled store reports nothing as active")
+        store.recordManualFix(word: "ip", lang: "en", originApp: nil, at: t0)
+        store.recordManualFix(word: "ip", lang: "en", originApp: nil, at: t0.addingTimeInterval(day))
+        TestRunner.assertNil(store.allEntries["en:ip"], "recording while disabled is a no-op")
+        store.isEnabled = true
+        TestRunner.assertTrue(store.isActive(word: "bnb", lang: "en"), "re-enabling restores prior activity")
+
+        // normalization guard: store expects already-lowercased, non-empty input
+        let countBeforeInvalid = store.allEntries.count
+        store.recordManualFix(word: "Exit", lang: "en", originApp: nil, at: t0)
+        store.recordManualFix(word: "", lang: "en", originApp: nil, at: t0)
+        store.recordManualFix(word: "exit", lang: "", originApp: nil, at: t0)
+        TestRunner.assertEqual(
+            store.allEntries.count, countBeforeInvalid,
+            "uppercase input and empty word/lang are silently rejected — caller's job to normalize"
+        )
+
+        // eviction: count==1 evicted before count>=2, oldest lastConfirmed first
+        let evictionSuite = AppIdentity.bundleIdentifier + ".tests.learnedWordsEviction." + UUID().uuidString
+        guard let evictionDefaults = UserDefaults(suiteName: evictionSuite) else {
+            TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+            return
+        }
+        defer { evictionDefaults.removePersistentDomain(forName: evictionSuite) }
+        let evictionStore = LearnedWordsStore(defaults: evictionDefaults)
+
+        for i in 0..<299 {
+            let base = t0.addingTimeInterval(TimeInterval(i) * day)
+            evictionStore.recordManualFix(word: "w\(i)", lang: "en", originApp: nil, at: base)
+            evictionStore.recordManualFix(word: "w\(i)", lang: "en", originApp: nil, at: base.addingTimeInterval(60))
+        }
+        evictionStore.recordManualFix(word: "oldweak", lang: "en", originApp: nil, at: t0.addingTimeInterval(1_000 * day))
+        TestRunner.assertEqual(evictionStore.allEntries.count, 300, "store sits exactly at cap: 299 promoted + 1 weak")
+
+        let overflowOutcome = evictionStore.recordManualFix(
+            word: "newweak", lang: "en", originApp: nil, at: t0.addingTimeInterval(2_000 * day)
+        )
+        TestRunner.assertEqual(overflowOutcome, .capped, "insert past cap reports an eviction")
+        TestRunner.assertNil(evictionStore.allEntries["en:oldweak"], "the OLDER count==1 entry is evicted first")
+        TestRunner.assertTrue(
+            evictionStore.allEntries["en:newweak"] != nil,
+            "the just-inserted (newer) weak entry survives while an older weak entry exists"
+        )
+        TestRunner.assertTrue(
+            evictionStore.isActive(word: "w0", lang: "en"), "promoted entries are untouched while any weak entry remains"
+        )
+        TestRunner.assertEqual(evictionStore.allEntries.count, 300, "store stays at cap")
+
+        // once no weak entries remain, an overflow evicts the newcomer itself — promoted entries stay protected
+        evictionStore.unlearn(word: "newweak", lang: "en")
+        let extraBase = t0.addingTimeInterval(3_000 * day)
+        evictionStore.recordManualFix(word: "w299", lang: "en", originApp: nil, at: extraBase)
+        evictionStore.recordManualFix(word: "w299", lang: "en", originApp: nil, at: extraBase.addingTimeInterval(60))
+        TestRunner.assertEqual(evictionStore.allEntries.count, 300, "store is now 300 promoted entries, zero weak")
+
+        let selfEvictOutcome = evictionStore.recordManualFix(
+            word: "loner", lang: "en", originApp: nil, at: t0.addingTimeInterval(4_000 * day)
+        )
+        TestRunner.assertEqual(selfEvictOutcome, .capped, "overflow against an all-promoted store still reports an eviction")
+        TestRunner.assertNil(
+            evictionStore.allEntries["en:loner"],
+            "with no weak entry to sacrifice, the newcomer itself is evicted — promoted entries are protected"
+        )
+        TestRunner.assertTrue(evictionStore.isActive(word: "w0", lang: "en"), "no promoted entry is ever evicted by this policy")
+        TestRunner.assertEqual(evictionStore.allEntries.count, 300, "store remains exactly at cap")
+
+        // persistence round-trip
+        let persistSuite = AppIdentity.bundleIdentifier + ".tests.learnedWordsPersist." + UUID().uuidString
+        guard let persistDefaults = UserDefaults(suiteName: persistSuite) else {
+            TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+            return
+        }
+        defer { persistDefaults.removePersistentDomain(forName: persistSuite) }
+        let writer = LearnedWordsStore(defaults: persistDefaults)
+        writer.recordManualFix(word: "clear", lang: "en", originApp: "com.app.terminal", at: t0)
+        writer.recordManualFix(word: "clear", lang: "en", originApp: "com.app.terminal", at: t0.addingTimeInterval(day))
+        writer.flush(now: t0.addingTimeInterval(day))
+        let reader = LearnedWordsStore(defaults: persistDefaults)
+        TestRunner.assertTrue(reader.isActive(word: "clear", lang: "en"), "a promoted entry survives a flush + reload")
+        TestRunner.assertEqual(reader.allEntries["en:clear"]?.originApp, "com.app.terminal", "originApp round-trips")
+        writer.flush(now: t0) // dirty flag already false — no-op, must not crash
+    }
+}
+
+enum PersonalFrequencyStoreTests {
+    static func run() {
+        TestRunner.section("PersonalFrequencyStore")
+
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let day: TimeInterval = 86_400
+
+        let suite = AppIdentity.bundleIdentifier + ".tests.personalFreq." + UUID().uuidString
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = PersonalFrequencyStore(defaults: defaults)
+
+        // length gate is the store's own guard (junk/mixed-script/projection gates are
+        // wave-2 caller concerns computed against JunkMeter/LanguageDetector — see the
+        // file's doc comment)
+        store.bump(word: "ip", lang: "en", isDictionaryWord: false, at: t0)
+        TestRunner.assertNil(store.allEntries["en:ip"], "words shorter than 3 letters are never bumped")
+
+        // promotion >= 5
+        for i in 0..<4 {
+            let outcome = store.bump(
+                word: "vmc", lang: "en", isDictionaryWord: false, at: t0.addingTimeInterval(TimeInterval(i) * day)
+            )
+            TestRunner.assertEqual(outcome, .bumped, "bump #\(i + 1) is a plain bump, not yet promoted")
+        }
+        TestRunner.assertTrue(!store.isPromoted(word: "vmc", lang: "en"), "count 4 is not yet promoted")
+        let fifthOutcome = store.bump(word: "vmc", lang: "en", isDictionaryWord: false, at: t0.addingTimeInterval(4 * day))
+        TestRunner.assertEqual(fifthOutcome, .promoted, "the 5th bump promotes")
+        TestRunner.assertTrue(store.isPromoted(word: "vmc", lang: "en"), "count 5 is promoted")
+        TestRunner.assertTrue(store.promotedKeys(lang: "en").contains("vmc"), "promotedKeys surfaces the bare word")
+
+        // unlearn
+        store.unlearn(word: "vmc", lang: "en")
+        TestRunner.assertTrue(!store.isPromoted(word: "vmc", lang: "en"), "unlearn clears promotion")
+        TestRunner.assertNil(store.allEntries["en:vmc"], "unlearn removes the entry")
+
+        // disabled mutes both bumping and application
+        for i in 0..<5 {
+            store.bump(word: "clear", lang: "en", isDictionaryWord: false, at: t0.addingTimeInterval(TimeInterval(i) * day))
+        }
+        TestRunner.assertTrue(store.isPromoted(word: "clear", lang: "en"), "clear promoted before disabling")
+        store.isEnabled = false
+        TestRunner.assertTrue(!store.isPromoted(word: "clear", lang: "en"), "disabled store reports nothing as promoted")
+        store.bump(word: "exit", lang: "en", isDictionaryWord: false, at: t0)
+        TestRunner.assertNil(store.allEntries["en:exit"], "bumping while disabled is a no-op")
+        store.isEnabled = true
+        TestRunner.assertTrue(store.isPromoted(word: "clear", lang: "en"), "re-enabling restores prior promotion")
+
+        // count mirrors store size
+        TestRunner.assertEqual(store.count, store.allEntries.count, "count mirrors the store size")
+
+        // persistence: count==1 never persisted; dictionary words persist at count>=2, non-dictionary at count>=3
+        let persistSuite = AppIdentity.bundleIdentifier + ".tests.personalFreqPersist." + UUID().uuidString
+        guard let persistDefaults = UserDefaults(suiteName: persistSuite) else {
+            TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+            return
+        }
+        defer { persistDefaults.removePersistentDomain(forName: persistSuite) }
+        let writer = PersonalFrequencyStore(defaults: persistDefaults)
+
+        writer.bump(word: "raz", lang: "ru", isDictionaryWord: true, at: t0)
+        writer.flush(now: t0)
+        let readerA = PersonalFrequencyStore(defaults: persistDefaults)
+        TestRunner.assertNil(readerA.allEntries["ru:raz"], "a single confirmation never reaches disk, even for a dictionary word")
+
+        writer.bump(word: "raz", lang: "ru", isDictionaryWord: true, at: t0.addingTimeInterval(day))
+        writer.flush(now: t0.addingTimeInterval(day))
+        let readerB = PersonalFrequencyStore(defaults: persistDefaults)
+        TestRunner.assertEqual(readerB.allEntries["ru:raz"]?.count, 2, "a dictionary word persists at count 2")
+
+        writer.bump(word: "zhargon", lang: "ru", isDictionaryWord: false, at: t0)
+        writer.bump(word: "zhargon", lang: "ru", isDictionaryWord: false, at: t0.addingTimeInterval(day))
+        writer.flush(now: t0.addingTimeInterval(day))
+        let readerC = PersonalFrequencyStore(defaults: persistDefaults)
+        TestRunner.assertNil(readerC.allEntries["ru:zhargon"], "a non-dictionary word at count 2 does not yet reach disk")
+
+        writer.bump(word: "zhargon", lang: "ru", isDictionaryWord: false, at: t0.addingTimeInterval(2 * day))
+        writer.flush(now: t0.addingTimeInterval(2 * day))
+        let readerD = PersonalFrequencyStore(defaults: persistDefaults)
+        TestRunner.assertEqual(readerD.allEntries["ru:zhargon"]?.count, 3, "a non-dictionary word persists once it reaches count 3")
+
+        // cap
+        let capSuite = AppIdentity.bundleIdentifier + ".tests.personalFreqCap." + UUID().uuidString
+        guard let capDefaults = UserDefaults(suiteName: capSuite) else {
+            TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+            return
+        }
+        defer { capDefaults.removePersistentDomain(forName: capSuite) }
+        let capStore = PersonalFrequencyStore(defaults: capDefaults)
+        for i in 0..<1_999 {
+            let base = t0.addingTimeInterval(TimeInterval(i) * day)
+            capStore.bump(word: "pfw\(i)", lang: "en", isDictionaryWord: false, at: base)
+            capStore.bump(word: "pfw\(i)", lang: "en", isDictionaryWord: false, at: base.addingTimeInterval(60))
+        }
+        capStore.bump(word: "oldweak", lang: "en", isDictionaryWord: false, at: t0.addingTimeInterval(5_000 * day))
+        TestRunner.assertEqual(capStore.count, 2_000, "cap store sits exactly at cap: 1999 non-weak words + 1 weak")
+
+        let capOutcome = capStore.bump(word: "newweak", lang: "en", isDictionaryWord: false, at: t0.addingTimeInterval(6_000 * day))
+        TestRunner.assertEqual(capOutcome, .capped, "insert past cap reports an eviction")
+        TestRunner.assertNil(capStore.allEntries["en:oldweak"], "the OLDER count==1 entry is evicted first")
+        TestRunner.assertTrue(
+            capStore.allEntries["en:newweak"] != nil, "the newer weak entry survives while an older one exists"
+        )
+        TestRunner.assertEqual(capStore.count, 2_000, "cap store stays at cap")
+    }
+}
+
+enum CorrectionFeedbackTrackerTests {
+    static func run() {
+        TestRunner.section("CorrectionFeedbackTracker")
+
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
+        // revert: word == corrected, reverse direction, within 8s
+        do {
+            let tracker = CorrectionFeedbackTracker()
+            tracker.recordAutoCorrection(original: "руддщ", corrected: "hello", targetLang: "en", wasLearned: false, at: t0)
+            let verdict = tracker.classifyDoubleShift(word: "hello", sourceLang: "en", targetLang: "ru", at: t0.addingTimeInterval(5))
+            TestRunner.assertEqual(
+                verdict,
+                .revertOfAutoCorrection(original: "руддщ", corrected: "hello", wasLearned: false),
+                "DS reversing a recent auto-correction within 8s is a revert"
+            )
+        }
+
+        // not-revert: different word
+        do {
+            let tracker = CorrectionFeedbackTracker()
+            tracker.recordAutoCorrection(original: "руддщ", corrected: "hello", targetLang: "en", wasLearned: false, at: t0)
+            let verdict = tracker.classifyDoubleShift(word: "other", sourceLang: "en", targetLang: "ru", at: t0.addingTimeInterval(2))
+            TestRunner.assertEqual(verdict, .manualFix, "a different word is never classified as a revert")
+        }
+
+        // not-revert: same direction (not reversed)
+        do {
+            let tracker = CorrectionFeedbackTracker()
+            tracker.recordAutoCorrection(original: "руддщ", corrected: "hello", targetLang: "en", wasLearned: false, at: t0)
+            let verdict = tracker.classifyDoubleShift(word: "hello", sourceLang: "ru", targetLang: "en", at: t0.addingTimeInterval(2))
+            TestRunner.assertEqual(verdict, .manualFix, "DS in the same direction as the correction is not a revert")
+        }
+
+        // not-revert: past the 8s window
+        do {
+            let tracker = CorrectionFeedbackTracker()
+            tracker.recordAutoCorrection(original: "руддщ", corrected: "hello", targetLang: "en", wasLearned: false, at: t0)
+            let verdict = tracker.classifyDoubleShift(word: "hello", sourceLang: "en", targetLang: "ru", at: t0.addingTimeInterval(9))
+            TestRunner.assertEqual(verdict, .manualFix, "DS past the 8s window is not a revert")
+        }
+
+        // not-revert: after reset()
+        do {
+            let tracker = CorrectionFeedbackTracker()
+            tracker.recordAutoCorrection(original: "руддщ", corrected: "hello", targetLang: "en", wasLearned: false, at: t0)
+            tracker.reset()
+            let verdict = tracker.classifyDoubleShift(word: "hello", sourceLang: "en", targetLang: "ru", at: t0.addingTimeInterval(1))
+            TestRunner.assertEqual(verdict, .manualFix, "reset() clears the pending auto-correction")
+        }
+
+        // toggle: one-shot slot — DS#2 toggles, DS#3 on the same reverse gesture is a plain manual fix
+        do {
+            let tracker = CorrectionFeedbackTracker()
+            tracker.recordManualConversion(word: "clear", sourceLang: "ru", targetLang: "en", at: t0)
+            let toggle = tracker.classifyDoubleShift(word: "clear", sourceLang: "en", targetLang: "ru", at: t0.addingTimeInterval(3))
+            TestRunner.assertEqual(
+                toggle, .toggleOfManualFix(word: "clear", lang: "en"),
+                "DS reversing a recent manual conversion within 10s toggles it"
+            )
+            let thirdPress = tracker.classifyDoubleShift(word: "clear", sourceLang: "en", targetLang: "ru", at: t0.addingTimeInterval(5))
+            TestRunner.assertEqual(thirdPress, .manualFix, "the toggle slot is one-shot — a third DS is a plain manual fix")
+        }
+
+        // not-toggle: past the 10s window
+        do {
+            let tracker = CorrectionFeedbackTracker()
+            tracker.recordManualConversion(word: "clear", sourceLang: "ru", targetLang: "en", at: t0)
+            let verdict = tracker.classifyDoubleShift(word: "clear", sourceLang: "en", targetLang: "ru", at: t0.addingTimeInterval(11))
+            TestRunner.assertEqual(verdict, .manualFix, "DS past the 10s toggle window is a plain manual fix")
+        }
+
+        // not-toggle: different word
+        do {
+            let tracker = CorrectionFeedbackTracker()
+            tracker.recordManualConversion(word: "clear", sourceLang: "ru", targetLang: "en", at: t0)
+            let verdict = tracker.classifyDoubleShift(word: "other", sourceLang: "en", targetLang: "ru", at: t0.addingTimeInterval(3))
+            TestRunner.assertEqual(verdict, .manualFix, "a different word is never classified as a toggle")
+        }
+
+        // revert-of-revert: DS toward the annulled correction, within 15s, lifts the exception
+        do {
+            let tracker = CorrectionFeedbackTracker()
+            tracker.recordRevert(original: "смотри", corrected: "cvjnhb", at: t0)
+            TestRunner.assertTrue(
+                tracker.classifyRevertOfRevert(word: "смотри", targetLang: "en", at: t0.addingTimeInterval(10)),
+                "DS on the reverted word within 15s lifts the just-created exception"
+            )
+            TestRunner.assertTrue(
+                !tracker.classifyRevertOfRevert(word: "смотри", targetLang: "en", at: t0.addingTimeInterval(11)),
+                "revert-of-revert is one-shot — the slot is consumed after the first match"
+            )
+        }
+
+        // not-revert-of-revert: different word
+        do {
+            let tracker = CorrectionFeedbackTracker()
+            tracker.recordRevert(original: "смотри", corrected: "cvjnhb", at: t0)
+            TestRunner.assertTrue(
+                !tracker.classifyRevertOfRevert(word: "other", targetLang: "en", at: t0.addingTimeInterval(5)),
+                "a different word never lifts the exception"
+            )
+        }
+
+        // not-revert-of-revert: past the 15s window
+        do {
+            let tracker = CorrectionFeedbackTracker()
+            tracker.recordRevert(original: "смотри", corrected: "cvjnhb", at: t0)
+            TestRunner.assertTrue(
+                !tracker.classifyRevertOfRevert(word: "смотри", targetLang: "en", at: t0.addingTimeInterval(16)),
+                "past the 15s window, the exception is not lifted"
+            )
+        }
+
+        // reset() clears every kind of pending state at once
+        do {
+            let tracker = CorrectionFeedbackTracker()
+            tracker.recordAutoCorrection(original: "руддщ", corrected: "hello", targetLang: "en", wasLearned: false, at: t0)
+            tracker.recordManualConversion(word: "clear", sourceLang: "ru", targetLang: "en", at: t0)
+            tracker.recordRevert(original: "смотри", corrected: "cvjnhb", at: t0)
+            tracker.reset()
+            TestRunner.assertEqual(
+                tracker.classifyDoubleShift(word: "hello", sourceLang: "en", targetLang: "ru", at: t0.addingTimeInterval(1)),
+                .manualFix, "reset clears the pending auto-correction"
+            )
+            TestRunner.assertEqual(
+                tracker.classifyDoubleShift(word: "clear", sourceLang: "en", targetLang: "ru", at: t0.addingTimeInterval(1)),
+                .manualFix, "reset clears the pending manual conversion"
+            )
+            TestRunner.assertTrue(
+                !tracker.classifyRevertOfRevert(word: "смотри", targetLang: "en", at: t0.addingTimeInterval(1)),
+                "reset clears the pending revert"
+            )
+        }
     }
 }
