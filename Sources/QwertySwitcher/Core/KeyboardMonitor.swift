@@ -123,6 +123,22 @@ final class KeyboardMonitor {
 
     private var autoLearnTracker = AutoLearnTracker()
 
+    // MARK: - Learning on behavior patterns (learning_spec.md, wave 2)
+
+    /// Mechanism A (DS-confirmed pairs), C (passive personal frequency) and
+    /// B (revert/toggle classification) — owned here, the only place that
+    /// touches all six Double Shift success sites (3 in this file, 3 more in
+    /// `HotkeyManager` via `classifyDoubleShiftGesture`) plus both automatic
+    /// correction success callbacks and `undoLastCorrection`. Default-valued
+    /// so `AppDelegate`'s existing `KeyboardMonitor(...)` call site is
+    /// untouched — these three modules are entirely self-contained
+    /// (UserDefaults-backed, like `PreferencesService`).
+    private let learnedWordsStore: LearnedWordsStore
+    private let personalFreqStore: PersonalFrequencyStore
+    private let feedbackTracker: CorrectionFeedbackTracker
+    private var learningFlushTimer: Timer?
+    private let learningFlushInterval: TimeInterval = 30
+
     // Stale-buffer eviction: drop accumulated keys if user paused typing too long
     private var lastKeyTime: CFAbsoluteTime = 0
     private let staleBufferTimeout: CFAbsoluteTime = 10.0 // 10 sec idle → clear
@@ -218,7 +234,13 @@ final class KeyboardMonitor {
          // regardless of whatever secure-input state the Mac running the
          // tests happens to be in (IsSecureEventInputEnabled is a GLOBAL OS
          // flag, unrelated to this test process).
-         secureInputDetector: SecureInputDetector = SecureInputDetector()) {
+         secureInputDetector: SecureInputDetector = SecureInputDetector(),
+         // Defaulted (see the property doc above) so AppDelegate's existing
+         // call site needs no change at all — tests that need a private
+         // `UserDefaults` suite pass these in explicitly instead.
+         learnedWordsStore: LearnedWordsStore = LearnedWordsStore(),
+         personalFrequencyStore: PersonalFrequencyStore = PersonalFrequencyStore(),
+         feedbackTracker: CorrectionFeedbackTracker = CorrectionFeedbackTracker()) {
         self.languageDetector = languageDetector
         self.secureInputDetector = secureInputDetector
         self.textReplacer = textReplacer
@@ -230,6 +252,9 @@ final class KeyboardMonitor {
         self.perAppLayoutService = perAppLayoutService
         self.instantCorrectionAnalyzer = instantCorrectionAnalyzer
         self.snippetService = snippetService
+        self.learnedWordsStore = learnedWordsStore
+        self.personalFreqStore = personalFrequencyStore
+        self.feedbackTracker = feedbackTracker
         self.activeAppBundleID = CommandLine.arguments.contains("--test")
             ? nil : NSWorkspace.shared.frontmostApplication?.bundleIdentifier
 
@@ -241,11 +266,49 @@ final class KeyboardMonitor {
             self, selector: #selector(layoutDidChange(_:)),
             name: .layoutChanged, object: nil
         )
+
+        // Mechanism A/C wiring (learning_spec.md): `isEnabled` mirrors
+        // `Preferences.isLearningEnabled` at construction time — no UI
+        // toggle exists yet (wave 3), so no live-observer is needed. Both
+        // stores already no-op every mutation/query while disabled, and
+        // `LanguageDetector.detect()`'s learned branch degrades to
+        // no-op on an empty union, so this one assignment is the ONLY
+        // gate the boundary path needs.
+        self.learnedWordsStore.isEnabled = prefsService.isLearningEnabled
+        self.personalFreqStore.isEnabled = prefsService.isLearningEnabled
+        languageDetector.learnedWordsProvider = { [weak self] lang in
+            guard let self else { return [] }
+            let learned = self.learnedWordsStore.activeKeys(lang: lang)
+            let personal = self.personalFreqStore.promotedKeys(lang: lang)
+                .filter { !self.exceptionsService.isAutoLearned($0) }
+            return learned.union(personal)
+        }
+
+        // Same construction pattern as `AppDelegate.startHealthPolling`
+        // (non-auto-scheduled `Timer` + explicit `.common`-mode add) rather
+        // than `Timer.scheduledTimer` — avoids double-registering it on the
+        // default run loop mode as well.
+        let flushTimer = Timer(timeInterval: learningFlushInterval, repeats: true) { [weak self] _ in
+            self?.flushLearning()
+        }
+        RunLoop.main.add(flushTimer, forMode: .common)
+        learningFlushTimer = flushTimer
     }
 
     deinit {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         NotificationCenter.default.removeObserver(self)
+        learningFlushTimer?.invalidate()
+    }
+
+    /// Persists Mechanism A/C's in-memory mutations — never called from the
+    /// CGEventTap callback (both stores' own `flush` docs: no disk I/O on
+    /// the hot path). Called by the ~30s timer above and, per
+    /// `learning_spec.md`, `applicationWillTerminate` (`AppDelegate`).
+    func flushLearning() {
+        let now = Date()
+        learnedWordsStore.flush(now: now)
+        personalFreqStore.flush(now: now)
     }
 
     @objc private func appDidActivate(_ notification: Notification) {
@@ -273,6 +336,8 @@ final class KeyboardMonitor {
         instantCorrectionGate.reset()
         sentenceStartTracker.reset()
         languageDetector.resetContext()
+        // Mechanism B reset point 2/7: external layout change.
+        feedbackTracker.reset()
     }
 
     func start() {
@@ -521,6 +586,8 @@ final class KeyboardMonitor {
             runKeystrokes.removeAll()
             lastCompletedWord = nil
             autoLearnTracker.cancel()
+            // Mechanism B reset point 3/7: secure input.
+            feedbackTracker.reset()
             health = .secureInput
             DebugLog.shared.log("KM", "skip: secure input")
             return
@@ -535,6 +602,8 @@ final class KeyboardMonitor {
             buffer.clear()
             pendingLeadingSymbols.removeAll()
             runKeystrokes.removeAll()
+            // Mechanism B reset point 4/7: stale-buffer eviction (10s idle).
+            feedbackTracker.reset()
         }
         lastKeyTime = now
 
@@ -573,6 +642,8 @@ final class KeyboardMonitor {
             pendingLeadingSymbols.removeAll()
             runKeystrokes.removeAll()
             autoLearnTracker.registerDeletion()
+            // Mechanism B reset point 5/7: backspace.
+            feedbackTracker.reset()
             return
         }
 
@@ -705,6 +776,8 @@ final class KeyboardMonitor {
             pendingLeadingSymbols.removeAll()
             runKeystrokes.removeAll()
             lastCompletedWord = nil
+            // Mechanism B reset point 6/7: navigation keys.
+            feedbackTracker.reset()
         }
     }
 
@@ -886,11 +959,17 @@ final class KeyboardMonitor {
             otherLayouts: otherLayouts,
             convert: { [languageDetector] layout in
                 languageDetector.inputSourceManager.convertKeystrokes(keystrokes, toLayout: layout)
-            }
+            },
+            learnedActive: learnedActiveSet(for: otherLayouts)
         )
         guard let result = evaluation.result else {
             logInstantSilence(evaluation.silence, len: keystrokes.count)
             return
+        }
+        if result.wasLearned {
+            DebugLog.shared.log(
+                "KM", "learned: fired path=instant lang=\(result.layout.languageCode) len=\(result.correctedWord.count)"
+            )
         }
 
         if exceptionsService.isWordExcepted(result.correctedWord) {
@@ -958,6 +1037,17 @@ final class KeyboardMonitor {
                         original: original, corrected: correctedWord, trailing: nil
                     )
                 }
+                if self.prefsService.isLearningEnabled, !original.isEmpty {
+                    // Mechanism B feed (learning_spec.md): `wasLearned`
+                    // re-checked against the store here — `result.wasLearned`
+                    // already tells us this directly for the instant path,
+                    // matching the boundary path's "check store.isActive
+                    // at the success site" contract.
+                    self.feedbackTracker.recordAutoCorrection(
+                        original: original, corrected: correctedWord,
+                        targetLang: result.layout.languageCode, wasLearned: result.wasLearned, at: Date()
+                    )
+                }
                 self.statsService.recordAutoSwitch()
                 SoundService.shared.playCorrection(prefsService: self.prefsService)
                 NotificationCenter.default.post(name: .statsUpdated, object: nil)
@@ -1019,6 +1109,187 @@ final class KeyboardMonitor {
         )
     }
 
+    // MARK: - Learning on behavior patterns (Mechanisms A/B/C, learning_spec.md)
+
+    /// Instant-path Mechanism A set — plain, lowercased words active across
+    /// EVERY currently-active layout's language, unioned with Mechanism C's
+    /// boundary-only status EXCLUDED here (spec: C never applies on the
+    /// instant path). Cyrillic and Latin cores can never collide textually,
+    /// so a flat cross-language union is safe (see `learnedWordsProvider`'s
+    /// own union for the same reasoning on the boundary side).
+    private func learnedActiveSet(for layouts: [KeyboardLayout]) -> Set<String> {
+        guard prefsService.isLearningEnabled else { return [] }
+        var result: Set<String> = []
+        for layout in layouts { result.formUnion(learnedWordsStore.activeKeys(lang: layout.languageCode)) }
+        return result
+    }
+
+    /// Mechanism A's write-time normalization (learning_spec.md "Механизм A
+    /// → Запись"). Returns the plain lowercased core to hand to
+    /// `LearnedWordsStore.recordManualFix`, or nil (verbose-logged with the
+    /// exact reason) when the gesture must never be learned. Never logs the
+    /// word itself — lengths/reasons only.
+    private func normalizedLearnableCore(from text: String, lang: String, resynced: Bool) -> String? {
+        guard prefsService.isLearningEnabled else {
+            DebugLog.shared.log("KM", "learned: skipped reason=disabled", level: .verbose)
+            return nil
+        }
+        guard !resynced else {
+            DebugLog.shared.log("KM", "learned: skipped reason=resynced", level: .verbose)
+            return nil
+        }
+        guard let core = LanguageDetector.core(of: text)?.lowercased(), !core.isEmpty,
+              !LanguageDetector.isMixedScript(core) else {
+            DebugLog.shared.log("KM", "learned: skipped reason=mixedRun", level: .verbose)
+            return nil
+        }
+        // Below this, neither application path (instant minLength=4,
+        // boundary len>=3) can EVER fire — pointless to occupy a cap slot.
+        guard core.count >= 3 else {
+            DebugLog.shared.log("KM", "learned: skipped reason=belowMinLen", level: .verbose)
+            return nil
+        }
+        guard !LanguageDetector.isReservedForDisambiguation(core, language: lang) else {
+            DebugLog.shared.log("KM", "learned: skipped reason=conflictPair", level: .verbose)
+            return nil
+        }
+        return core
+    }
+
+    /// Single dispatch point for a Double Shift gesture that just succeeded
+    /// — called from all SIX DS success sites (3 below in this file via
+    /// `positiveRecord` non-nil; 3 more in `HotkeyManager` via
+    /// `classifyDoubleShiftGesture`, always `positiveRecord: nil`). Mirrors
+    /// learning_spec.md "Перед записью — classify: manualFix → запись;
+    /// toggleOfManualFix → revokeRecord; revert → см. B-механизм."
+    /// `word`/`sourceLang`/`targetLang` describe the gesture as
+    /// `CorrectionFeedbackTracker.classifyDoubleShift` expects: `word` reads
+    /// in `sourceLang` right now, about to become `targetLang`.
+    private func handleDoubleShiftClassification(
+        word: String, sourceLang: String, targetLang: String,
+        positiveRecord: (core: String, originApp: String?)?, nonEligibleReason: String = "selection|clipboard|caret",
+        at: Date
+    ) {
+        guard prefsService.isLearningEnabled else { return }
+
+        // Revert-of-revert checked FIRST and independently: a fresh DS
+        // heading back into the direction JUST annulled by a revert (≤15s)
+        // means "actually, keep the correction" — lifts the exception the
+        // revert created instead of falling through to `.manualFix` and
+        // re-learning a pair that's about to be reverted right back.
+        if feedbackTracker.classifyRevertOfRevert(word: word, targetLang: targetLang, at: at) {
+            exceptionsService.removeAutoLearned(word)
+            DebugLog.shared.log("KM", "revert-of-revert: exception lifted")
+            return
+        }
+
+        switch feedbackTracker.classifyDoubleShift(word: word, sourceLang: sourceLang, targetLang: targetLang, at: at) {
+        case .revertOfAutoCorrection(let original, let corrected, let wasLearned):
+            exceptionsService.learnException(original: original, corrected: corrected)
+            if wasLearned, let core = LanguageDetector.core(of: corrected)?.lowercased() {
+                learnedWordsStore.unlearn(word: core, lang: sourceLang)
+                personalFreqStore.unlearn(word: core, lang: sourceLang)
+            }
+            feedbackTracker.recordRevert(original: original, corrected: corrected, at: at)
+            DebugLog.shared.log("KM", "revert → exception (wasLearned=\(wasLearned), via=ds)")
+
+        case .toggleOfManualFix(let toggledWord, let lang):
+            learnedWordsStore.revokeRecord(word: toggledWord, lang: lang)
+            DebugLog.shared.log("KM", "toggle revoked lang=\(lang) len=\(toggledWord.count)")
+
+        case .manualFix:
+            guard let positiveRecord else {
+                DebugLog.shared.log("KM", "learned: skipped reason=\(nonEligibleReason)", level: .verbose)
+                return
+            }
+            let outcome = learnedWordsStore.recordManualFix(
+                word: positiveRecord.core, lang: targetLang, originApp: positiveRecord.originApp, at: at
+            )
+            let count = learnedWordsStore.allEntries["\(targetLang):\(positiveRecord.core)"]?.count ?? 0
+            DebugLog.shared.log(
+                "KM", "learned: recorded lang=\(targetLang) len=\(positiveRecord.core.count) count=\(count)", level: .verbose
+            )
+            if outcome == .promoted {
+                DebugLog.shared.log("KM", "learned: promoted lang=\(targetLang) len=\(positiveRecord.core.count)")
+                if languageDetector.isDictionaryWord(positiveRecord.core, language: targetLang) {
+                    // Honest UX signal (learning_spec.md verbose section):
+                    // recorded and promoted, but the OWN reading is itself a
+                    // real word of its own language — `wordLevel(own)==0` on
+                    // the instant path and `scoreWord`'s own-side gates on
+                    // the boundary path structurally can never let this fire.
+                    DebugLog.shared.log("KM", "learned: inapplicable lang=\(targetLang) len=\(positiveRecord.core.count)")
+                }
+            }
+            feedbackTracker.recordManualConversion(word: positiveRecord.core, sourceLang: sourceLang, targetLang: targetLang, at: at)
+        }
+    }
+
+    /// Mirrors `handleDoubleShiftClassification` for `HotkeyManager`'s three
+    /// non-A-eligible DS paths (AX selection / clipboard selection / AX
+    /// caret word) — called there via `keyboardMonitor?`. `word` is the text
+    /// as it reads BEFORE this conversion (in `sourceLang`). Never records
+    /// positively (`positiveRecord: nil`): selection/clipboard content must
+    /// never reach `LearnedWordsStore` (learning_spec.md Mechanism A
+    /// "Пути... в запись НЕ идут никогда"), but classify still runs so a
+    /// genuine revert/toggle via these paths is recognized instead of
+    /// silently leaving stale tracker state armed for a later, unrelated
+    /// gesture.
+    func classifyDoubleShiftGesture(word: String, sourceLang: String, targetLang: String, via: String = "selection|clipboard|caret") {
+        handleDoubleShiftClassification(
+            word: word, sourceLang: sourceLang, targetLang: targetLang,
+            positiveRecord: nil, nonEligibleReason: via, at: Date()
+        )
+    }
+
+    /// Mechanism C's passive bump (learning_spec.md "Механизм C") — called
+    /// ONLY from `processCurrentWord`'s `.noSwitch` branch: the word crossed
+    /// a boundary and `detect()` found no reason to correct it. Reached only
+    /// when `canAutoCorrect` was already true at the call site (license,
+    /// auto-switch, per-app profile all already clear — see
+    /// `handleWordBoundary`), so this adds only the gates the spec names
+    /// beyond that. Bumps the RAW typed core — before Yoficator/snippets/
+    /// smart-case ever see it.
+    private func recordPersonalFrequencyBump(keystrokes: [BufferedKeystroke], currentLayout: KeyboardLayout) {
+        guard prefsService.isLearningEnabled, !secureInputDetector.isSecureInput else { return }
+        let ownText = languageDetector.inputSourceManager.convertKeystrokes(keystrokes, toLayout: currentLayout)
+        guard let ownCore = LanguageDetector.core(of: ownText)?.lowercased(),
+              !LanguageDetector.isMixedScript(ownCore), ownCore.count >= 3 else { return }
+        guard languageDetector.isCleanReading(ownCore, language: currentLayout.languageCode) else {
+            DebugLog.shared.log("KM", "[C] skipped reason=junkOwn", level: .verbose)
+            return
+        }
+
+        // Anti-#19 (learning_spec.md 🔒): a word whose PROJECTION onto the
+        // other active layout is already dictionary-valid OR learned-active
+        // must never be bumped — a refused gate is not confirmation the
+        // owner meant the own-language reading ("сдуфк" stays un-bumped;
+        // its projection "clear" is a dictionary word).
+        if let otherLayout = languageDetector.activeLayouts.first(where: { $0.id != currentLayout.id }) {
+            let otherText = languageDetector.inputSourceManager.convertKeystrokes(keystrokes, toLayout: otherLayout)
+            if let otherCore = LanguageDetector.core(of: otherText)?.lowercased(),
+               !LanguageDetector.isMixedScript(otherCore) {
+                let isWord = languageDetector.isDictionaryWord(otherCore, language: otherLayout.languageCode)
+                let isLearned = learnedWordsStore.isActive(word: otherCore, lang: otherLayout.languageCode)
+                guard !isWord, !isLearned else {
+                    DebugLog.shared.log("KM", "[C] skipped reason=projectionIsWord", level: .verbose)
+                    return
+                }
+            }
+        }
+
+        let isDictWord = languageDetector.isDictionaryWord(ownCore, language: currentLayout.languageCode)
+        let outcome = personalFreqStore.bump(
+            word: ownCore, lang: currentLayout.languageCode, isDictionaryWord: isDictWord, at: Date()
+        )
+        let count = personalFreqStore.allEntries["\(currentLayout.languageCode):\(ownCore)"]?.count ?? 0
+        DebugLog.shared.log(
+            "KM", "[C] bump len=\(ownCore.count) lang=\(currentLayout.languageCode) count=\(count)", level: .verbose
+        )
+        if outcome == .promoted {
+            DebugLog.shared.log("KM", "[C] promoted len=\(ownCore.count) lang=\(currentLayout.languageCode)")
+        }
+    }
+
     private func invalidateEditingContext(reason: String = "unspecified") {
         if isPaused {
             invalidateAfterReplacement = true
@@ -1035,6 +1306,10 @@ final class KeyboardMonitor {
         instantCorrectionGate.reset()
         sentenceStartTracker.reset()
         languageDetector.resetContext()
+        // Mechanism B reset point 1/7 (learning_spec.md): covers every
+        // reason routed through here — app-activated, mouse-click,
+        // modifier-shortcut, paste-no-format, blocked-app-hotkey.
+        feedbackTracker.reset()
     }
 
     /// Double Shift on a run the dictionary cannot judge: convert it key for
@@ -1165,6 +1440,20 @@ final class KeyboardMonitor {
                 self.buffer.clear()
                 self.pendingLeadingSymbols.removeAll()
                 self.lastCompletedWord = nil
+                // Mechanism A/B (learning_spec.md): "via run" IS one of the
+                // three A-eligible sources. Deliberately limited to runs
+                // containing a non-letter (this function's own contract) —
+                // `normalizedLearnableCore` rejects most of them via its own
+                // ">1 core / empty" guard, which is correct: a mixed run is
+                // a gesture, not a confirmed word pair.
+                let learnableCore = self.normalizedLearnableCore(
+                    from: converted, lang: targetLayout.languageCode, resynced: resynced
+                )
+                let positiveRecord = learnableCore.map { (core: $0, originApp: self.activeAppBundleID) }
+                self.handleDoubleShiftClassification(
+                    word: onScreen, sourceLang: currentLayout.languageCode, targetLang: targetLayout.languageCode,
+                    positiveRecord: positiveRecord, at: Date()
+                )
                 self.statsService.recordOptionSwitch()
                 SoundService.shared.playSwitch(
                     targetLanguageCode: targetLayout.languageCode, prefsService: self.prefsService
@@ -1299,6 +1588,10 @@ final class KeyboardMonitor {
             DebugLog.shared.log("KM", "run check: erase resynced \(length)→\(measured) (source=\(source))")
             length = measured
         }
+        // Captured before the clear below — Mechanism A's "resynced == true
+        // → не учить" guard (learning_spec.md): a word this call re-measured
+        // from the screen is not necessarily what the owner actually typed.
+        let wasResynced = pendingRunResync != nil
         pendingRunResync = nil
         pendingRunResyncWord = nil
 
@@ -1339,6 +1632,18 @@ final class KeyboardMonitor {
                 // to make it look like the feature needed 2-3 presses to
                 // "finally" work).
                 self.lastCompletedWord = (keystrokes, trailing ?? "", targetLayout, leadingSymbols, trailingKeystroke)
+                // Mechanism A/B (learning_spec.md): "via buffer"/"via
+                // history" are the other two A-eligible sources.
+                // `correctedWord` (not `runReplacement`) — lead symbols
+                // never enter the learned pair.
+                let learnableCore = self.normalizedLearnableCore(
+                    from: correctedWord, lang: targetLayout.languageCode, resynced: wasResynced
+                )
+                let positiveRecord = learnableCore.map { (core: $0, originApp: self.activeAppBundleID) }
+                self.handleDoubleShiftClassification(
+                    word: originalWordOnly, sourceLang: currentLayout.languageCode, targetLang: targetLayout.languageCode,
+                    positiveRecord: positiveRecord, at: Date()
+                )
                 self.statsService.recordOptionSwitch()
                 SoundService.shared.playSwitch(targetLanguageCode: targetLayout.languageCode, prefsService: self.prefsService)
                 NotificationCenter.default.post(name: .statsUpdated, object: nil)
@@ -1401,6 +1706,12 @@ final class KeyboardMonitor {
         switch result {
         case .noSwitch:
             DebugLog.shared.log("KM", "detect: noSwitch len=\(keystrokes.count) cur=\(currentLang)", level: .verbose)
+            // Mechanism C's passive bump (learning_spec.md): the word
+            // crossed a boundary with no correction — before Yoficator ever
+            // touches it (bumps the RAW typed core).
+            if let ownLayout = languageDetector.inputSourceManager.currentLayout {
+                recordPersonalFrequencyBump(keystrokes: keystrokes, currentLayout: ownLayout)
+            }
             if prefsService.isYoficatorEnabled {
                 return applyYoficator(keystrokes: keystrokes, trigger: trigger)
             }
@@ -1415,6 +1726,21 @@ final class KeyboardMonitor {
             if let orig = originalWord, exceptionsService.isAutoLearned(orig) {
                 DebugLog.shared.log("KM", "skip: auto-learned exception")
                 return false
+            }
+
+            // Mechanism A boundary observability (learning_spec.md):
+            // `detect()` never propagates WHY a candidate won (that's the
+            // whole point — the learned branch widens `inDictionary`/`score`
+            // in place), so whether THIS fire came from a learned entry is
+            // re-derived here the same way `undoLastCorrection`'s "разучивание"
+            // note prescribes: check `store.isActive` on the result.
+            let wasLearnedBoundary = learnedWordsStore.isActive(
+                word: correctedWord.lowercased(), lang: layout.languageCode
+            )
+            if wasLearnedBoundary {
+                DebugLog.shared.log(
+                    "KM", "learned: fired path=boundary lang=\(layout.languageCode) len=\(correctedWord.count)"
+                )
             }
 
             if prefsService.isYoficatorEnabled && layout.isRussian {
@@ -1490,6 +1816,12 @@ final class KeyboardMonitor {
                             original: original,
                             corrected: correctedWord,
                             trailing: trigger
+                        )
+                    }
+                    if self.prefsService.isLearningEnabled, !original.isEmpty {
+                        self.feedbackTracker.recordAutoCorrection(
+                            original: original, corrected: correctedWord,
+                            targetLang: layout.languageCode, wasLearned: wasLearnedBoundary, at: Date()
                         )
                     }
                     self.statsService.recordAutoSwitch()
@@ -1572,6 +1904,8 @@ final class KeyboardMonitor {
             withID: correction.originalLayoutID
         ) else { return false }
         _ = switchUndoManager.consume()
+        // Mechanism B reset point 7/7 (learning_spec.md).
+        feedbackTracker.reset()
 
         isPaused = true
         textReplacer.replaceCurrentWord(
@@ -1587,6 +1921,35 @@ final class KeyboardMonitor {
                 self.buffer.clear()
                 self.lastCompletedWord = nil
                 self.autoLearnTracker.cancel()
+                // Mechanism B main path (learning_spec.md "Главный путь
+                // отката — undo"): `switchUndoManager.lastCorrection` KNOWS
+                // original/corrected/layout — no heuristic needed. Always
+                // learns the exception; additionally unlearns from BOTH
+                // stores when the corrected word carries an active
+                // learned/promoted record (checked here, since
+                // `wasLearnedFired` is never threaded through `detect()`).
+                if self.prefsService.isLearningEnabled {
+                    let targetLayoutForUndo = self.languageDetector.inputSourceManager.layout(
+                        withID: correction.targetLayoutID
+                    )
+                    var wasLearned = false
+                    if let core = LanguageDetector.core(of: correction.correctedWord)?.lowercased(),
+                       let lang = targetLayoutForUndo?.languageCode {
+                        wasLearned = self.learnedWordsStore.isActive(word: core, lang: lang)
+                            || self.personalFreqStore.isPromoted(word: core, lang: lang)
+                        if wasLearned {
+                            self.learnedWordsStore.unlearn(word: core, lang: lang)
+                            self.personalFreqStore.unlearn(word: core, lang: lang)
+                        }
+                    }
+                    self.exceptionsService.learnException(
+                        original: correction.originalWord, corrected: correction.correctedWord
+                    )
+                    self.feedbackTracker.recordRevert(
+                        original: correction.originalWord, corrected: correction.correctedWord, at: Date()
+                    )
+                    DebugLog.shared.log("KM", "revert → exception (wasLearned=\(wasLearned), via=undo)")
+                }
                 SoundService.shared.playSwitch(targetLanguageCode: originalLayout.languageCode, prefsService: self.prefsService)
                 DebugLog.shared.log("KM", "undo applied with trailing preserved")
             case .layoutSwitchFailed:

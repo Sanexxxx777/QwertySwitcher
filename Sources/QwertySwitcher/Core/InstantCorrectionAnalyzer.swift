@@ -31,6 +31,13 @@ final class InstantCorrectionAnalyzer {
     struct Result {
         let layout: KeyboardLayout
         let correctedWord: String
+        /// True when this fire came from the Mechanism A learned bypass
+        /// (learning_spec.md), not the ordinary dictionary/n-gram scoring —
+        /// `KeyboardMonitor` uses it only for verbose observability
+        /// (`fired path=instant …`) and to skip re-deriving `wasLearned` at
+        /// the success callback. Defaulted so every existing call site
+        /// (`Result(layout:correctedWord:)`) is unaffected.
+        var wasLearned: Bool = false
     }
 
     /// Why `evaluate` did NOT fire, for verbose-log observability only (field
@@ -64,16 +71,50 @@ final class InstantCorrectionAnalyzer {
     ///   - currentLayout: the layout the keystrokes currently display as.
     ///   - otherLayouts: candidate replacement layouts (the rest of the active pair).
     ///   - convert: keystrokes → text under a given layout.
+    ///   - learnedActive: plain, lowercased Mechanism A words active for the
+    ///     candidate languages (learning_spec.md "Механизм A → Применение —
+    ///     instant-путь") — `KeyboardMonitor` assembles this from
+    ///     `LearnedWordsStore`; this analyzer never reads the store itself,
+    ///     keeping its 0-FP corpus test meaningful. Empty (the default) is
+    ///     the ONLY thing this function ever asks about it, so a
+    ///     byte-for-byte-unchanged corpus run never has to know this branch
+    ///     exists.
     func evaluate(
         keystrokes: [BufferedKeystroke],
         currentLayout: KeyboardLayout,
         otherLayouts: [KeyboardLayout],
-        convert: (KeyboardLayout) -> String
+        convert: (KeyboardLayout) -> String,
+        learnedActive: Set<String> = []
     ) -> (result: Result?, silence: SilenceReason?) {
         guard keystrokes.count >= Self.minLength else { return (nil, nil) }
 
         let currentText = convert(currentLayout)
         guard !currentText.isEmpty, !LanguageDetector.shouldSkip(currentText) else { return (nil, .shouldSkip) }
+
+        // Mechanism A instant bypass — stands BEFORE the junk-gate (the
+        // flagship case, "сдуфк"→clear, is EXACTLY the run the junk metric
+        // would otherwise silence). First guard is `!learnedActive.isEmpty`
+        // so an empty store never pays for this on every keystroke. Own-side
+        // guard mirrors the ordinary path (`wordLevel == 0` — a dictionary/
+        // prefix hit on the CURRENT reading still blocks it, symmetric
+        // protection against overwriting a real own-language word) but
+        // DELIBERATELY skips `currentCeiling`: n-gram noise on the own
+        // reading is not evidence the owner typed a real word, and must not
+        // shield a false negative once a confirmed learned pair disagrees.
+        // Bypasses junkGate/candidateNotValidated/belowFloor/belowMargin —
+        // exactly the four the spec names — by never reaching that code at
+        // all when it fires.
+        if !learnedActive.isEmpty {
+            let own = combinedScore(currentText, language: currentLayout.languageCode)
+            if own.wordLevel == 0 {
+                for layout in otherLayouts where layout.id != currentLayout.id {
+                    let candidateText = convert(layout)
+                    guard !candidateText.isEmpty, !LanguageDetector.isMixedScript(candidateText) else { continue }
+                    guard learnedActive.contains(candidateText.lowercased()) else { continue }
+                    return (Result(layout: layout, correctedWord: candidateText, wasLearned: true), nil)
+                }
+            }
+        }
 
         // Junk-gate (field defect 19.08.2026, measured
         // Scripts/research/instant_junk_gate_sim.py `first_instant_fire_gated`):
