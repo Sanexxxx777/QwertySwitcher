@@ -1206,8 +1206,12 @@ final class KeyboardMonitor {
                 word: positiveRecord.core, lang: targetLang, originApp: positiveRecord.originApp, at: at
             )
             let count = learnedWordsStore.allEntries["\(targetLang):\(positiveRecord.core)"]?.count ?? 0
+            // Always-on (not verbose): the ONE event that shows the learning
+            // chain started at all — verbose is OFF in the field since 24.08,
+            // and without this line a real user's first DS fix of a pair is
+            // invisible until promotion.
             DebugLog.shared.log(
-                "KM", "learned: recorded lang=\(targetLang) len=\(positiveRecord.core.count) count=\(count)", level: .verbose
+                "KM", "learned: recorded lang=\(targetLang) len=\(positiveRecord.core.count) count=\(count)"
             )
             if outcome == .promoted {
                 DebugLog.shared.log("KM", "learned: promoted lang=\(targetLang) len=\(positiveRecord.core.count)")
