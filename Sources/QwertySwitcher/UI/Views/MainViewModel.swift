@@ -73,6 +73,19 @@ final class MainViewModel: ObservableObject {
     @Published var isSmartCaseEnabled: Bool {
         didSet { prefsService.isSmartCaseEnabled = isSmartCaseEnabled }
     }
+    /// Mechanism A/B/C (learning_spec.md — обучение на паттернах). Beyond
+    /// the plain preference write every other toggle here does, this one
+    /// also has to reach `KeyboardMonitor`'s already-live `LearnedWordsStore`/
+    /// `PersonalFrequencyStore` — `Preferences.isLearningEnabled` alone is
+    /// re-checked live everywhere EXCEPT the boundary-path word provider,
+    /// which reads each store's own `isEnabled` (see
+    /// `KeyboardMonitor.setLearningEnabled` for why).
+    @Published var isLearningEnabled: Bool {
+        didSet {
+            prefsService.isLearningEnabled = isLearningEnabled
+            keyboardMonitor.setLearningEnabled(isLearningEnabled)
+        }
+    }
     @Published var isVerboseLogEnabled: Bool {
         didSet { prefsService.isVerboseLogEnabled = isVerboseLogEnabled }
     }
@@ -178,6 +191,7 @@ final class MainViewModel: ObservableObject {
         self.isInstantCorrectionEnabled = prefsService.isInstantCorrectionEnabled
         self.isSnippetExpansionEnabled = prefsService.isSnippetExpansionEnabled
         self.isSmartCaseEnabled = prefsService.isSmartCaseEnabled
+        self.isLearningEnabled = prefsService.isLearningEnabled
         self.isVerboseLogEnabled = prefsService.isVerboseLogEnabled
         self.isPerAppLayoutEnabled = perAppLayoutService.isEnabled
         self.isAutoStartEnabled = autoStartService.isEnabled
@@ -310,6 +324,7 @@ final class MainViewModel: ObservableObject {
         isInstantCorrectionEnabled = prefsService.isInstantCorrectionEnabled
         isSnippetExpansionEnabled = prefsService.isSnippetExpansionEnabled
         isSmartCaseEnabled = prefsService.isSmartCaseEnabled
+        isLearningEnabled = prefsService.isLearningEnabled
         isVerboseLogEnabled = prefsService.isVerboseLogEnabled
         isPerAppLayoutEnabled = perAppLayoutService.isEnabled
         themePreference = prefsService.themePreference
