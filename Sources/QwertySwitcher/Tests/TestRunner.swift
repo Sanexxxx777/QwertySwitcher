@@ -832,9 +832,15 @@ enum SettingsBackupTests {
         let exceptions = ExceptionsService(defaults: defaults)
         let perApp = PerAppLayoutService(inputSourceManager: InputSourceManager(), prefsService: prefs)
         let snippets = SnippetService(defaults: defaults)
+        let learnedWords = LearnedWordsStore(defaults: defaults)
+        // Mechanism C lives in its own store and is never handed to
+        // `SettingsBackupService` at all — bumped here only so the "backup
+        // never contains a C word" assertion below is checking something
+        // real, not a tautology over an empty store.
+        let personalFreq = PersonalFrequencyStore(defaults: defaults)
         let service = SettingsBackupService(
             prefsService: prefs, exceptionsService: exceptions, perAppLayoutService: perApp,
-            snippetService: snippets
+            snippetService: snippets, learnedWordsStore: learnedWords
         )
 
         prefs.isInstantCorrectionEnabled = false
@@ -847,6 +853,13 @@ enum SettingsBackupTests {
         perApp.isEnabled = true
         perApp.manualOverrides = ["app.example": "layout.ru"]
         _ = snippets.setSnippet(trigger: "addr", replacement: "Владивосток")
+        let learnedT0 = Date(timeIntervalSince1970: 2_000)
+        learnedWords.recordManualFix(word: "clear", lang: "en", originApp: "com.app.terminal", at: learnedT0)
+        learnedWords.recordManualFix(
+            word: "clear", lang: "en", originApp: "com.app.terminal", at: learnedT0.addingTimeInterval(86_400)
+        )
+        learnedWords.recordManualFix(word: "vmc", lang: "en", originApp: nil, at: learnedT0)
+        personalFreq.bump(word: "неразглашаемоеслово", lang: "ru", isDictionaryWord: false, at: learnedT0)
 
         guard let data = try? service.encodedBackup(now: Date(timeIntervalSince1970: 1_000)) else {
             TestRunner.assertTrue(false, "settings backup encodes")
@@ -855,6 +868,13 @@ enum SettingsBackupTests {
         let json = String(data: data, encoding: .utf8) ?? ""
         TestRunner.assertTrue(!json.contains("hwid"), "backup excludes the license device identifier")
         TestRunner.assertTrue(!json.contains("licenseFirstSeen"), "backup excludes license anti-tamper state")
+        TestRunner.assertTrue(json.contains("\"clear\""), "backup includes an active Mechanism A entry")
+        TestRunner.assertTrue(json.contains("\"vmc\""), "backup includes a not-yet-promoted Mechanism A entry too")
+        TestRunner.assertTrue(
+            !json.contains("неразглашаемоеслово"),
+            "backup never contains a Mechanism C (personal frequency) word"
+        )
+        TestRunner.assertTrue(!json.contains("personalFreq"), "backup has no Mechanism C field at all")
 
         prefs.isInstantCorrectionEnabled = true
         exceptions.wordExceptions = []
@@ -862,6 +882,7 @@ enum SettingsBackupTests {
         perApp.isEnabled = false
         perApp.manualOverrides = [:]
         snippets.snippets = [:]
+        learnedWords.removeAll()
         do {
             try service.importBackup(data)
             TestRunner.assertTrue(!prefs.isInstantCorrectionEnabled, "import restores preferences")
@@ -878,6 +899,22 @@ enum SettingsBackupTests {
                 snippets.replacement(for: "addr") ?? "", "Владивосток",
                 "import restores local text snippets"
             )
+            TestRunner.assertTrue(
+                learnedWords.isActive(word: "clear", lang: "en"), "import restores an active Mechanism A entry"
+            )
+            TestRunner.assertEqual(
+                learnedWords.allEntries["en:clear"]?.count, 2, "import restores the exact confirmation count"
+            )
+            TestRunner.assertEqual(
+                learnedWords.allEntries["en:clear"]?.originApp, "com.app.terminal", "import restores originApp"
+            )
+            TestRunner.assertTrue(
+                !learnedWords.isActive(word: "vmc", lang: "en"),
+                "a not-yet-promoted Mechanism A entry round-trips as still not active"
+            )
+            TestRunner.assertEqual(
+                learnedWords.allEntries["en:vmc"]?.count, 1, "not-yet-promoted entry keeps count 1 through import"
+            )
         } catch {
             TestRunner.assertTrue(false, "valid settings backup imports: \(error.localizedDescription)")
         }
@@ -889,7 +926,8 @@ enum SettingsBackupTests {
                 autoLearned: valid.autoLearned, snippets: valid.snippets,
                 perAppLayoutEnabled: valid.perAppLayoutEnabled,
                 manualLayoutOverrides: valid.manualLayoutOverrides,
-                rememberedLayouts: valid.rememberedLayouts
+                rememberedLayouts: valid.rememberedLayouts,
+                learnedWords: valid.learnedWords
            )) {
             do {
                 _ = try service.decodeAndValidate(badData)
@@ -901,6 +939,34 @@ enum SettingsBackupTests {
             }
         } else {
             TestRunner.assertTrue(false, "unsupported-version fixture encodes")
+        }
+
+        if let valid = try? service.decodeAndValidate(data) {
+            let uppercaseEntry = LearnedWordBackupEntry(
+                lang: "en", word: "Clear", count: 2, firstConfirmed: 0, lastConfirmed: 1, originApp: nil
+            )
+            if let badData = try? JSONEncoder().encode(SettingsBackup(
+                formatVersion: valid.formatVersion, createdAt: valid.createdAt, preferences: valid.preferences,
+                wordExceptions: valid.wordExceptions, appProfiles: valid.appProfiles,
+                autoLearned: valid.autoLearned, snippets: valid.snippets,
+                perAppLayoutEnabled: valid.perAppLayoutEnabled,
+                manualLayoutOverrides: valid.manualLayoutOverrides,
+                rememberedLayouts: valid.rememberedLayouts,
+                learnedWords: [uppercaseEntry]
+            )) {
+                do {
+                    _ = try service.decodeAndValidate(badData)
+                    TestRunner.assertTrue(false, "a non-lowercased learned-word entry is rejected")
+                } catch SettingsBackupService.BackupError.invalidData {
+                    TestRunner.assertTrue(true, "a non-lowercased learned-word entry is rejected")
+                } catch {
+                    TestRunner.assertTrue(false, "invalid learned-word entry reports the expected error")
+                }
+            } else {
+                TestRunner.assertTrue(false, "invalid-learned-word fixture encodes")
+            }
+        } else {
+            TestRunner.assertTrue(false, "valid backup fixture decodes for the invalid-learned-word test")
         }
     }
 }

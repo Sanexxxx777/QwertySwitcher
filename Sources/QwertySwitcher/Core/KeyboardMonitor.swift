@@ -133,8 +133,13 @@ final class KeyboardMonitor {
     /// so `AppDelegate`'s existing `KeyboardMonitor(...)` call site is
     /// untouched — these three modules are entirely self-contained
     /// (UserDefaults-backed, like `PreferencesService`).
-    private let learnedWordsStore: LearnedWordsStore
-    private let personalFreqStore: PersonalFrequencyStore
+    // Visibility only (wave 3, orchestrator-approved) — `ExceptionsViewModel`
+    // and `SettingsBackupService` need the SAME live instances this class
+    // owns (a second `LearnedWordsStore()`/`PersonalFrequencyStore()` would
+    // be an independent in-memory copy racing this one). Contract/behavior
+    // unchanged: still only ever mutated from within this file.
+    let learnedWordsStore: LearnedWordsStore
+    let personalFreqStore: PersonalFrequencyStore
     private let feedbackTracker: CorrectionFeedbackTracker
     private var learningFlushTimer: Timer?
     private let learningFlushInterval: TimeInterval = 30
@@ -309,6 +314,23 @@ final class KeyboardMonitor {
         let now = Date()
         learnedWordsStore.flush(now: now)
         personalFreqStore.flush(now: now)
+    }
+
+    /// Wave-3 live toggle for `Preferences.isLearningEnabled`. Recording and
+    /// the instant-path application already re-check `prefsService.isLearningEnabled`
+    /// live at every call site (see `learnedActiveSet`,
+    /// `handleDoubleShiftClassification`, `recordPersonalFrequencyBump`), so
+    /// flipping the preference alone already mutes those. The one gap: the
+    /// boundary path's `languageDetector.learnedWordsProvider` closure reads
+    /// `store.activeKeys`/`promotedKeys` directly with no independent
+    /// preference check of its own — those depend solely on each store's
+    /// `isEnabled`, which the constructor only ever set once. Call this from
+    /// wherever the UI toggle writes `prefsService.isLearningEnabled` so a
+    /// promoted learned/personal word stops firing on the boundary path
+    /// immediately, without an app restart.
+    func setLearningEnabled(_ enabled: Bool) {
+        learnedWordsStore.isEnabled = enabled
+        personalFreqStore.isEnabled = enabled
     }
 
     @objc private func appDidActivate(_ notification: Notification) {

@@ -705,6 +705,15 @@ struct MainView: View {
                     )
                     rowDivider
                     SettingToggleRow(
+                        icon: "brain.head.profile",
+                        title: "Учиться на моих исправлениях",
+                        subtitle: "запоминать слово после двух исправлений Double Shift и чинить его само",
+                        help: "Слово, дважды исправленное Double Shift в течение 30 дней, начинает "
+                            + "исправляться само. Список выученных слов — в «Исключения» → «Обучение».",
+                        isOn: $viewModel.isLearningEnabled
+                    )
+                    rowDivider
+                    SettingToggleRow(
                         icon: "speaker.wave.2",
                         title: "Звуки",
                         subtitle: "подтверждать исправления и смену раскладки",

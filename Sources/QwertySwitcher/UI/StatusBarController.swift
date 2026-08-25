@@ -287,7 +287,8 @@ final class StatusBarController {
                 prefsService: prefsService,
                 exceptionsService: exceptionsService,
                 perAppLayoutService: perAppLayoutService,
-                snippetService: snippetService
+                snippetService: snippetService,
+                learnedWordsStore: keyboardMonitor.learnedWordsStore
             )
         )
         vm.onOpenAbout = { [weak self] in self?.openAbout() }
@@ -320,7 +321,9 @@ final class StatusBarController {
         }
 
         let vm = ExceptionsViewModel(
-            exceptionsService: exceptionsService, snippetService: snippetService
+            exceptionsService: exceptionsService, snippetService: snippetService,
+            learnedWordsStore: keyboardMonitor.learnedWordsStore,
+            personalFrequencyStore: keyboardMonitor.personalFreqStore
         )
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 440),
