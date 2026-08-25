@@ -394,6 +394,16 @@ final class HotkeyManager {
             return .selectionUnwritable
         }
         recordDoubleShiftSuccess(via: "AX selection", length: selected.count, targetLayout: target.layout)
+        // Mechanism B classify-hook (learning_spec.md) — call only, no
+        // conversion logic touched. `selected` never reaches
+        // `LearnedWordsStore` (that gate lives in `KeyboardMonitor`); this
+        // exists so a revert/toggle via selection is still recognized
+        // instead of leaving stale tracker state armed for a later gesture.
+        if let sourceLang = LanguageDetector.dominantScriptLanguageCode(selected) {
+            keyboardMonitor?.classifyDoubleShiftGesture(
+                word: selected, sourceLang: sourceLang, targetLang: target.layout.languageCode, via: "selection"
+            )
+        }
         return .converted
     }
 
@@ -414,6 +424,12 @@ final class HotkeyManager {
                let target = self.convertedReplacement(for: copied) {
                 self.pasteConverted(target.text, restoring: snapshot, toPid: overlayPid)
                 self.recordDoubleShiftSuccess(via: "clipboard selection", length: copied.count, targetLayout: target.layout)
+                // Mechanism B classify-hook — see `convertAXSelection`'s.
+                if let sourceLang = LanguageDetector.dominantScriptLanguageCode(copied) {
+                    self.keyboardMonitor?.classifyDoubleShiftGesture(
+                        word: copied, sourceLang: sourceLang, targetLang: target.layout.languageCode, via: "clipboard"
+                    )
+                }
                 return
             }
             if copied != nil {
@@ -449,6 +465,12 @@ final class HotkeyManager {
             return false
         }
         recordDoubleShiftSuccess(via: "AX caret word", length: extracted.word.count, targetLayout: target.layout)
+        // Mechanism B classify-hook — see `convertAXSelection`'s.
+        if let sourceLang = LanguageDetector.dominantScriptLanguageCode(extracted.word) {
+            keyboardMonitor?.classifyDoubleShiftGesture(
+                word: extracted.word, sourceLang: sourceLang, targetLang: target.layout.languageCode, via: "caret"
+            )
+        }
         return true
     }
 

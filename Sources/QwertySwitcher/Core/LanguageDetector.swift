@@ -8,6 +8,17 @@ final class LanguageDetector {
     private let ngramAnalyzer = NGramAnalyzer()
     private let wordFrequency = WordFrequency()
 
+    /// Mechanism A/C boundary-path lookup (learning_spec.md "Механизм A →
+    /// Применение — boundary-путь" / "Механизм C"): `KeyboardMonitor` wires
+    /// this to a closure that unions `LearnedWordsStore.activeKeys(lang:)`
+    /// and `PersonalFrequencyStore.promotedKeys(lang:)` for `lang`. Injected
+    /// as a provider — not a stored `Set` — so `detect()` never reads
+    /// UserDefaults/touches a store directly (same "pure, parametrized"
+    /// contract `InstantCorrectionAnalyzer.evaluate(learnedActive:)` keeps).
+    /// Defaults to always-empty: behavior is BYTE-FOR-BYTE the original
+    /// `detect()` until `KeyboardMonitor` wires the real stores in.
+    var learnedWordsProvider: (_ lang: String) -> Set<String> = { _ in [] }
+
     private var previousWordLanguage: String?
     /// Was 15 — LARGER than the `collisionGap` below, which meant the language
     /// of the previous word alone could manufacture a "clear winner" out of a
@@ -159,8 +170,16 @@ final class LanguageDetector {
             if Self.isMixedScript(core) { continue }
 
             let dictionaryScore = scoreWord(core, language: layout.languageCode)
-            let inDictionary = dictionaryScore > 0
-            var score = dictionaryScore
+            // Mechanism A/C boundary bypass (learning_spec.md): an active
+            // learned/promoted entry counts as "in dictionary" too, scored
+            // the SAME way a fresh dictionary hit is — `scoreWord`/
+            // `projections()`/`core()` themselves are untouched, this only
+            // widens what `inDictionary`/`score` see. `learnedWordsProvider`
+            // is empty by default, so this is a no-op until KeyboardMonitor
+            // wires a real store in (byte-for-byte guarantee).
+            let learnedHit = learnedHitApplies(core: core, lang: layout.languageCode)
+            let inDictionary = dictionaryScore > 0 || learnedHit
+            var score = learnedHit ? max(dictionaryScore, 80 + min(20, core.count * 2)) : dictionaryScore
 
             // N-gram bonus/penalty — on the core, not the run: a trailing "."
             // or "," is not evidence about which alphabet the WORD is in.
@@ -470,7 +489,13 @@ final class LanguageDetector {
     /// Returns nil when the letters are INTERRUPTED by a non-letter — two cores
     /// mean this is not one word ("model/path", "a;b", "--flag=value"), and
     /// that single rule is what keeps shell commands safe.
-    private static func core(of rendered: String) -> String? {
+    ///
+    /// Access widened from `private` to internal for wave 2 (learning_spec.md
+    /// Mechanism A "нормализация записи" explicitly reuses THIS function from
+    /// `KeyboardMonitor`) — the body/logic is untouched, only the access
+    /// level changed, so every existing call site here keeps its exact
+    /// behavior.
+    static func core(of rendered: String) -> String? {
         let core = rendered.drop(while: { !$0.isLetter })
             .prefix(while: { $0.isLetter })
         guard !core.isEmpty else { return nil }
@@ -602,6 +627,58 @@ final class LanguageDetector {
         }
 
         return 0
+    }
+
+    /// Mechanism A/C boundary gate (learning_spec.md): `core` (already
+    /// mixed-script-checked by the caller's loop) exactly matches an active
+    /// learned/promoted entry of `lang`, is at least 3 letters (len==2
+    /// learned on the boundary is explicitly forbidden — class 0.6.13), and
+    /// is itself CLEAN by `JunkMeter` (mirrors the junk-override target
+    /// gate). `possibleBigrams` unavailable (index still building) degrades
+    /// to "don't fire", same posture `junkOverrideFires` takes.
+    private func learnedHitApplies(core: String, lang: String) -> Bool {
+        guard core.count >= 3 else { return false }
+        let active = learnedWordsProvider(lang)
+        guard !active.isEmpty, active.contains(core.lowercased()) else { return false }
+        guard let bigrams = dictionary.possibleBigrams(language: lang) else { return false }
+        return JunkMeter.isClean(core, language: lang, possibleBigrams: bigrams)
+    }
+
+    /// Read-only wrapper around `scoreWord` for `KeyboardMonitor`'s wave-2
+    /// learning gates (Mechanism C's "own-прочтение словарь" / anti-#19
+    /// "проекция — словарное слово"). `scoreWord` itself is untouched.
+    func isDictionaryWord(_ word: String, language: String) -> Bool {
+        scoreWord(word, language: language) > 0
+    }
+
+    /// Read-only wrapper combining `WordDictionary.possibleBigrams` +
+    /// `JunkMeter.isClean` for `KeyboardMonitor`'s Mechanism C bump gate
+    /// ("own-прочтение clean по JunkMeter") — same nil-degrades-to-false
+    /// posture as `junkOverrideFires`/`learnedHitApplies`.
+    func isCleanReading(_ core: String, language: String) -> Bool {
+        guard let bigrams = dictionary.possibleBigrams(language: language) else { return false }
+        return JunkMeter.isClean(core, language: language, possibleBigrams: bigrams)
+    }
+
+    /// Mechanism A write-time guard (learning_spec.md: "не учить слова,
+    /// входящие в conflictPairs / twoLetterWords / oneLetterWords любой
+    /// стороной"). A closed, hand-picked membership check only — never
+    /// touches `detect()`'s own arbitration of these lists.
+    static func isReservedForDisambiguation(_ word: String, language: String) -> Bool {
+        let lowered = word.lowercased()
+        if lowered.count == 1, let c = lowered.first, oneLetterWords[language]?.contains(c) == true {
+            return true
+        }
+        if lowered.count == 2, twoLetterWords[language]?.contains(lowered) == true {
+            return true
+        }
+        // conflictPairs is keyed by the ru word → en token: scope the check
+        // to the side matching `language`, same per-language posture as the
+        // two lists above (a word is only "reserved" against the list that
+        // actually arbitrates ITS OWN language).
+        if language == "ru", conflictPairs[lowered] != nil { return true }
+        if language == "en", conflictPairs.values.contains(lowered) { return true }
+        return false
     }
 
     /// Junk-override's full condition set, in the order they're cheapest to

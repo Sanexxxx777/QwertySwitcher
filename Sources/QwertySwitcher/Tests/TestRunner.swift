@@ -98,6 +98,11 @@ enum TestRunner {
         LearnedWordsStoreTests.run()
         PersonalFrequencyStoreTests.run()
         CorrectionFeedbackTrackerTests.run()
+        LearningNormalizationTests.run()
+        InstantLearningBypassTests.run()
+        BoundaryLearningBypassTests.run()
+        LearningKeyboardMonitorIntegrationTests.run()
+        LearningReplayChainTests.run()
         print("---")
         print("\(passed) passed, \(failed) failed, \(skipped) skipped")
         return failed == 0 ? 0 : 1
@@ -5726,5 +5731,448 @@ enum CorrectionFeedbackTrackerTests {
                 "reset clears the pending revert"
             )
         }
+    }
+}
+
+// MARK: - Wave 2: integration (learning_spec.md "Тесты → Волна 2")
+
+/// Write-time normalization primitives `KeyboardMonitor.normalizedLearnableCore`
+/// reuses — `core(of:)`'s multi-core rejection and
+/// `isReservedForDisambiguation`'s closed-list membership are both plain,
+/// stateless statics on `LanguageDetector` and testable directly without any
+/// keystroke fixture. The `resynced`/`disabled` branches of
+/// `normalizedLearnableCore` itself are KeyboardMonitor-private glue with no
+/// independent seam — covered by code review + the KM integration tests
+/// below, not re-tested here in isolation.
+enum LearningNormalizationTests {
+    static func run() {
+        TestRunner.section("Wave 2 — write-time normalization primitives")
+
+        TestRunner.assertNil(LanguageDetector.core(of: "model/path"), "two letter runs separated by a symbol → no core (>1 core rejected)")
+        TestRunner.assertNil(LanguageDetector.core(of: "--flag=value"), "flag=value → no single core")
+        TestRunner.assertEqual(LanguageDetector.core(of: "/model"), "model", "leading symbol stripped, trailing none")
+        TestRunner.assertEqual(LanguageDetector.core(of: "clear"), "clear", "pure word is its own core")
+        TestRunner.assertNil(LanguageDetector.core(of: "123"), "digits-only has no letter core")
+
+        TestRunner.assertTrue(LanguageDetector.isReservedForDisambiguation("vs", language: "en"), "'vs' (conflictPairs value) is reserved")
+        TestRunner.assertTrue(LanguageDetector.isReservedForDisambiguation("мы", language: "ru"), "'мы' (conflictPairs key) is reserved")
+        TestRunner.assertTrue(LanguageDetector.isReservedForDisambiguation("на", language: "ru"), "'на' (twoLetterWords ru) is reserved")
+        TestRunner.assertTrue(LanguageDetector.isReservedForDisambiguation("of", language: "en"), "'of' (twoLetterWords en + conflictPairs value) is reserved")
+        TestRunner.assertTrue(LanguageDetector.isReservedForDisambiguation("и", language: "ru"), "'и' (oneLetterWords ru) is reserved")
+        TestRunner.assertTrue(!LanguageDetector.isReservedForDisambiguation("clear", language: "en"), "'clear' is NOT in any disambiguation list")
+        TestRunner.assertTrue(!LanguageDetector.isReservedForDisambiguation("vs", language: "ru"), "'vs' is only reserved for its OWN language side")
+    }
+}
+
+/// learning_spec.md "Тесты → Волна 2" #4 — Instant-байпас.
+enum InstantLearningBypassTests {
+    static func run() {
+        TestRunner.section("Wave 2 — InstantCorrectionAnalyzer learned bypass")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the learned-bypass fixtures")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let analyzer = InstantCorrectionAnalyzer(dictionary: dictionary)
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+
+        guard let clearStrokes = InstantCorrectionFixtures.keystrokes(for: "сдуфк", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "'сдуфк' fixture can type every character")
+            return
+        }
+        func convert(_ strokes: [BufferedKeystroke]) -> (KeyboardLayout) -> String {
+            { layout in inputSources.convertKeystrokes(strokes, toLayout: layout) }
+        }
+
+        // Empty Set: byte-for-byte the ordinary path — junkGate silences the
+        // flagship "сдуфк" case exactly like the pre-wave-2 corpus expects.
+        let ordinary = analyzer.evaluate(
+            keystrokes: clearStrokes, currentLayout: ruLayout, otherLayouts: [enLayout],
+            convert: convert(clearStrokes), learnedActive: []
+        )
+        TestRunner.assertNil(ordinary.result, "empty learnedActive: 'сдуфк' stays silent — byte-for-byte the pre-wave-2 corpus behavior")
+
+        // Fires THROUGH whatever silenced the ordinary call above (junkGate
+        // here) once "clear" is an active learned entry — the flagship case.
+        let learned = analyzer.evaluate(
+            keystrokes: clearStrokes, currentLayout: ruLayout, otherLayouts: [enLayout],
+            convert: convert(clearStrokes), learnedActive: ["clear"]
+        )
+        TestRunner.assertTrue(ordinary.silence != nil, "sanity: the ordinary path really was silenced by some gate")
+        TestRunner.assertEqual(learned.result?.correctedWord, "clear", "learned bypass fires 'сдуфк' → clear through the ordinary gate")
+        TestRunner.assertTrue(learned.result?.wasLearned == true, "fired result is flagged wasLearned")
+
+        // ownIsWord: own reading is a REAL ru dictionary word (wordLevel!=0)
+        // — the learned bypass's own-guard blocks it exactly like the
+        // ordinary path would, even though the ceiling itself is not
+        // applied in this branch.
+        guard let ownWordStrokes = InstantCorrectionFixtures.keystrokes(for: "омск", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "'омск' fixture can type every character")
+            return
+        }
+        let ownWordEnReading = inputSources.convertKeystrokes(ownWordStrokes, toLayout: enLayout).lowercased()
+        let blockedByOwnWord = analyzer.evaluate(
+            keystrokes: ownWordStrokes, currentLayout: ruLayout, otherLayouts: [enLayout],
+            convert: convert(ownWordStrokes), learnedActive: [ownWordEnReading]
+        )
+        TestRunner.assertNil(blockedByOwnWord.result, "own reading is a real ru word ('омск') — learned bypass stays silent even with a matching active entry")
+
+        // Below minLength: never evaluated regardless of learnedActive.
+        let short = Array(clearStrokes.prefix(InstantCorrectionAnalyzer.minLength - 1))
+        let shortResult = analyzer.evaluate(
+            keystrokes: short, currentLayout: ruLayout, otherLayouts: [enLayout],
+            convert: convert(short), learnedActive: ["cle"]
+        )
+        TestRunner.assertNil(shortResult.result, "shorter than minLength never fires, even with an exact-matching learnedActive entry")
+
+        // mixedScript candidate: even an EXACT learnedActive match must not
+        // fire when the candidate text itself is mixed-script garbage.
+        let mixedCandidate = "cleeх" // latin + one cyrillic х
+        let mixedResult = analyzer.evaluate(
+            keystrokes: clearStrokes, currentLayout: ruLayout, otherLayouts: [enLayout],
+            convert: { layout in layout.id == ruLayout.id ? "фываю" : mixedCandidate },
+            learnedActive: [mixedCandidate]
+        )
+        TestRunner.assertNil(mixedResult.result, "mixed-script candidate never fires even with a matching learnedActive entry")
+
+        // count==1 (not yet promoted) end-to-end through the real store: a
+        // single confirmation never reaches `activeKeys`, so the bypass
+        // never sees it.
+        let suite = AppIdentity.bundleIdentifier + ".tests.instantLearnedCount1." + UUID().uuidString
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = LearnedWordsStore(defaults: defaults)
+        store.recordManualFix(word: "clear", lang: "en", originApp: nil, at: Date())
+        let count1Result = analyzer.evaluate(
+            keystrokes: clearStrokes, currentLayout: ruLayout, otherLayouts: [enLayout],
+            convert: convert(clearStrokes), learnedActive: store.activeKeys(lang: "en")
+        )
+        TestRunner.assertNil(count1Result.result, "count==1 (not yet promoted) never reaches the bypass via the real store")
+    }
+}
+
+/// learning_spec.md "Тесты → Волна 2" #5 — Boundary-байпас. Conflict-pair
+/// arbitration and junk-override own-guard regressions are covered by the
+/// EXISTING `ConflictPairDisambiguationTests`/`JunkOverrideDetectionTests`
+/// suites (anti-regression, spec #7) — not duplicated here.
+enum BoundaryLearningBypassTests {
+    static func run() {
+        TestRunner.section("Wave 2 — LanguageDetector.detect learned bypass (boundary)")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the boundary learned-bypass fixtures")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let prefs = PreferencesService()
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+
+        // Genuinely out-of-dictionary on BOTH sides, own-reading CLEAN by
+        // JunkMeter (so the PRE-EXISTING, unrelated junk-override — which
+        // requires the OWN reading to be JUNK — cannot be what fires here;
+        // this isolates the wave-2 learned bypass specifically). Unlike the
+        // flagship "сдуфк"→clear instant example, "clear" itself is ALREADY
+        // a real en dictionary word and would switch at the boundary with an
+        // EMPTY provider too, so it can't demonstrate this bypass here.
+        let ruBigramsForSearch = dictionary.possibleBigrams(language: "ru")
+        var oovWord: String?
+        var oovStrokes: [BufferedKeystroke]?
+        for candidate in ["florn", "blurf", "wexil", "drupel", "clanth", "brenzo", "twindle", "sparlo"] {
+            guard !dictionary.mightContain(candidate, language: "en"),
+                  !dictionary.isPrefixOfBundledWord(candidate, language: "en"),
+                  let strokes = InstantCorrectionFixtures.keystrokes(for: candidate, reverse: enReverse) else { continue }
+            let ownReading = inputSources.convertKeystrokes(strokes, toLayout: ruLayout)
+            guard let ownCore = LanguageDetector.core(of: ownReading)?.lowercased(),
+                  !LanguageDetector.isMixedScript(ownCore),
+                  !dictionary.mightContain(ownCore, language: "ru"),
+                  !dictionary.isPrefixOfBundledWord(ownCore, language: "ru"),
+                  let ruBigramsForSearch, JunkMeter.isClean(ownCore, language: "ru", possibleBigrams: ruBigramsForSearch)
+            else { continue }
+            oovWord = candidate
+            oovStrokes = strokes
+            break
+        }
+        guard let oovWord, let oovStrokes else {
+            TestRunner.skip("no candidate OOV word had a clean, non-dictionary ru own-reading — widen the candidate list")
+            return
+        }
+
+        // learned OOV word corrects.
+        do {
+            let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
+            detector.learnedWordsProvider = { $0 == "en" ? [oovWord] : [] }
+            switch detector.detect(keystrokes: oovStrokes, typedLayout: ruLayout) {
+            case .switchTo(let layout, let word):
+                TestRunner.assertEqual(layout.languageCode, "en", "learned OOV '\(oovWord)' switches to en")
+                TestRunner.assertEqual(word, oovWord, "learned OOV word corrects to the learned entry")
+            case .noSwitch:
+                TestRunner.assertTrue(false, "learned OOV word must correct at the boundary once active")
+            }
+        }
+
+        // len==2 learned is forbidden on the boundary even when active.
+        do {
+            let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
+            detector.learnedWordsProvider = { $0 == "en" ? ["xz"] : [] }
+            guard let strokes = InstantCorrectionFixtures.keystrokes(for: "xz", reverse: InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)) else {
+                TestRunner.assertTrue(false, "'xz' fixture can type every character")
+                return
+            }
+            switch detector.detect(keystrokes: strokes, typedLayout: ruLayout) {
+            case .switchTo:
+                TestRunner.assertTrue(false, "len==2 learned entry must NOT correct at the boundary")
+            case .noSwitch:
+                TestRunner.assertTrue(true, "len==2 learned entry stays noSwitch at the boundary")
+            }
+        }
+
+        // A junk (no-vowel) target is never authorized by the learned
+        // bypass, even active — mirrors the flagship "vmc" case: instant-only.
+        do {
+            let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
+            detector.learnedWordsProvider = { $0 == "en" ? ["vmc"] : [] }
+            guard let strokes = InstantCorrectionFixtures.keystrokes(for: "vmc", reverse: InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)) else {
+                TestRunner.assertTrue(false, "'vmc' fixture can type every character")
+                return
+            }
+            switch detector.detect(keystrokes: strokes, typedLayout: ruLayout) {
+            case .switchTo:
+                TestRunner.assertTrue(false, "junk (no-vowel) learned target 'vmc' must NOT correct at the boundary")
+            case .noSwitch:
+                TestRunner.assertTrue(true, "junk learned target 'vmc' stays noSwitch at the boundary — instant-only")
+            }
+        }
+
+        // Empty provider (the default) — byte-for-byte unchanged: the SAME
+        // OOV run with no learned entry stays noSwitch.
+        do {
+            let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
+            switch detector.detect(keystrokes: oovStrokes, typedLayout: ruLayout) {
+            case .switchTo:
+                TestRunner.assertTrue(false, "default (empty) learnedWordsProvider must never correct an OOV word")
+            case .noSwitch:
+                TestRunner.assertTrue(true, "default empty provider: OOV word stays noSwitch — byte-for-byte unchanged")
+            }
+        }
+    }
+}
+
+/// learning_spec.md "Тесты → Волна 2" #6 — B-интеграция, through
+/// `KeyboardMonitor`'s real (non-CGEvent) surface: `undoLastCorrection()`
+/// and the public `classifyDoubleShiftGesture` entry point HotkeyManager
+/// calls. Deliberately avoids `KeyboardMonitorHarness`/synthetic `CGEvent`
+/// construction (macOS 27 beta SkyLight deadlock risk, same reason
+/// `KeyboardMonitorIntegrationTests` gates on `syntheticKeyboardEventsAreSafe`)
+/// — `FakeTextReplacer.replaceCurrentWord` never constructs a `CGEvent`, so
+/// seeding `SwitchUndoManager` directly and calling `undoLastCorrection()`/
+/// `classifyDoubleShiftGesture()` exercises the real production code with no
+/// live-input dependency at all.
+enum LearningKeyboardMonitorIntegrationTests {
+    private static func makeMonitor(inputSources: InputSourceManager, dictionary: WordDictionary) -> (
+        monitor: KeyboardMonitor, replacer: FakeTextReplacer, learnedWords: LearnedWordsStore,
+        personalFreq: PersonalFrequencyStore, exceptions: ExceptionsService, switchUndo: SwitchUndoManager,
+        feedbackTracker: CorrectionFeedbackTracker
+    )? {
+        let suite = AppIdentity.bundleIdentifier + ".tests.kmLearning." + UUID().uuidString
+        guard let defaults = UserDefaults(suiteName: suite) else { return nil }
+        defaults.removePersistentDomain(forName: suite) // clean slate, this suite name is fresh anyway
+        let prefs = PreferencesService(defaults: defaults)
+        let exceptions = ExceptionsService(defaults: defaults)
+        let learnedWords = LearnedWordsStore(defaults: defaults)
+        let personalFreq = PersonalFrequencyStore(defaults: defaults)
+        let feedbackTracker = CorrectionFeedbackTracker()
+        let switchUndo = SwitchUndoManager()
+        let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
+        let analyzer = InstantCorrectionAnalyzer(dictionary: dictionary)
+        let replacer = FakeTextReplacer(inputSources: inputSources)
+        let monitor = KeyboardMonitor(
+            languageDetector: detector, textReplacer: replacer,
+            statsService: StatisticsService(), prefsService: prefs,
+            exceptionsService: exceptions, yoficatorService: YoficatorService(),
+            switchUndoManager: switchUndo, perAppLayoutService: PerAppLayoutService(inputSourceManager: inputSources, prefsService: prefs),
+            instantCorrectionAnalyzer: analyzer,
+            secureInputDetector: SecureInputDetector(secureCheck: { false }, axProbe: { false }),
+            learnedWordsStore: learnedWords, personalFrequencyStore: personalFreq, feedbackTracker: feedbackTracker
+        )
+        return (monitor, replacer, learnedWords, personalFreq, exceptions, switchUndo, feedbackTracker)
+    }
+
+    static func run() {
+        TestRunner.section("Wave 2 — KeyboardMonitor integration (undo-hook + classify dispatch, no live input)")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the KeyboardMonitor learning fixtures")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+
+        // 6a: undo-hook creates an exception and unlearns from BOTH stores
+        // (boundary-откат через undoLastCorrection, "коррекция+пробел+DS"
+        // scenario — DS falling through to Cmd+Opt+Z's own handler once the
+        // buffer/history are empty is pre-existing routing, unchanged here;
+        // this covers ONLY the new exception+unlearn side effect).
+        do {
+            guard let bundle = makeMonitor(inputSources: inputSources, dictionary: dictionary) else {
+                TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+                return
+            }
+            let t0 = Date()
+            bundle.learnedWords.recordManualFix(word: "clear", lang: "en", originApp: nil, at: t0)
+            bundle.learnedWords.recordManualFix(word: "clear", lang: "en", originApp: nil, at: t0.addingTimeInterval(1))
+            TestRunner.assertTrue(bundle.learnedWords.isActive(word: "clear", lang: "en"), "setup: 'clear' is active before undo")
+
+            bundle.switchUndo.record(
+                originalKeycodes: [], originalWord: "сдуфк", correctedWord: "clear",
+                trailing: nil, originalLayoutID: ruLayout.id, targetLayoutID: enLayout.id
+            )
+            _ = bundle.monitor.undoLastCorrection()
+
+            TestRunner.assertTrue(!bundle.learnedWords.isActive(word: "clear", lang: "en"), "undo-hook unlearns the learned entry")
+            TestRunner.assertTrue(bundle.exceptions.isAutoLearned("сдуфк"), "undo-hook learns the exception, keyed by the ORIGINAL word")
+        }
+
+        // 6b: эвристический revert (instant-case) — `feedbackTracker` is the
+        // seam a real instant success callback feeds via
+        // `recordAutoCorrection`; `classifyDoubleShiftGesture` (the SAME
+        // public entry point HotkeyManager's selection/clipboard/caret paths
+        // call) recognizes the reversal and unlearns/excepts exactly like
+        // the DS-eligible buffer/history/run paths would.
+        do {
+            guard let bundle = makeMonitor(inputSources: inputSources, dictionary: dictionary) else {
+                TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+                return
+            }
+            bundle.learnedWords.recordManualFix(word: "clear", lang: "en", originApp: nil, at: Date())
+            bundle.learnedWords.recordManualFix(word: "clear", lang: "en", originApp: nil, at: Date())
+            TestRunner.assertTrue(bundle.learnedWords.isActive(word: "clear", lang: "en"), "setup: 'clear' is active")
+
+            bundle.feedbackTracker.recordAutoCorrection(
+                original: "сдуфк", corrected: "clear", targetLang: "en", wasLearned: true, at: Date()
+            )
+            bundle.monitor.classifyDoubleShiftGesture(word: "clear", sourceLang: "en", targetLang: "ru")
+
+            TestRunner.assertTrue(!bundle.learnedWords.isActive(word: "clear", lang: "en"), "heuristic revert unlearns the learned entry")
+            TestRunner.assertTrue(bundle.exceptions.isAutoLearned("сдуфк"), "heuristic revert learns the exception")
+        }
+
+        // 6c: a non-eligible classify call (positiveRecord: nil, exactly
+        // what HotkeyManager's 3 paths always pass) never mutates
+        // LearnedWordsStore even on a `.manualFix` verdict.
+        do {
+            guard let bundle = makeMonitor(inputSources: inputSources, dictionary: dictionary) else {
+                TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+                return
+            }
+            let before = bundle.learnedWords.allEntries.count
+            bundle.monitor.classifyDoubleShiftGesture(word: "hello", sourceLang: "en", targetLang: "ru")
+            TestRunner.assertEqual(
+                bundle.learnedWords.allEntries.count, before,
+                "classifyDoubleShiftGesture (HotkeyManager's entry point) never records positively — selection/clipboard/caret content stays out of LearnedWordsStore"
+            )
+        }
+
+        // 6d: revert-of-revert lifts the exception the revert just created.
+        do {
+            guard let bundle = makeMonitor(inputSources: inputSources, dictionary: dictionary) else {
+                TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+                return
+            }
+            bundle.switchUndo.record(
+                originalKeycodes: [], originalWord: "сдуфк", correctedWord: "clear",
+                trailing: nil, originalLayoutID: ruLayout.id, targetLayoutID: enLayout.id
+            )
+            _ = bundle.monitor.undoLastCorrection()
+            TestRunner.assertTrue(bundle.exceptions.isAutoLearned("сдуфк"), "setup: undo created the exception")
+
+            bundle.monitor.classifyDoubleShiftGesture(word: "сдуфк", sourceLang: "ru", targetLang: "en")
+            TestRunner.assertTrue(!bundle.exceptions.isAutoLearned("сдуфк"), "revert-of-revert (DS back toward the corrected direction, ≤15s) lifts the exception")
+        }
+    }
+}
+
+/// learning_spec.md "Verify" #4 — the full replay scenario, driven through
+/// public APIs only (store + evaluate + detect), no live input, no
+/// KeyboardMonitor: "«сдуфк»+DS ×2 → promoted → evaluate с Set чинит сквозь
+/// junkGate → revert → unlearn+исключение → больше не чинит."
+enum LearningReplayChainTests {
+    static func run() {
+        TestRunner.section("Wave 2 — replay chain (Verify #4): record ×2 → fires → revert → stops firing")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the replay-chain fixture")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let analyzer = InstantCorrectionAnalyzer(dictionary: dictionary)
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+        guard let strokes = InstantCorrectionFixtures.keystrokes(for: "сдуфк", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "'сдуфк' fixture can type every character")
+            return
+        }
+        func convert(_ layout: KeyboardLayout) -> String { inputSources.convertKeystrokes(strokes, toLayout: layout) }
+
+        let suite = AppIdentity.bundleIdentifier + ".tests.replayChain." + UUID().uuidString
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = LearnedWordsStore(defaults: defaults)
+        let exceptions = ExceptionsService(defaults: defaults)
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
+        // Not yet fixed — no active entry.
+        let before = analyzer.evaluate(
+            keystrokes: strokes, currentLayout: ruLayout, otherLayouts: [enLayout],
+            convert: convert, learnedActive: store.activeKeys(lang: "en")
+        )
+        TestRunner.assertNil(before.result, "before any DS confirmation, instant stays silent")
+
+        // Owner confirms via Double Shift twice ("сдуфк"+DS ×2).
+        TestRunner.assertEqual(
+            store.recordManualFix(word: "clear", lang: "en", originApp: nil, at: t0), .recorded,
+            "first DS confirmation is recorded"
+        )
+        TestRunner.assertEqual(
+            store.recordManualFix(word: "clear", lang: "en", originApp: nil, at: t0.addingTimeInterval(1)), .promoted,
+            "second DS confirmation promotes the entry"
+        )
+
+        // Third time: instant fires THROUGH the junk gate.
+        let fired = analyzer.evaluate(
+            keystrokes: strokes, currentLayout: ruLayout, otherLayouts: [enLayout],
+            convert: convert, learnedActive: store.activeKeys(lang: "en")
+        )
+        TestRunner.assertEqual(fired.result?.correctedWord, "clear", "promoted entry fires through the junk gate on the third occurrence")
+
+        // Owner reverts (DS/undo): the real KeyboardMonitor path unlearns
+        // from the store AND learns the exception — replicated here at the
+        // store/service level per the spec's "публичные API" scope.
+        store.unlearn(word: "clear", lang: "en")
+        exceptions.learnException(original: "сдуфк", corrected: "clear")
+
+        // Fourth time: no longer fires — the active set is empty again.
+        let after = analyzer.evaluate(
+            keystrokes: strokes, currentLayout: ruLayout, otherLayouts: [enLayout],
+            convert: convert, learnedActive: store.activeKeys(lang: "en")
+        )
+        TestRunner.assertNil(after.result, "after revert, the fourth occurrence no longer fires")
+        TestRunner.assertTrue(exceptions.isAutoLearned("сдуфк"), "the exception is in place for the KeyboardMonitor-level exception check too")
     }
 }

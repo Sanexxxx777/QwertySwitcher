@@ -103,6 +103,16 @@ final class PreferencesService {
         set { defaults.set(Array(newValue.prefix(2)), forKey: keyPrefix + "activeLayoutIDs") }
     }
 
+    /// Mechanism A/B/C (learning_spec.md — обучение на паттернах поведения):
+    /// gates recording AND application in all three learning modules
+    /// (`LearnedWordsStore`, `PersonalFrequencyStore`,
+    /// `CorrectionFeedbackTracker`). Default true, same "on unless it gets
+    /// in the way" posture as `isAutoSwitchEnabled`.
+    var isLearningEnabled: Bool {
+        get { defaults.object(forKey: keyPrefix + "learningEnabled") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: keyPrefix + "learningEnabled") }
+    }
+
     /// Light / Dark / System — default follows the OS.
     var themePreference: ThemePreference {
         get { ThemePreference(rawValue: defaults.string(forKey: keyPrefix + "themePreference") ?? "") ?? .system }

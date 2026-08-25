@@ -115,6 +115,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         DebugLog.shared.log("APP", "shutting down")
         healthTimer?.invalidate()
+        // Mechanism A/C (learning_spec.md): flush pending in-memory
+        // mutations before the process exits — the only other flush point
+        // is the ~30s timer inside `KeyboardMonitor` itself.
+        keyboardMonitor?.flushLearning()
         keyboardMonitor?.stop()
         statsService?.save()
     }
