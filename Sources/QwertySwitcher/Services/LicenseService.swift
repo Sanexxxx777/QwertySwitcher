@@ -39,13 +39,19 @@ struct LicenseState: Codable, Equatable {
     var maxSeenUnix: Int64
     var provisional: Bool
 
-    /// A 14-day trial created entirely locally when there is no cached state
-    /// and the server cannot be reached (e.g. first launch, offline). Has no
+    /// A short (3-day) trial created entirely locally when there is no cached
+    /// state and the server cannot be reached (e.g. first launch, offline).
+    /// The full 14 days come from the server on the first successful
+    /// check-in — only it knows whether this hwid already had a trial. Has no
     /// signature — it is replaced by the server's authoritative answer as
     /// soon as one successful check-in happens (the server may already know
     /// an earlier trial for this hwid).
     static func provisionalTrial(hwid: String, now: Int64) -> LicenseState {
-        let trialSeconds: Int64 = 14 * 24 * 3600
+        // Офлайн даём короткое окно, а не весь триал: полные 14 дней выдаёт
+        // сервер, он же единственный, кто знает, был ли у этого Mac триал
+        // раньше. До правки офлайн-путь выдавал полные две недели, и цикл
+        // «стереть состояние → остаться без сети» повторялся бесконечно.
+        let trialSeconds: Int64 = 3 * 24 * 3600
         let payload = LicensePayload(hwid: hwid, plan: "trial", start: now, until: now + trialSeconds, issued: now)
         return LicenseState(payload: payload, sig: nil, lastCheckUnix: now, maxSeenUnix: now, provisional: true)
     }
@@ -313,6 +319,9 @@ final class LicenseService: ObservableObject {
     /// provisional trial. The server stays authoritative; this only bounds
     /// what an offline-only attacker can get by wiping local state.
     private static let firstSeenKeyPrefix = AppIdentity.keyPrefix + "licenseFirstSeen."
+    /// Второе хранилище того же якоря — переживает удаление приложения,
+    /// его настроек и файла состояния.
+    private static let firstSeenService = AppIdentity.bundleIdentifier + ".firstseen"
 
     enum ServerError: Equatable {
         case invalidKey
@@ -521,17 +530,45 @@ final class LicenseService: ObservableObject {
         recomputeEntitlement()
     }
 
+    /// Якорь живёт в ДВУХ местах: UserDefaults и Keychain. Причина — состояние
+    /// лицензии лежит обычным файлом, и `rm license.json` + `defaults delete`
+    /// раньше начинали офлайн-триал заново; Keychain это переживает, потому что
+    /// не удаляется ни вместе с приложением, ни вместе с его настройками.
+    /// При чтении берём САМОЕ РАННЕЕ из известных: удалив одно хранилище,
+    /// якорь нельзя омолодить.
     private func recordFirstSeenIfNeeded(now: Int64) {
         let key = Self.firstSeenKeyPrefix + hwid
         let defaults = UserDefaults.standard
-        guard defaults.object(forKey: key) == nil else { return }
-        defaults.set(Int(now), forKey: key)
+        let known = firstSeenCandidates()
+        let anchor = known.min() ?? now
+
+        if defaults.object(forKey: key) == nil || Int64(defaults.integer(forKey: key)) > anchor {
+            defaults.set(Int(anchor), forKey: key)
+        }
+        if KeychainStore.read(service: Self.firstSeenService, account: hwid) == nil
+            || known.min() != readFirstSeenFromKeychain() {
+            KeychainStore.write(String(anchor).data(using: .utf8) ?? Data(),
+                                service: Self.firstSeenService, account: hwid)
+        }
+    }
+
+    private func readFirstSeenFromKeychain() -> Int64? {
+        guard let data = KeychainStore.read(service: Self.firstSeenService, account: hwid),
+              let text = String(data: data, encoding: .utf8),
+              let value = Int64(text) else { return nil }
+        return value
+    }
+
+    private func firstSeenCandidates() -> [Int64] {
+        var out: [Int64] = []
+        let key = Self.firstSeenKeyPrefix + hwid
+        if let stored = UserDefaults.standard.object(forKey: key) as? Int { out.append(Int64(stored)) }
+        if let fromKeychain = readFirstSeenFromKeychain() { out.append(fromKeychain) }
+        return out
     }
 
     private func firstSeenTimestamp(defaultingTo now: Int64) -> Int64 {
-        let key = Self.firstSeenKeyPrefix + hwid
-        guard let stored = UserDefaults.standard.object(forKey: key) as? Int else { return now }
-        return Int64(stored)
+        firstSeenCandidates().min() ?? now
     }
 
     private func recomputeEntitlement() {

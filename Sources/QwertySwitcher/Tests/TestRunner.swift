@@ -2612,8 +2612,8 @@ enum LicenseServiceTests {
         TestRunner.assertTrue(trialService.isEntitled, "offline first launch grants a provisional trial")
         TestRunner.assertTrue(trialStore.stored?.provisional ?? false, "provisional trial is flagged in stored state")
         TestRunner.assertEqual(
-            trialStore.stored?.payload?.until ?? -1, trialClock.now() + 14 * Self.day,
-            "provisional trial lasts exactly 14 days"
+            trialStore.stored?.payload?.until ?? -1, trialClock.now() + 3 * Self.day,
+            "provisional trial lasts exactly 3 days until the server is reached"
         )
 
         // (g) activation via mock transport with a signed sub payload → entitled, plan=sub
@@ -2653,8 +2653,8 @@ enum LicenseServiceTests {
         firstService.checkIn()
         let firstUntil = firstStore.stored?.payload?.until ?? -1
         TestRunner.assertEqual(
-            firstUntil, firstClock.now() + 14 * Self.day,
-            "genuinely first launch anchors the trial at its own now"
+            firstUntil, firstClock.now() + 3 * Self.day,
+            "genuinely first launch anchors the offline window at its own now"
         )
 
         // "File deleted": a brand new, empty store — same hwid, 20 days later.
