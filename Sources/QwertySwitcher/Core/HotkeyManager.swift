@@ -10,6 +10,9 @@ final class HotkeyManager {
     private let statsService: StatisticsService
     private let prefsService: PreferencesService
     private let exceptionsService: ExceptionsService
+    /// `.shared` singleton by default — same DI seam as
+    /// `KeyboardMonitor.gameMode` (gamemode-spec-20260831.md, wave 2).
+    private let gameMode: GameModeState
     weak var keyboardMonitor: KeyboardMonitor?
     var switchUndoManager: SwitchUndoManager?
 
@@ -48,13 +51,24 @@ final class HotkeyManager {
     init(inputSourceManager: InputSourceManager, languageDetector: LanguageDetector,
          textReplacer: TextReplacer, statsService: StatisticsService,
          prefsService: PreferencesService,
-         exceptionsService: ExceptionsService = ExceptionsService()) {
+         exceptionsService: ExceptionsService = ExceptionsService(),
+         gameMode: GameModeState = .shared) {
         self.inputSourceManager = inputSourceManager
         self.languageDetector = languageDetector
         self.textReplacer = textReplacer
         self.statsService = statsService
         self.prefsService = prefsService
         self.exceptionsService = exceptionsService
+        self.gameMode = gameMode
+    }
+
+    /// Single choke point for "hotkeys must not fire right now" — per-app
+    /// profile block (existing) OR the frontmost app being in Game Mode
+    /// (gamemode-spec-20260831.md §2: Single/Double/L+R Shift all silenced
+    /// in-game). All 3 hotkey call sites in this file route through here
+    /// instead of calling the per-app-profile check directly.
+    private func hotkeysBlocked() -> Bool {
+        exceptionsService.areHotkeysBlockedForCurrentApp() || gameMode.isActiveForFrontmost()
     }
 
     /// Whether a modifier present on THIS flagsChanged event disqualifies the
@@ -122,7 +136,7 @@ final class HotkeyManager {
 
         // Left+Right Shift combo — toggle auto-switch
         if shiftState.bothDown && prefsService.isSplitShiftEnabled
-            && !exceptionsService.areHotkeysBlockedForCurrentApp() {
+            && !hotkeysBlocked() {
             let comboLatency = CFAbsoluteTimeGetCurrent() - firstComboShiftTime
             guard comboLatency <= comboWindow else {
                 // The model thinks both keys are held, but the first one went
@@ -278,7 +292,7 @@ final class HotkeyManager {
         // may be mid-flight (backspacing/retyping) — switching the active
         // layout out from under it would corrupt that transaction.
         guard keyboardMonitor?.isPaused != true else { return }
-        guard !exceptionsService.areHotkeysBlockedForCurrentApp() else { return }
+        guard !hotkeysBlocked() else { return }
         let layouts = languageDetector.activeLayouts
         guard layouts.count >= 2, let current = inputSourceManager.currentLayout else { return }
 
@@ -320,7 +334,7 @@ final class HotkeyManager {
     private func handleDoubleShift() {
         DebugLog.shared.log("HK", "doubleShift triggered")
         guard keyboardMonitor?.isPaused != true else { return }
-        guard !exceptionsService.areHotkeysBlockedForCurrentApp() else { return }
+        guard !hotkeysBlocked() else { return }
 
         switch convertAXSelection() {
         case .converted:

@@ -55,6 +55,7 @@ enum TestRunner {
         InstantCorrectionJunkGateTests.run()
         LicenseServiceTests.run()
         FileLicenseStoreTests.run()
+        KeychainSilenceGuardTests.run()
         DebugLogTests.run()
         PendingUserEventQueueTests.run()
         EventRouteTests.run()
@@ -103,6 +104,14 @@ enum TestRunner {
         BoundaryLearningBypassTests.run()
         LearningKeyboardMonitorIntegrationTests.run()
         LearningReplayChainTests.run()
+        GameAppProbeTests.run()
+        GameModeStateTests.run()
+        HeldKeysGameModeGateTests.run()
+        SanityCapBoundaryGuardTests.run()
+        BackspaceResetsInstantGateTests.run()
+        DoubleShiftInapplicableLogTests.run()
+        ProviderSingleReadGuardTests.run()
+        GameModeSourceGuardTests.run()
         print("---")
         print("\(passed) passed, \(failed) failed, \(skipped) skipped")
         return failed == 0 ? 0 : 1
@@ -2284,6 +2293,41 @@ enum InstantCorrectionAnalyzerTests {
             ).result
             TestRunner.assertNil(result, "shorter than MIN_INSTANT never fires")
         }
+
+        // Sanity cap (gamemode-spec-20260831.md §4): longer than maxLength
+        // never evaluates a candidate at all — the guard fires before ANY
+        // scoring, so the specific content of the run doesn't matter here.
+        let overLength = InstantCorrectionAnalyzer.maxLength + 1
+        if let over = InstantCorrectionFixtures.keystrokes(
+            for: String(repeating: "a", count: overLength), reverse: enReverse
+        ) {
+            let evaluation = analyzer.evaluate(
+                keystrokes: over, currentLayout: enLayout, otherLayouts: [ruLayout],
+                convert: { layout in inputSources.convertKeystrokes(over, toLayout: layout) }
+            )
+            TestRunner.assertNil(evaluation.result, "\(overLength) keystrokes: never evaluates a candidate")
+            TestRunner.assertEqual(
+                evaluation.silence, .tooLong, "\(overLength) keystrokes: silence reason is .tooLong"
+            )
+        } else {
+            TestRunner.assertTrue(false, "\(overLength)×'a': en fixture can type every character")
+        }
+        // Exactly at the cap: unaffected (whatever the ordinary silence
+        // reason turns out to be, it must not be .tooLong).
+        if let atCap = InstantCorrectionFixtures.keystrokes(
+            for: String(repeating: "a", count: InstantCorrectionAnalyzer.maxLength), reverse: enReverse
+        ) {
+            let evaluation = analyzer.evaluate(
+                keystrokes: atCap, currentLayout: enLayout, otherLayouts: [ruLayout],
+                convert: { layout in inputSources.convertKeystrokes(atCap, toLayout: layout) }
+            )
+            TestRunner.assertTrue(
+                evaluation.silence != .tooLong,
+                "exactly \(InstantCorrectionAnalyzer.maxLength) keystrokes: not gated by the length cap"
+            )
+        } else {
+            TestRunner.assertTrue(false, "\(InstantCorrectionAnalyzer.maxLength)×'a': en fixture can type every character")
+        }
     }
 }
 
@@ -2748,6 +2792,122 @@ enum FileLicenseStoreTests {
         let emptyReader = StubLegacyLicenseKeychainReader()
         let emptyStore = FileLicenseStore(directory: emptyDir, legacyReader: emptyReader)
         TestRunner.assertNil(emptyStore.load(), "fresh install with no legacy state has an empty file store")
+    }
+}
+
+/// Structural guards for the Keychain-dialog fix. Two parts:
+/// (1)/(2) `KeychainStore` (DeviceIdentity.swift) itself stays silent — it's
+/// still used by the device-UUID fallback and the legacy license-migration
+/// reader — a self-signed dev build's CDHash changes on every rebuild, so a
+/// stale item from a previous build routinely looks like "someone else's
+/// ACL" and `SecItemCopyMatching` pops the "wants to use confidential
+/// information" dialog unless told to stay silent.
+/// (3) The offline-trial first-seen anchor no longer touches Keychain at
+/// all (removed 01.09.2026 — see LicenseService.swift comment at
+/// `firstSeenKeyPrefix`): low anti-tamper value (3-day offline window, full
+/// trial only from the server) wasn't worth a second class of dialog on
+/// every update. `LicenseService.swift` must have zero `KeychainStore`
+/// calls — `SystemLegacyLicenseKeychainReader`'s own migration read/delete
+/// uses raw `SecItemCopyMatching`/`SecItemDelete` directly, not
+/// `KeychainStore`, so it doesn't trip this guard.
+/// None of this is unit-testable against the real Keychain (system
+/// dependency, and a regression here means a GUI dialog appears — nothing
+/// to assert on programmatically), so — same `#filePath`-source-read
+/// precedent as `ComboWindowGuardTests` — these check the source directly.
+enum KeychainSilenceGuardTests {
+    private static func readSource(_ relativePath: String) -> String? {
+        let servicesDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()      // Tests/
+            .deletingLastPathComponent()      // QwertySwitcher/
+            .appendingPathComponent("Services")
+        return try? String(contentsOf: servicesDir.appendingPathComponent(relativePath), encoding: .utf8)
+    }
+
+    /// Text of a function body starting right after `marker`, up to (not
+    /// including) its closing `\n    }` — kept as a single `.range(of:)` +
+    /// slice on the SAME string value throughout, unlike an earlier version
+    /// of this helper that re-derived the substring a second time for
+    /// slicing: indices from a `.range(of:)` call on one String value are
+    /// not guaranteed valid on a different (even textually identical)
+    /// String/Substring value and trapped at runtime ("Range requires
+    /// lowerBound <= upperBound") the first time this ran.
+    private static func body(after marker: String, in source: String) -> String? {
+        guard let markerRange = source.range(of: marker) else { return nil }
+        let rest = String(source[markerRange.upperBound...])
+        guard let closingRange = rest.range(of: "\n    }") else { return rest }
+        return String(rest[..<closingRange.lowerBound])
+    }
+
+    static func run() {
+        TestRunner.section("KeychainStore/LicenseService — silent Keychain access, no auth dialogs")
+
+        guard let deviceIdentitySource = readSource("DeviceIdentity.swift") else {
+            TestRunner.skip("DeviceIdentity.swift not readable")
+            return
+        }
+
+        // (1) Reads must never allow the auth UI.
+        guard let readBody = body(after: "static func read(service: String, account: String) -> Data? {", in: deviceIdentitySource) else {
+            TestRunner.assertTrue(false, "KeychainStore.read not found — test needs updating")
+            return
+        }
+        TestRunner.assertTrue(
+            readBody.contains("kSecUseAuthenticationUISkip"),
+            "KeychainStore.read passes kSecUseAuthenticationUISkip — a stale item from a previous"
+                + " self-signed build is silently treated as absent, never prompts"
+        )
+
+        // (2) kSecUseAuthenticationUISkip is documented (SecItem.h) to apply
+        // only to SecItemCopyMatching — write() must not rely on passing it
+        // to SecItemUpdate/SecItemAdd, and must bail out without UI (and
+        // without retrying) when an existing item turns out to be auth-blocked.
+        guard let writeMarker = deviceIdentitySource.range(of: "static func write(") else {
+            TestRunner.assertTrue(false, "KeychainStore.write not found — test needs updating")
+            return
+        }
+        let writeBody = String(deviceIdentitySource[writeMarker.upperBound...])
+        TestRunner.assertTrue(
+            writeBody.contains("isAuthBlocked(probe)") || writeBody.contains("isAuthBlocked(updateStatus)"),
+            "write() checks for an auth-blocked existing item before/around SecItemUpdate,"
+                + " instead of assuming kSecUseAuthenticationUISkip silences it too"
+        )
+        guard let updateCall = writeBody.range(of: "SecItemUpdate(baseQuery"),
+              let firstGuardAfterUpdate = writeBody.range(of: "if isAuthBlocked(updateStatus) { return false }") else {
+            TestRunner.assertTrue(false, "SecItemUpdate call or its auth-blocked guard not found — test needs updating")
+            return
+        }
+        TestRunner.assertTrue(
+            updateCall.upperBound < firstGuardAfterUpdate.lowerBound,
+            "an auth-blocked SecItemUpdate result returns false immediately — no retry, no fallthrough to SecItemAdd"
+        )
+
+        // (3) The offline-trial anchor's Keychain duplicate is gone entirely —
+        // LicenseService must not call KeychainStore at all anymore.
+        // SystemLegacyLicenseKeychainReader (the license-state migration
+        // reader) is exempt by construction: it uses its own raw
+        // SecItemCopyMatching/SecItemDelete, never KeychainStore, so this
+        // assertion doesn't need to special-case it.
+        guard let licenseSource = readSource("LicenseService.swift") else {
+            TestRunner.skip("LicenseService.swift not readable")
+            return
+        }
+        TestRunner.assertTrue(
+            !licenseSource.contains("KeychainStore.read(") && !licenseSource.contains("KeychainStore.write("),
+            "LicenseService no longer calls KeychainStore for the offline-trial first-seen anchor"
+                + " (removed 01.09.2026 — anchor now lives in UserDefaults + the license file's own"
+                + " persisted provisional-trial state, see firstSeenCandidates())"
+        )
+        guard let candidatesBody = body(after: "private func firstSeenCandidates() -> [Int64] {", in: licenseSource) else {
+            TestRunner.assertTrue(false, "firstSeenCandidates not found — test needs updating")
+            return
+        }
+        TestRunner.assertTrue(
+            candidatesBody.contains("UserDefaults.standard.object(forKey: key)")
+                && candidatesBody.contains("trial.provisional")
+                && candidatesBody.contains("payload.start"),
+            "firstSeenCandidates still combines the two surviving sources —"
+                + " UserDefaults and the persisted provisional trial's own anchor — and takes the earliest"
+        )
     }
 }
 
@@ -3372,9 +3532,15 @@ final class KeyboardMonitorHarness {
     /// same characters back".
     var invocationCount: Int { replacer.invocationCount }
 
+    /// Wave 2 (gamemode-spec-20260831.md) additive param — defaults to a
+    /// fresh, real (`UserDefaults.standard`-backed) store, byte-for-byte the
+    /// same as every pre-existing call site got implicitly before this
+    /// param existed. Tests that need to control promotion (Bug A fix) pass
+    /// their own isolated-suite instance instead.
     init(
         dictionary: WordDictionary, inputSources: InputSourceManager,
-        secureInputDetector: SecureInputDetector = SecureInputDetector(secureCheck: { false }, axProbe: { false })
+        secureInputDetector: SecureInputDetector = SecureInputDetector(secureCheck: { false }, axProbe: { false }),
+        learnedWordsStore: LearnedWordsStore = LearnedWordsStore()
     ) {
         self.inputSources = inputSources
         let replacer = FakeTextReplacer(inputSources: inputSources)
@@ -3402,7 +3568,8 @@ final class KeyboardMonitorHarness {
             // is also forced off so this headless harness never dispatches a
             // real AX call to whatever happens to be focused on the machine
             // running the tests.
-            secureInputDetector: secureInputDetector
+            secureInputDetector: secureInputDetector,
+            learnedWordsStore: learnedWordsStore
         )
     }
 
@@ -3412,11 +3579,15 @@ final class KeyboardMonitorHarness {
     /// the just-typed trigger letter and retypes it itself as part of its
     /// own payload (RC-1 in KeyboardMonitor.swift), so it must NOT also land
     /// on screen via the normal path.
-    func press(_ keycode: UInt16, flags: CGEventFlags = []) {
+    ///
+    /// `autorepeat` (wave 2, gamemode-spec-20260831.md): sets the OS
+    /// autorepeat field a real held-down key carries — additive, defaults
+    /// to false so every pre-existing call renders exactly as before.
+    func press(_ keycode: UInt16, flags: CGEventFlags = [], autorepeat: Bool = false) {
         let rendered = inputSources.currentLayout.flatMap {
             inputSources.characterForKeycode(keycode, layout: $0, flags: flags)
         }
-        guard let event = Self.makeKeyDown(keycode: keycode, flags: flags) else { return }
+        guard let event = Self.makeKeyDown(keycode: keycode, flags: flags, autorepeat: autorepeat) else { return }
         let proxy = OpaquePointer(UnsafeMutableRawPointer(bitPattern: 1)!)
         monitor.handleEvent(proxy, type: .keyDown, event: event)
         let suppressed = monitor.consumeSuppressCurrentEvent()
@@ -3428,12 +3599,13 @@ final class KeyboardMonitorHarness {
     func press(_ stroke: BufferedKeystroke) { press(stroke.keycode, flags: stroke.flags) }
     func type(_ strokes: [BufferedKeystroke]) { strokes.forEach { press($0) } }
 
-    private static func makeKeyDown(keycode: UInt16, flags: CGEventFlags) -> CGEvent? {
+    private static func makeKeyDown(keycode: UInt16, flags: CGEventFlags, autorepeat: Bool = false) -> CGEvent? {
         let source = CGEventSource(stateID: .hidSystemState)
         guard let event = CGEvent(keyboardEventSource: source, virtualKey: keycode, keyDown: true) else {
             return nil
         }
         event.flags = flags
+        if autorepeat { event.setIntegerValueField(.keyboardEventAutorepeat, value: 1) }
         return event
     }
 }
@@ -4259,6 +4431,377 @@ enum KeyboardMonitorIntegrationTests {
     }
 }
 
+// MARK: - Game mode (gamemode-spec-20260831.md, wave 2): heldKeys + sanity cap
+// gates. Both are independent of GameModeState's own bundleID tracking — the
+// gate itself lives on `wordAutorepeatCount`/keystroke count inside
+// KeyboardMonitor, `gameMode.note(...)` is only a side effect these tests
+// don't need to observe (the harness's default `.shared` no-ops it safely,
+// same as every OTHER existing test using this harness — `activeAppBundleID`
+// stays nil under `--test`, per `KeyboardMonitor.init`'s own doc comment).
+enum HeldKeysGameModeGateTests {
+    static func run() {
+        TestRunner.section("Game mode — ≥3 autorepeat keystrokes in a word silence both correction paths")
+
+        guard TestRunner.syntheticKeyboardEventsAreSafe else {
+            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
+            return
+        }
+        guard LicenseService.shared.isEntitled else {
+            TestRunner.skip("KeyboardMonitor integration harness requires an entitled LicenseService.shared")
+            return
+        }
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the held-keys gate fixtures")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+
+        let environment = KeyboardMonitorTestEnvironment(inputSources: inputSources)
+        defer { environment.restore() }
+
+        func harness() -> KeyboardMonitorHarness {
+            let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
+            h.prefs.isAutoSwitchEnabled = true
+            h.prefs.isInstantCorrectionEnabled = true
+            h.prefs.isYoficatorEnabled = false
+            h.prefs.activeLayoutIDs = [enLayout.id, ruLayout.id]
+            h.exceptions.appExceptions = []
+            h.exceptions.wordExceptions = []
+            h.exceptions.autoLearned = [:]
+            return h
+        }
+
+        // "ghbdtn" (en keys) → привет — golden case, fires instantly by the
+        // last keystroke (length 6) per InstantCorrectionAnalyzerTests above.
+        inputSources.switchTo(enLayout)
+        guard let ghbdtn = InstantCorrectionFixtures.keystrokes(for: "ghbdtn", reverse: enReverse) else {
+            TestRunner.assertTrue(false, "'ghbdtn': EN fixture can type every character")
+            return
+        }
+
+        do {
+            let h = harness()
+            for stroke in ghbdtn.prefix(3) { h.press(stroke.keycode, flags: stroke.flags, autorepeat: true) }
+            for stroke in ghbdtn.dropFirst(3) { h.press(stroke.keycode, flags: stroke.flags) }
+            TestRunner.assertEqual(
+                h.invocationCount, 0,
+                "instant correction never fires once 3 autorepeat keystrokes have landed in this word"
+                    + " (golden case \"ghbdtn\" would otherwise fire mid-word)"
+            )
+        }
+
+        // Control: only 2 autorepeats — below the ≥3 threshold — must not
+        // block the ordinary golden-case fire.
+        do {
+            let h = harness()
+            for stroke in ghbdtn.prefix(2) { h.press(stroke.keycode, flags: stroke.flags, autorepeat: true) }
+            for stroke in ghbdtn.dropFirst(2) { h.press(stroke.keycode, flags: stroke.flags) }
+            TestRunner.assertEqual(
+                h.invocationCount, 1,
+                "control: 2 autorepeat keystrokes (below the ≥3 threshold) do not block instant correction"
+            )
+        }
+
+        // Boundary path: instant OFF, same ≥3-autorepeat word, then a space.
+        do {
+            let h = harness()
+            h.prefs.isInstantCorrectionEnabled = false
+            for stroke in ghbdtn.prefix(3) { h.press(stroke.keycode, flags: stroke.flags, autorepeat: true) }
+            for stroke in ghbdtn.dropFirst(3) { h.press(stroke.keycode, flags: stroke.flags) }
+            h.press(49) // space
+            TestRunner.assertEqual(h.invocationCount, 0, "boundary correction also skips a word with ≥3 autorepeats")
+            TestRunner.assertEqual(h.screen, "ghbdtn ", "the held-key word is left exactly as typed")
+        }
+
+        // Control: same word, boundary path, WITHOUT autorepeats — corrects normally.
+        do {
+            let h = harness()
+            h.prefs.isInstantCorrectionEnabled = false
+            h.type(ghbdtn)
+            h.press(49) // space
+            TestRunner.assertEqual(h.invocationCount, 1, "control: without autorepeats the boundary path still corrects")
+            TestRunner.assertEqual(h.screen, "привет ", "control: corrected to the real word")
+        }
+    }
+}
+
+enum SanityCapBoundaryGuardTests {
+    static func run() {
+        TestRunner.section("Sanity cap — a run longer than 20 keystrokes never reaches the boundary detector either")
+
+        guard TestRunner.syntheticKeyboardEventsAreSafe else {
+            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
+            return
+        }
+        guard LicenseService.shared.isEntitled else {
+            TestRunner.skip("KeyboardMonitor integration harness requires an entitled LicenseService.shared")
+            return
+        }
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the sanity-cap fixture")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+
+        let environment = KeyboardMonitorTestEnvironment(inputSources: inputSources)
+        defer { environment.restore() }
+
+        inputSources.switchTo(enLayout)
+        let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
+        h.prefs.isAutoSwitchEnabled = true
+        h.prefs.isInstantCorrectionEnabled = false // isolate the boundary path
+        h.prefs.activeLayoutIDs = [enLayout.id, ruLayout.id]
+
+        let overLength = InstantCorrectionAnalyzer.maxLength + 1
+        guard let over = InstantCorrectionFixtures.keystrokes(
+            for: String(repeating: "a", count: overLength), reverse: enReverse
+        ) else {
+            TestRunner.assertTrue(false, "\(overLength)×'a': EN fixture can type every character")
+            return
+        }
+        h.type(over)
+        h.press(49) // space
+        TestRunner.assertEqual(
+            h.invocationCount, 0,
+            "a \(overLength)-keystroke run never reaches the boundary detector — the cap returns first"
+        )
+    }
+}
+
+// MARK: - Bug fixes (bugfixes-diag-20260831.md, wave 2)
+
+enum BackspaceResetsInstantGateTests {
+    static func run() {
+        TestRunner.section("Bug B fix — backspace resets instantCorrectionGate so the boundary path re-evaluates")
+
+        guard TestRunner.syntheticKeyboardEventsAreSafe else {
+            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
+            return
+        }
+        guard LicenseService.shared.isEntitled else {
+            TestRunner.skip("KeyboardMonitor integration harness requires an entitled LicenseService.shared")
+            return
+        }
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the 'работа' fixture")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+
+        let environment = KeyboardMonitorTestEnvironment(inputSources: inputSources)
+        defer { environment.restore() }
+
+        func harness() -> KeyboardMonitorHarness {
+            let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
+            h.prefs.isAutoSwitchEnabled = true
+            h.prefs.isInstantCorrectionEnabled = true
+            h.prefs.isYoficatorEnabled = false
+            h.prefs.activeLayoutIDs = [enLayout.id, ruLayout.id]
+            h.exceptions.appExceptions = []
+            h.exceptions.wordExceptions = []
+            h.exceptions.autoLearned = [:]
+            return h
+        }
+
+        inputSources.switchTo(enLayout)
+        guard let rabota = InstantCorrectionFixtures.keystrokes(for: "работа", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "'работа': ru fixture can type every character")
+            return
+        }
+
+        // (a) instant fires mid-word ("hf,jn"), THEN a backspace, THEN a
+        // couple more letters, THEN the word boundary — the fix must let the
+        // boundary path actually run (not silently skip it).
+        do {
+            let h = harness()
+            for stroke in rabota.dropLast() { h.press(stroke) } // "hf,jn" — fires instant
+            TestRunner.assertEqual(h.invocationCount, 1, "setup: instant correction fired mid-word")
+
+            h.press(51) // backspace (InputBuffer.isDeleteKey)
+            DebugLog.shared.waitForPendingWrites()
+            let before = DebugLog.shared.currentContents
+            h.press(rabota.last!) // retype a letter after the backspace
+            h.press(49) // space — word boundary
+            DebugLog.shared.waitForPendingWrites()
+            let newLines = String(DebugLog.shared.currentContents.dropFirst(before.count))
+            TestRunner.assertTrue(
+                !newLines.contains("skip boundary correction: already instant-corrected"),
+                "the boundary path is NOT silently skipped after a mid-word backspace (Bug B)"
+            )
+        }
+
+        // (b) control: WITHOUT a backspace, the boundary path still skips
+        // the just-instant-corrected word — unchanged existing behavior.
+        do {
+            let h = harness()
+            h.type(rabota) // fires instant, then the last letter types normally
+            DebugLog.shared.waitForPendingWrites()
+            let before = DebugLog.shared.currentContents
+            h.press(49) // space — no backspace in between
+            DebugLog.shared.waitForPendingWrites()
+            let newLines = String(DebugLog.shared.currentContents.dropFirst(before.count))
+            TestRunner.assertTrue(
+                newLines.contains("skip boundary correction: already instant-corrected"),
+                "control: without a backspace, the boundary path still skips the just-instant-corrected word"
+            )
+        }
+    }
+}
+
+enum DoubleShiftInapplicableLogTests {
+    static func run() {
+        TestRunner.section("Bug A fix — 'learned: inapplicable' checks the OWN reading in sourceLang, not the target")
+
+        guard TestRunner.syntheticKeyboardEventsAreSafe else {
+            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
+            return
+        }
+        guard LicenseService.shared.isEntitled else {
+            TestRunner.skip("Double Shift is license-gated")
+            return
+        }
+        let inputSources = InputSourceManager()
+        guard let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }),
+              inputSources.supportedLayouts.contains(where: { $0.isEnglish }) else {
+            TestRunner.skip("EN + RU layouts are required")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+
+        let environment = KeyboardMonitorTestEnvironment(inputSources: inputSources)
+        defer { environment.restore() }
+
+        // Types `word` twice (fresh each time — never toggling the SAME
+        // correction back, which `CorrectionFeedbackTracker` would classify
+        // as `.toggleOfManualFix` instead of a second `.manualFix`) via
+        // Double Shift on an isolated `LearnedWordsStore`, so the SECOND
+        // occurrence is the promoting one, and reports whether
+        // "learned: inapplicable" was logged by it.
+        func promotedInapplicable(word: String) -> Bool? {
+            let suite = AppIdentity.bundleIdentifier + ".tests.bugA." + UUID().uuidString
+            guard let defaults = UserDefaults(suiteName: suite) else { return nil }
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let learnedWords = LearnedWordsStore(defaults: defaults)
+            let h = KeyboardMonitorHarness(
+                dictionary: dictionary, inputSources: inputSources, learnedWordsStore: learnedWords
+            )
+            h.prefs.isAutoSwitchEnabled = false // Double-Shift-only, same isolation as the "/exit" fixture
+            inputSources.switchTo(ruLayout)
+            guard let strokes = InstantCorrectionFixtures.keystrokes(for: word, reverse: ruReverse) else {
+                return nil
+            }
+
+            h.type(strokes)
+            guard h.monitor.swapLastWordInBuffer() else { return nil } // 1st DS: .recorded
+
+            h.type(strokes) // fresh retype — same direction, not a toggle
+            DebugLog.shared.waitForPendingWrites()
+            let before = DebugLog.shared.currentContents
+            guard h.monitor.swapLastWordInBuffer() else { return nil } // 2nd DS: .promoted
+            DebugLog.shared.waitForPendingWrites()
+            let newLines = String(DebugLog.shared.currentContents.dropFirst(before.count))
+            return newLines.contains("learned: inapplicable")
+        }
+
+        // "сдуфк" — the flagship non-word own-reading (its EN conversion is
+        // "clear", per learning_spec.md / CLAUDE.md v0.8.0): NOT inapplicable.
+        if let result = promotedInapplicable(word: "сдуфк") {
+            TestRunner.assertTrue(!result, "внесловарная own-сторона ('сдуфк', ru) → 'learned: inapplicable' NOT logged")
+        } else {
+            TestRunner.assertTrue(false, "'сдуфк' setup: both Double Shift gestures must promote the entry")
+        }
+
+        // "дом" — a real ru dictionary word own-reading: inapplicable IS logged.
+        if let result = promotedInapplicable(word: "дом") {
+            TestRunner.assertTrue(result, "словарная own-сторона ('дом', ru) → 'learned: inapplicable' IS logged")
+        } else {
+            TestRunner.assertTrue(false, "'дом' setup: both Double Shift gestures must promote the entry")
+        }
+    }
+}
+
+enum ProviderSingleReadGuardTests {
+    static func run() {
+        TestRunner.section(
+            "Bug C fix — learnedWordsProvider reads exceptionsService.autoLearned once per call, not once per candidate"
+        )
+
+        final class CountingUserDefaults: UserDefaults {
+            var dictionaryReads = 0
+            override func dictionary(forKey defaultName: String) -> [String: Any]? {
+                if defaultName.hasSuffix("autoLearned") { dictionaryReads += 1 }
+                return super.dictionary(forKey: defaultName)
+            }
+        }
+
+        let suite = AppIdentity.bundleIdentifier + ".tests.bugC." + UUID().uuidString
+        guard let counting = CountingUserDefaults(suiteName: suite) else {
+            TestRunner.assertTrue(false, "isolated counting UserDefaults suite constructs")
+            return
+        }
+        defer { counting.removePersistentDomain(forName: suite) }
+
+        let prefs = PreferencesService(defaults: counting)
+        let exceptions = ExceptionsService(defaults: counting)
+        let learnedWords = LearnedWordsStore(defaults: counting)
+        let personalFreq = PersonalFrequencyStore(defaults: counting)
+        let inputSources = InputSourceManager()
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
+        let analyzer = InstantCorrectionAnalyzer(dictionary: dictionary)
+        let replacer = FakeTextReplacer(inputSources: inputSources)
+
+        // 3 promoted non-dictionary personal-frequency entries — without the
+        // fix, the closure's `.filter` calls `isAutoLearned` (→ `.autoLearned`,
+        // one UserDefaults read) once PER candidate word.
+        for word in ["alfa", "bravo", "charlie"] {
+            for i in 0..<5 { // promotionThreshold == 5, uniform regardless of isDictionaryWord
+                _ = personalFreq.bump(
+                    word: word, lang: "en", isDictionaryWord: false, at: Date(timeIntervalSinceNow: TimeInterval(i))
+                )
+            }
+        }
+        TestRunner.assertEqual(
+            personalFreq.promotedNonDictionaryKeys(lang: "en").count, 3,
+            "setup: 3 non-dictionary personal-frequency entries are promoted"
+        )
+
+        let monitor = KeyboardMonitor(
+            languageDetector: detector, textReplacer: replacer,
+            statsService: StatisticsService(), prefsService: prefs,
+            exceptionsService: exceptions, yoficatorService: YoficatorService(),
+            switchUndoManager: SwitchUndoManager(),
+            perAppLayoutService: PerAppLayoutService(inputSourceManager: inputSources, prefsService: prefs),
+            instantCorrectionAnalyzer: analyzer,
+            secureInputDetector: SecureInputDetector(secureCheck: { false }, axProbe: { false }),
+            learnedWordsStore: learnedWords, personalFrequencyStore: personalFreq
+        )
+        _ = monitor // keeps `learnedWordsProvider` wired for the call below
+
+        counting.dictionaryReads = 0 // isolate the ONE call below from construction-time reads
+        _ = detector.learnedWordsProvider("en")
+        TestRunner.assertEqual(
+            counting.dictionaryReads, 1,
+            "exceptionsService.autoLearned is read exactly once per learnedWordsProvider call, not once per candidate word"
+        )
+    }
+}
+
 // MARK: - Avalanche circuit breaker (CLAUDE.md "avalanche" incident: a single
 // mistyped Russian word cascaded into ~10 layout switches and 4 Double Shift
 // firings inside one second, visible on screen as a mangled `завершftm`).
@@ -4615,6 +5158,99 @@ enum ComboWindowGuardTests {
                 + " (resetting it here would risk swallowing the next genuine press"
                 + " of whichever key was actually stuck as a phantom release)"
         )
+    }
+}
+
+/// Structural guards for the Game Mode wave-2 wiring (gamemode-spec-20260831.md,
+/// steps 2-5) — same `#filePath`-source-read precedent as `ComboWindowGuardTests`
+/// above, for exactly the properties that don't need (or can't get) live
+/// behavioral coverage: ordering inside a function body, and "every direct
+/// call routes through the one wrapper".
+enum GameModeSourceGuardTests {
+    private static func readSource(_ path: String) -> String? {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()      // Tests/
+            .deletingLastPathComponent()      // QwertySwitcher/
+            .appendingPathComponent(path)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            TestRunner.skip("\(path) not readable from \(url.path)")
+            return nil
+        }
+        return text
+    }
+
+    static func run() {
+        TestRunner.section("Game mode — structural guards on KeyboardMonitor.swift / HotkeyManager.swift")
+
+        guard let kmText = readSource("Core/KeyboardMonitor.swift") else { return }
+
+        // Step 2: the sanity-length gate runs strictly before detect() in
+        // processCurrentWord, right after the shortWordFloor guard.
+        if let funcStart = kmText.range(of: "private func processCurrentWord(") {
+            let body = String(kmText[funcStart.upperBound...])
+            if let capGate = body.range(of: "InstantCorrectionAnalyzer.maxLength"),
+               let detectCall = body.range(of: "languageDetector.detect(keystrokes: keystrokes)") {
+                TestRunner.assertTrue(
+                    capGate.lowerBound < detectCall.lowerBound,
+                    "the sanity-length gate runs before languageDetector.detect( in processCurrentWord"
+                )
+            } else {
+                TestRunner.assertTrue(false, "cap gate or detect() call not found in processCurrentWord — test needs updating")
+            }
+        } else {
+            TestRunner.assertTrue(false, "processCurrentWord not found — test needs updating")
+        }
+
+        // Step 3: the hot path (handleEvent) never touches NSWorkspace/
+        // AXUIElement/Bundle( — game-mode evidence collection is memory-only.
+        if let funcStart = kmText.range(of: "func handleEvent(_ proxy: CGEventTapProxy") {
+            let rest = String(kmText[funcStart.upperBound...])
+            let body = rest.range(of: "\n    private func handleWordBoundary").map { String(rest[..<$0.lowerBound]) } ?? rest
+            for forbidden in ["NSWorkspace", "AXUIElement", "Bundle("] {
+                TestRunner.assertTrue(
+                    !body.contains(forbidden),
+                    "handleEvent's body contains no \(forbidden) (game-mode evidence collection is memory-only)"
+                )
+            }
+        } else {
+            TestRunner.assertTrue(false, "handleEvent not found — test needs updating")
+        }
+
+        // Step 4: `gameActive` (not a separate branch) is folded directly
+        // into the canAutoCorrect expression.
+        if let range = kmText.range(of: "let canAutoCorrect = prefsService.isAutoSwitchEnabled") {
+            let tail = String(kmText[range.lowerBound...].prefix(400))
+            TestRunner.assertTrue(
+                tail.contains("!gameActive"),
+                "canAutoCorrect's own expression includes !gameActive"
+            )
+        } else {
+            TestRunner.assertTrue(false, "canAutoCorrect declaration not found — test needs updating")
+        }
+
+        // Step 5: exactly ONE direct call to
+        // exceptionsService.areHotkeysBlockedForCurrentApp() per file — the
+        // wrapper's own body — everywhere else routes through
+        // `hotkeysBlocked()` (StatusBarController is untouched by this wave
+        // and deliberately not scanned here — it still checks the per-app
+        // profile directly, outside any hotkey path).
+        func countDirectCalls(_ path: String, _ text: String?) {
+            guard let text else { return }
+            var count = 0
+            var searchStart = text.startIndex
+            let needle = "exceptionsService.areHotkeysBlockedForCurrentApp()"
+            while let r = text.range(of: needle, range: searchStart..<text.endIndex) {
+                count += 1
+                searchStart = r.upperBound
+            }
+            TestRunner.assertEqual(
+                count, 1,
+                "\(path): exactly 1 direct call to areHotkeysBlockedForCurrentApp()"
+                    + " — inside its own hotkeysBlocked() wrapper, nowhere else"
+            )
+        }
+        countDirectCalls("Core/KeyboardMonitor.swift", kmText)
+        countDirectCalls("Core/HotkeyManager.swift", readSource("Core/HotkeyManager.swift"))
     }
 }
 
@@ -5326,6 +5962,48 @@ enum SwitchBlockReasonTests {
             "Автопереключение выключено",
             "global auto-switch-off outranks an app-profile block — no point naming one app when it's off everywhere"
         )
+
+        // Game Mode (gamemode-spec-20260831.md) — checked LAST, after the
+        // per-app profile block.
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                gameDetected: true, gameAppName: "Chess"
+            ).title,
+            "Игра — коррекция приостановлена",
+            "game mode is reported when nothing more global explains the silence"
+        )
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                gameDetected: true, gameAppName: nil
+            ).title,
+            "Игра — коррекция приостановлена",
+            "game mode title does not depend on a known app name"
+        )
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                appProfileBlock: (.autoSwitch, "Terminal"), gameDetected: true, gameAppName: "Terminal"
+            ).title,
+            "Автопереключение выключено для Terminal",
+            "priority: an app-profile block outranks game-mode detection — the deliberate setting explains it first"
+        )
+        TestRunner.assertEqual(
+            SwitchBlockReason.resolve(
+                health: .running, isAutoSwitchEnabled: false, isEntitled: true, secureInputAppName: nil,
+                gameDetected: true, gameAppName: "Chess"
+            ).title,
+            "Автопереключение выключено",
+            "priority: global auto-switch-off outranks game-mode detection too"
+        )
+        TestRunner.assertNil(
+            SwitchBlockReason.resolve(
+                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                gameDetected: false
+            ).title,
+            "no game-mode block passed → still '.none'"
+        )
     }
 }
 
@@ -5586,6 +6264,28 @@ enum PersonalFrequencyStoreTests {
         TestRunner.assertEqual(fifthOutcome, .promoted, "the 5th bump promotes")
         TestRunner.assertTrue(store.isPromoted(word: "vmc", lang: "en"), "count 5 is promoted")
         TestRunner.assertTrue(store.promotedKeys(lang: "en").contains("vmc"), "promotedKeys surfaces the bare word")
+
+        // promotedNonDictionaryKeys: excludes dictionary-word entries, keeps non-dictionary ones,
+        // and never touches promotedKeys/isPromoted (isPromoted backs undoLastCorrection's unlearn)
+        TestRunner.assertTrue(
+            store.promotedNonDictionaryKeys(lang: "en").contains("vmc"),
+            "a promoted non-dictionary word appears in promotedNonDictionaryKeys"
+        )
+        for i in 0..<5 {
+            store.bump(word: "digword", lang: "en", isDictionaryWord: true, at: t0.addingTimeInterval(TimeInterval(i) * day))
+        }
+        TestRunner.assertTrue(store.isPromoted(word: "digword", lang: "en"), "the dictionary word is promoted too")
+        TestRunner.assertTrue(
+            store.promotedKeys(lang: "en").contains("digword"), "promotedKeys still includes the dictionary word"
+        )
+        TestRunner.assertTrue(
+            !store.promotedNonDictionaryKeys(lang: "en").contains("digword"),
+            "promotedNonDictionaryKeys excludes the dictionary word"
+        )
+        TestRunner.assertEqual(
+            store.promotedKeys(lang: "en"), Set(["vmc", "digword"]),
+            "promotedKeys is unchanged by the new method — both entries still present"
+        )
 
         // unlearn
         store.unlearn(word: "vmc", lang: "en")
@@ -6240,5 +6940,267 @@ enum LearningReplayChainTests {
         )
         TestRunner.assertNil(after.result, "after revert, the fourth occurrence no longer fires")
         TestRunner.assertTrue(exceptions.isAutoLearned("сдуфк"), "the exception is in place for the KeyboardMonitor-level exception check too")
+    }
+}
+
+// MARK: - Game Mode (gamemode-spec-20260831.md, wave 1: GameModeState + GameAppProbe)
+
+private final class GameModeTestClock {
+    var date: Date
+    init(_ date: Date) { self.date = date }
+    func advance(_ seconds: TimeInterval) { date = date.addingTimeInterval(seconds) }
+}
+
+enum GameAppProbeTests {
+    static func run() {
+        TestRunner.section("GameAppProbe")
+
+        TestRunner.assertTrue(
+            GameAppProbe.isGameCategory("public.app-category.games"), "the bare games category is a game"
+        )
+        TestRunner.assertTrue(
+            GameAppProbe.isGameCategory("public.app-category.action-games"), "action-games subcategory is a game"
+        )
+        TestRunner.assertTrue(
+            GameAppProbe.isGameCategory("public.app-category.word-games"), "word-games subcategory is a game"
+        )
+        TestRunner.assertTrue(
+            !GameAppProbe.isGameCategory("public.app-category.developer-tools"), "developer-tools is not a game"
+        )
+        TestRunner.assertTrue(!GameAppProbe.isGameCategory(nil), "a nil category is not a game")
+
+        TestRunner.assertTrue(
+            !GameAppProbe.declaredGame(infoDictionary: nil, bundlePath: nil),
+            "no Info.plist and no path is not a declared game"
+        )
+        TestRunner.assertTrue(
+            GameAppProbe.declaredGame(
+                infoDictionary: ["LSApplicationCategoryType": "public.app-category.games"], bundlePath: nil
+            ),
+            "the games category alone declares the app"
+        )
+        TestRunner.assertTrue(
+            GameAppProbe.declaredGame(infoDictionary: ["LSSupportsGameMode": true], bundlePath: nil),
+            "LSSupportsGameMode alone declares the app"
+        )
+        TestRunner.assertTrue(
+            GameAppProbe.declaredGame(infoDictionary: ["GCSupportsGameMode": true], bundlePath: nil),
+            "GCSupportsGameMode alone declares the app"
+        )
+        TestRunner.assertTrue(
+            GameAppProbe.declaredGame(
+                infoDictionary: nil,
+                bundlePath: "/Users/x/Library/Application Support/Steam/steamapps/common/Foo/Foo.app"
+            ),
+            "a /steamapps/ path alone declares the app"
+        )
+        TestRunner.assertTrue(
+            !GameAppProbe.declaredGame(
+                infoDictionary: ["LSApplicationCategoryType": "public.app-category.developer-tools"],
+                bundlePath: "/Applications/Xcode.app"
+            ),
+            "an ordinary developer-tools app with no game markers is not declared"
+        )
+    }
+}
+
+enum GameModeStateTests {
+    static func run() {
+        TestRunner.section("GameModeState")
+
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let declaredInfo: [String: Any] = ["LSApplicationCategoryType": "public.app-category.games"]
+
+        func freshState(now: @escaping () -> Date, isEnabled: @escaping () -> Bool = { true }) -> (GameModeState, String) {
+            let suite = AppIdentity.bundleIdentifier + ".tests.gameMode." + UUID().uuidString
+            guard let defaults = UserDefaults(suiteName: suite) else {
+                TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+                return (GameModeState(defaults: .standard, now: now, isEnabled: isEnabled), suite)
+            }
+            return (GameModeState(defaults: defaults, now: now, isEnabled: isEnabled), suite)
+        }
+
+        // declared-вход: no evidence needed, active right after activation
+        do {
+            let clock = GameModeTestClock(t0)
+            let (state, suite) = freshState(now: { clock.date })
+            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            state.noteActivation(bundleID: "com.example.declared", infoDictionary: declaredInfo, bundlePath: nil)
+            TestRunner.assertTrue(
+                state.isActive(bundleID: "com.example.declared"),
+                "a declared game is active right after activation, no evidence needed"
+            )
+        }
+
+        // вход по 1 улике longRun
+        do {
+            let clock = GameModeTestClock(t0)
+            let (state, suite) = freshState(now: { clock.date })
+            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            state.noteActivation(bundleID: "com.example.longrun", infoDictionary: nil, bundlePath: nil)
+            TestRunner.assertTrue(!state.isActive(bundleID: "com.example.longrun"), "an undeclared app starts inactive")
+            state.note(.longRun)
+            TestRunner.assertTrue(
+                state.isActive(bundleID: "com.example.longrun"), "one longRun clue alone is enough to enter GAME"
+            )
+        }
+
+        // вход по 1 улике heldKeys
+        do {
+            let clock = GameModeTestClock(t0)
+            let (state, suite) = freshState(now: { clock.date })
+            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            state.noteActivation(bundleID: "com.example.heldkeys", infoDictionary: nil, bundlePath: nil)
+            state.note(.heldKeys)
+            TestRunner.assertTrue(
+                state.isActive(bundleID: "com.example.heldkeys"), "one heldKeys clue alone is enough to enter GAME"
+            )
+        }
+
+        // выход по 4 прозаическим словам за 30с
+        do {
+            let clock = GameModeTestClock(t0)
+            let (state, suite) = freshState(now: { clock.date })
+            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            let bundleID = "com.example.prose"
+            state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
+            state.note(.longRun)
+            for _ in 0..<3 {
+                state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
+                clock.advance(1)
+            }
+            TestRunner.assertTrue(state.isActive(bundleID: bundleID), "3 prose words in 30s are not enough to exit yet")
+            state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
+            TestRunner.assertTrue(!state.isActive(bundleID: bundleID), "the 4th prose word within 30s exits GAME to TYPING")
+        }
+
+        // сброс счётчика прозы уликой
+        do {
+            let clock = GameModeTestClock(t0)
+            let (state, suite) = freshState(now: { clock.date })
+            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            let bundleID = "com.example.prosereset"
+            state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
+            state.note(.longRun)
+            state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
+            state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
+            state.note(.heldKeys) // any clue resets the prose counter
+            state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
+            state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
+            TestRunner.assertTrue(
+                state.isActive(bundleID: bundleID),
+                "2 prose words before a clue + 2 after do not add up — the clue reset the counter"
+            )
+            state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
+            state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
+            TestRunner.assertTrue(
+                !state.isActive(bundleID: bundleID), "4 prose words counted fresh after the reset do exit"
+            )
+        }
+
+        // гистерезис: TYPING + 1 clue re-enters GAME
+        do {
+            let clock = GameModeTestClock(t0)
+            let (state, suite) = freshState(now: { clock.date })
+            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            let bundleID = "com.example.hysteresis"
+            state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
+            state.note(.longRun)
+            for _ in 0..<4 {
+                state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
+            }
+            TestRunner.assertTrue(!state.isActive(bundleID: bundleID), "4 prose words exited to TYPING")
+            state.note(.longRun)
+            TestRunner.assertTrue(
+                state.isActive(bundleID: bundleID), "a single clue in TYPING re-enters GAME (hysteresis)"
+            )
+        }
+
+        // TTL 30 минут — via the injected clock, no sleep
+        do {
+            let clock = GameModeTestClock(t0)
+            let (state, suite) = freshState(now: { clock.date })
+            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            state.noteActivation(bundleID: "com.example.ttl", infoDictionary: declaredInfo, bundlePath: nil)
+            state.noteActivation(bundleID: "com.example.other", infoDictionary: nil, bundlePath: nil)
+            clock.advance(29 * 60)
+            TestRunner.assertTrue(
+                state.isActive(bundleID: "com.example.ttl"),
+                "within the 30-minute TTL after deactivation, the verdict survives"
+            )
+            clock.advance(2 * 60)
+            TestRunner.assertTrue(
+                !state.isActive(bundleID: "com.example.ttl"), "past the 30-minute TTL, the verdict expires"
+            )
+        }
+
+        // denied перекрывает declared и behavioral
+        do {
+            let clock = GameModeTestClock(t0)
+            let (state, suite) = freshState(now: { clock.date })
+            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            let bundleID = "com.example.denied"
+            state.deny(bundleID)
+            state.noteActivation(bundleID: bundleID, infoDictionary: declaredInfo, bundlePath: nil)
+            TestRunner.assertTrue(!state.isActive(bundleID: bundleID), "denial overrides a declared game")
+            state.note(.longRun)
+            TestRunner.assertTrue(!state.isActive(bundleID: bundleID), "denial overrides behavioral evidence too")
+        }
+
+        // персист вердикта при ≥3 уликах за сессию (и НЕ персист при < 3)
+        do {
+            let suite = AppIdentity.bundleIdentifier + ".tests.gameMode." + UUID().uuidString
+            guard let defaults = UserDefaults(suiteName: suite) else {
+                TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+                return
+            }
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let clock = GameModeTestClock(t0)
+
+            let persisted = "com.example.persisted"
+            let notPersisted = "com.example.notpersisted"
+
+            let state1 = GameModeState(defaults: defaults, now: { clock.date }, isEnabled: { true })
+            state1.noteActivation(bundleID: persisted, infoDictionary: nil, bundlePath: nil)
+            state1.note(.longRun)
+            state1.note(.heldKeys)
+            state1.note(.longRun) // 3 clues this session
+            state1.noteActivation(bundleID: notPersisted, infoDictionary: nil, bundlePath: nil) // deactivates `persisted`, persists it
+            state1.note(.longRun)
+            state1.note(.heldKeys) // only 2 clues this session
+            state1.noteActivation(bundleID: "com.example.third", infoDictionary: nil, bundlePath: nil) // deactivates `notPersisted`, does NOT persist
+
+            let state2 = GameModeState(defaults: defaults, now: { clock.date }, isEnabled: { true })
+            state2.noteActivation(bundleID: persisted, infoDictionary: nil, bundlePath: nil)
+            TestRunner.assertTrue(
+                state2.isActive(bundleID: persisted),
+                "≥3 clues in one session persist the verdict — a fresh instance recognizes it from activation alone"
+            )
+
+            let state3 = GameModeState(defaults: defaults, now: { clock.date }, isEnabled: { true })
+            state3.noteActivation(bundleID: notPersisted, infoDictionary: nil, bundlePath: nil)
+            TestRunner.assertTrue(
+                !state3.isActive(bundleID: notPersisted),
+                "fewer than 3 clues does not persist — a fresh instance does not recognize it"
+            )
+        }
+
+        // isGameModeEnabled=false → isActive всегда false
+        do {
+            let clock = GameModeTestClock(t0)
+            let (state, suite) = freshState(now: { clock.date }, isEnabled: { false })
+            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            let bundleID = "com.example.disabled"
+            state.noteActivation(bundleID: bundleID, infoDictionary: declaredInfo, bundlePath: nil)
+            TestRunner.assertTrue(
+                !state.isActive(bundleID: bundleID), "a declared game does not read as active while the toggle is off"
+            )
+            state.note(.longRun)
+            TestRunner.assertTrue(
+                !state.isActive(bundleID: bundleID),
+                "behavioral evidence does not read as active while the toggle is off either"
+            )
+            TestRunner.assertTrue(!state.isActiveForFrontmost(), "isActiveForFrontmost also respects the toggle")
+        }
     }
 }

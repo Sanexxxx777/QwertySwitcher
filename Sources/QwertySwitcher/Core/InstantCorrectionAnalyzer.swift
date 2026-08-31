@@ -18,6 +18,19 @@ final class InstantCorrectionAnalyzer {
     /// Minimum buffered letters before instant correction is even considered.
     static let minLength = 4
 
+    /// Sanity cap (gamemode-spec-20260831.md §4): buffered runs longer than
+    /// this never evaluate a candidate at all, on ANY automatic path
+    /// (instant here; `KeyboardMonitor.processCurrentWord` enforces the same
+    /// number on the boundary path) — independent of game mode. Calibrated
+    /// against `Resources/Dictionaries`: ru_RU.txt has 0 words >20 letters
+    /// (max is exactly 20); en_US.txt has 301/357599 (0.084%). 3 days of the
+    /// owner's real auto-corrections (n=145) topped out at len=10; the two
+    /// outliers were len=21 (a legitimate Double Shift AX-selection, an
+    /// explicit gesture — NOT capped, see the class doc) and len=30 (the
+    /// catastrophe this cap exists to stop: a junk-override false switch
+    /// backspacing/retyping 30 characters into a game).
+    static let maxLength = 20
+
     /// A current-language combined score at or below this is treated as
     /// "the text typed so far is not a plausible word in this language".
     static let currentCeiling = 5
@@ -56,6 +69,8 @@ final class InstantCorrectionAnalyzer {
         case belowMargin           // best candidate didn't clear current text by `margin`
         case alreadyCorrected      // KeyboardMonitor: this word was already instant-corrected
         case ambiguousKeyRecent    // KeyboardMonitor: alphabet-ambiguous key too recent
+        case tooLong               // buffered run exceeds maxLength (gamemode-spec §4)
+        case heldKeys              // KeyboardMonitor: ≥3 autorepeat keystrokes in this word (game mode evidence)
     }
 
     private let dictionary: WordDictionary
@@ -87,6 +102,7 @@ final class InstantCorrectionAnalyzer {
         learnedActive: Set<String> = []
     ) -> (result: Result?, silence: SilenceReason?) {
         guard keystrokes.count >= Self.minLength else { return (nil, nil) }
+        guard keystrokes.count <= Self.maxLength else { return (nil, .tooLong) }
 
         let currentText = convert(currentLayout)
         guard !currentText.isEmpty, !LanguageDetector.shouldSkip(currentText) else { return (nil, .shouldSkip) }

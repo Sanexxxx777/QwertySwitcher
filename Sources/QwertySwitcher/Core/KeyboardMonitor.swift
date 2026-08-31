@@ -144,6 +144,20 @@ final class KeyboardMonitor {
     private var learningFlushTimer: Timer?
     private let learningFlushInterval: TimeInterval = 30
 
+    // MARK: - Game mode (gamemode-spec-20260831.md, wave 2)
+
+    /// `.shared` singleton by default — same DI seam as `learnedWordsStore`
+    /// above, but this one needs no cross-instance sharing (wave 3's UI reads
+    /// `GameModeState.shared` directly), so it stays `private`.
+    private let gameMode: GameModeState
+
+    /// Autorepeat keystrokes seen in the run/word currently being buffered
+    /// (spec §5 `heldKeys` evidence). Reset at every point that resets
+    /// `runKeystrokes`/`buffer` (7 sites, see `runKeystrokes.removeAll()`).
+    /// Hot-path: a plain increment on a value already read off the CGEvent —
+    /// no UserDefaults/Bundle/NSWorkspace call.
+    private var wordAutorepeatCount = 0
+
     // Stale-buffer eviction: drop accumulated keys if user paused typing too long
     private var lastKeyTime: CFAbsoluteTime = 0
     private let staleBufferTimeout: CFAbsoluteTime = 10.0 // 10 sec idle → clear
@@ -245,7 +259,8 @@ final class KeyboardMonitor {
          // `UserDefaults` suite pass these in explicitly instead.
          learnedWordsStore: LearnedWordsStore = LearnedWordsStore(),
          personalFrequencyStore: PersonalFrequencyStore = PersonalFrequencyStore(),
-         feedbackTracker: CorrectionFeedbackTracker = CorrectionFeedbackTracker()) {
+         feedbackTracker: CorrectionFeedbackTracker = CorrectionFeedbackTracker(),
+         gameMode: GameModeState = .shared) {
         self.languageDetector = languageDetector
         self.secureInputDetector = secureInputDetector
         self.textReplacer = textReplacer
@@ -260,6 +275,7 @@ final class KeyboardMonitor {
         self.learnedWordsStore = learnedWordsStore
         self.personalFreqStore = personalFrequencyStore
         self.feedbackTracker = feedbackTracker
+        self.gameMode = gameMode
         self.activeAppBundleID = CommandLine.arguments.contains("--test")
             ? nil : NSWorkspace.shared.frontmostApplication?.bundleIdentifier
 
@@ -284,8 +300,22 @@ final class KeyboardMonitor {
         languageDetector.learnedWordsProvider = { [weak self] lang in
             guard let self else { return [] }
             let learned = self.learnedWordsStore.activeKeys(lang: lang)
-            let personal = self.personalFreqStore.promotedKeys(lang: lang)
-                .filter { !self.exceptionsService.isAutoLearned($0) }
+            // Bug fix (bugfixes-diag-20260831.md Bug C): this closure is
+            // called twice per word, synchronously in the CGEventTap
+            // callback. `autoLearned` is snapshotted ONCE (was: `isAutoLearned`
+            // per candidate — N `UserDefaults.dictionary(forKey:)` reads,
+            // ~0.67ms/word at 142 keys, ~7.2ms at cap 2000, linear). Semantics
+            // are identical — same dictionary, read once instead of per key.
+            // `promotedNonDictionaryKeys` (not `promotedKeys`) also shrinks
+            // the candidate set itself (142 → ~7 measured): a dictionary
+            // entry's boundary-path score is already
+            // `max(dictionaryScore, 80+min(20,len*2))` == `dictionaryScore`
+            // when `inDictionary` is already true, so excluding
+            // already-dictionary entries here is a provable no-op on
+            // `detect()`'s outcome.
+            let autoLearned = self.exceptionsService.autoLearned
+            let personal = self.personalFreqStore.promotedNonDictionaryKeys(lang: lang)
+                .filter { autoLearned[$0.lowercased()] == nil }
             return learned.union(personal)
         }
 
@@ -354,6 +384,7 @@ final class KeyboardMonitor {
         buffer.clear()
         pendingLeadingSymbols.removeAll()
         runKeystrokes.removeAll()
+        wordAutorepeatCount = 0
         lastCompletedWord = nil
         instantCorrectionGate.reset()
         sentenceStartTracker.reset()
@@ -487,24 +518,36 @@ final class KeyboardMonitor {
         return suppressCurrentEvent
     }
 
+    /// Single choke point for "hotkeys must not fire right now" in this file
+    /// — per-app profile block (existing) OR the frontmost app being in Game
+    /// Mode (gamemode-spec-20260831.md §2: Single/Double/L+R Shift and
+    /// Cmd+Opt+Z all silenced in-game, same as `HotkeyManager`'s own
+    /// wrapper of the same name). Every direct call to the per-app-profile
+    /// check in this file routes through here — kept as its own tiny method
+    /// rather than reaching into `HotkeyManager` (weak optional, different
+    /// owner, and not always wired — see `KeyboardMonitorHarness`) just to
+    /// share one line.
+    private func hotkeysBlocked() -> Bool {
+        exceptionsService.areHotkeysBlockedForCurrentApp() || gameMode.isActive(bundleID: activeAppBundleID)
+    }
+
     fileprivate func handlesShortcut(type: CGEventType, event: CGEvent) -> Bool {
         let keycode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         if type == .flagsChanged && keycode == 57 {
-            return prefsService.isCapsLockSwitchEnabled
-                && !exceptionsService.areHotkeysBlockedForCurrentApp()
+            return prefsService.isCapsLockSwitchEnabled && !hotkeysBlocked()
         }
         guard type == .keyDown else { return false }
         let flags = event.flags
         if flags.contains(.maskCommand) && flags.contains(.maskShift) && flags.contains(.maskAlternate) && keycode == 9 {
             return prefsService.isPasteNoFormatEnabled
-                && !exceptionsService.areHotkeysBlockedForCurrentApp()
+                && !hotkeysBlocked()
                 && NSPasteboard.general.string(forType: .string) != nil
         }
         return flags.contains(.maskCommand)
             && flags.contains(.maskAlternate)
             && keycode == 6
             && switchUndoManager.canUndo
-            && !exceptionsService.areHotkeysBlockedForCurrentApp()
+            && !hotkeysBlocked()
     }
 
     /// Internal (not fileprivate) so the headless integration-test harness in
@@ -562,7 +605,7 @@ final class KeyboardMonitor {
             // `HotkeyManager`, arming a phantom Double/Single Shift on the
             // NEXT shift-tap within its 450ms window.
             hotkeyManager?.markKeyPressed()
-            if exceptionsService.areHotkeysBlockedForCurrentApp() {
+            if hotkeysBlocked() {
                 invalidateEditingContext(reason: "blocked-app-hotkey")
                 return
             }
@@ -593,7 +636,7 @@ final class KeyboardMonitor {
         // (Plain Cmd+Z is left to the host app to avoid conflicting with its own undo stack.)
         if flags.contains(.maskCommand) && flags.contains(.maskAlternate)
             && keycode == 6 && switchUndoManager.canUndo
-            && !exceptionsService.areHotkeysBlockedForCurrentApp() {
+            && !hotkeysBlocked() {
             _ = undoLastCorrection()
             return
         }
@@ -606,6 +649,7 @@ final class KeyboardMonitor {
             buffer.clear()
             pendingLeadingSymbols.removeAll()
             runKeystrokes.removeAll()
+            wordAutorepeatCount = 0
             lastCompletedWord = nil
             autoLearnTracker.cancel()
             // Mechanism B reset point 3/7: secure input.
@@ -624,6 +668,7 @@ final class KeyboardMonitor {
             buffer.clear()
             pendingLeadingSymbols.removeAll()
             runKeystrokes.removeAll()
+            wordAutorepeatCount = 0
             // Mechanism B reset point 4/7: stale-buffer eviction (10s idle).
             feedbackTracker.reset()
         }
@@ -646,9 +691,16 @@ final class KeyboardMonitor {
             return
         }
         let appProfile = activeAppBundleID.flatMap { exceptionsService.profile(for: $0) }
+        // Game mode (gamemode-spec-20260831.md §2): a single point in
+        // `canAutoCorrect` silences boundary correction, instant correction,
+        // snippets, smart case and Mechanism C's frequency bump all at once —
+        // every one of them is already gated behind this flag (see the
+        // `else if` branches below and the `.noSwitch` bump call).
+        let gameActive = gameMode.isActive(bundleID: activeAppBundleID)
         let canAutoCorrect = prefsService.isAutoSwitchEnabled
             && LicenseService.shared.isEntitled
             && appProfile?.blockAutoSwitch != true
+            && !gameActive
 
         if InputBuffer.isDeleteKey(keycode) {
             if !pendingLeadingSymbols.isEmpty || lastCompletedWord != nil {
@@ -663,20 +715,37 @@ final class KeyboardMonitor {
             // backspace count on a later correction.
             pendingLeadingSymbols.removeAll()
             runKeystrokes.removeAll()
+            wordAutorepeatCount = 0
             autoLearnTracker.registerDeletion()
             // Mechanism B reset point 5/7: backspace.
             feedbackTracker.reset()
+            // Bug fix (bugfixes-diag-20260831.md Bug B): the buffer isn't
+            // necessarily empty after a backspace (only its LAST keystroke
+            // was dropped), so the ordinary `buffer.isEmpty` → `startNewWord()`
+            // path below never runs here — without this, an instant
+            // correction earlier in the same word left `wasCorrected == true`
+            // and silently gated the eventual word-boundary evaluation too
+            // ("skip boundary correction: already instant-corrected" on a
+            // word the owner had since edited by hand).
+            instantCorrectionGate.reset()
             return
         }
 
         if InputBuffer.isWordBoundary(keycode) {
+            // Captured before the reset right below — `handleWordBoundary`
+            // needs "did THIS word have any held-key autorepeats" for the
+            // game-mode prose-exit signal (spec §5), and by the time it runs
+            // the counter has already been zeroed for the NEXT word.
+            let wordHadHeldKeys = wordAutorepeatCount > 0
             runKeystrokes.removeAll()
+            wordAutorepeatCount = 0
             let correctable = InputBuffer.isCorrectableBoundary(keycode)
             handleWordBoundary(
                 trailing: correctable ? " " : nil,
                 canAutoCorrect: canAutoCorrect && correctable,
                 keepForManualSwitch: correctable,
-                triggerEvent: event
+                triggerEvent: event,
+                wordHadHeldKeys: wordHadHeldKeys
             )
             return
         }
@@ -685,6 +754,13 @@ final class KeyboardMonitor {
         // keystroke regardless of how the scoring buffer chooses to slice it.
         if InputBuffer.isLetterKey(keycode) || InputBuffer.isNumberOrSpecial(keycode) {
             runKeystrokes.append(BufferedKeystroke(keycode: keycode, flags: flags))
+            // Game mode `longRun` evidence (spec §5 table): a run this long
+            // with no word boundary at all is near-exclusively a game
+            // control spree — measured 0 occurrences outside game windows
+            // (max run 29, n=309) vs 57 inside (max 260, n=599). One-shot:
+            // this line runs exactly once as the count crosses 32, not on
+            // every keystroke after.
+            if runKeystrokes.count == 32 { gameMode.note(.longRun) }
             // Field-debugging trace ("Подробный лог"): which keystroke stopped
             // growing the run. buf is pre-append for the letter path below.
             DebugLog.shared.log(
@@ -738,6 +814,11 @@ final class KeyboardMonitor {
                 instantCorrectionGate.startNewWord()
             }
             buffer.append(keycode, flags: flags)
+            // Game mode `heldKeys` evidence (spec §5 table): counts letters
+            // that landed with the OS autorepeat flag set — a game control
+            // held down, not a human typing. Reset alongside `runKeystrokes`/
+            // `buffer` at all 7 sites above.
+            if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 { wordAutorepeatCount += 1 }
             if InputBuffer.isAlphabetAmbiguous(keycode) { lastAmbiguousKeyIndex = buffer.count }
             // Instant correction fires MID-word, before the evidence is in. It
             // has its own, looser scorer, so while an alphabet-ambiguous key is
@@ -754,6 +835,12 @@ final class KeyboardMonitor {
                     logInstantSilence(.alreadyCorrected, len: buffer.count)
                 } else if ambiguousKeyRecent {
                     logInstantSilence(.ambiguousKeyRecent, len: buffer.count)
+                } else if wordAutorepeatCount >= 3 {
+                    // Game mode gate (spec §5): ≥3 held-key autorepeats in
+                    // this word is itself a behavioral clue, on top of
+                    // silencing this fire.
+                    gameMode.note(.heldKeys)
+                    logInstantSilence(.heldKeys, len: buffer.count)
                 } else {
                     tryInstantCorrection(triggerEvent: event)
                 }
@@ -797,6 +884,7 @@ final class KeyboardMonitor {
             buffer.clear()
             pendingLeadingSymbols.removeAll()
             runKeystrokes.removeAll()
+            wordAutorepeatCount = 0
             lastCompletedWord = nil
             // Mechanism B reset point 6/7: navigation keys.
             feedbackTracker.reset()
@@ -805,7 +893,7 @@ final class KeyboardMonitor {
 
     private func handleWordBoundary(
         trailing: String?, canAutoCorrect: Bool, keepForManualSwitch: Bool, triggerEvent: CGEvent,
-        triggerKeystroke: BufferedKeystroke? = nil
+        triggerKeystroke: BufferedKeystroke? = nil, wordHadHeldKeys: Bool = false
     ) {
         let captured = buffer.currentWord()
         let capitalizeSentenceStart = captured.isEmpty ? false : sentenceStartTracker.consumeForWord()
@@ -860,6 +948,30 @@ final class KeyboardMonitor {
         } else {
             lastCompletedWord = nil
         }
+
+        // Game mode prose-exit signal (spec §5) — deliberately NOT folded
+        // into `processCurrentWord`'s `.noSwitch` branch (where
+        // `recordPersonalFrequencyBump` computes the same kind of
+        // dictionary-ness check): that branch only runs when `canAutoCorrect`
+        // is true, and game mode being ACTIVE is exactly what makes it false
+        // (see `canAutoCorrect`'s `!gameActive`) — the one case this signal
+        // exists to observe. So it's computed independently here, at the
+        // real word boundary (space only, matching spec §5 "граница =
+        // пробел"), gated behind `gameMode.isActiveForFrontmost()` (an
+        // in-memory read, same cost class as the rest of this hot path) so
+        // the extra dictionary lookup is only ever paid while a bundleID is
+        // actually flagged GAME — `noteProseWord` itself is a no-op
+        // otherwise, so skipping the check when not needed changes nothing
+        // observable.
+        if trailing == " ", !captured.isEmpty, gameMode.isActiveForFrontmost(),
+           let ownLayout = languageDetector.inputSourceManager.currentLayout {
+            let ownText = languageDetector.inputSourceManager.convertKeystrokes(captured, toLayout: ownLayout)
+            let ownCore = LanguageDetector.core(of: ownText)?.lowercased() ?? ""
+            let isWord = !ownCore.isEmpty
+                && languageDetector.isDictionaryWord(ownCore, language: ownLayout.languageCode)
+            gameMode.noteProseWord(isDictionaryWord: isWord, len: ownCore.count, hasHeldKeys: wordHadHeldKeys)
+        }
+
         buffer.clear()
         pendingLeadingSymbols.removeAll()
     }
@@ -1237,7 +1349,13 @@ final class KeyboardMonitor {
             )
             if outcome == .promoted {
                 DebugLog.shared.log("KM", "learned: promoted lang=\(targetLang) len=\(positiveRecord.core.count)")
-                if languageDetector.isDictionaryWord(positiveRecord.core, language: targetLang) {
+                // Bug fix (bugfixes-diag-20260831.md Bug A): checks the OWN
+                // reading (`word`, in `sourceLang`) — the actual gate
+                // (`wordLevel(own)==0` on the instant path, `scoreWord`'s
+                // own-side gates on the boundary path) is keyed on the SOURCE
+                // side, not the just-recorded TARGET core.
+                if let ownCore = LanguageDetector.core(of: word)?.lowercased(),
+                   languageDetector.isDictionaryWord(ownCore, language: sourceLang) {
                     // Honest UX signal (learning_spec.md verbose section):
                     // recorded and promoted, but the OWN reading is itself a
                     // real word of its own language — `wordLevel(own)==0` on
@@ -1326,6 +1444,7 @@ final class KeyboardMonitor {
         buffer.clear()
         pendingLeadingSymbols.removeAll()
         runKeystrokes.removeAll()
+        wordAutorepeatCount = 0
         lastCompletedWord = nil
         autoLearnTracker.cancel()
         switchUndoManager.invalidate()
@@ -1723,6 +1842,30 @@ final class KeyboardMonitor {
         let shortWordFloor = pendingLeadingSymbols.isEmpty ? 1 : 3
         guard keystrokes.count >= shortWordFloor else {
             DebugLog.shared.log("KM", "word too short (len=\(keystrokes.count))", level: .verbose)
+            return false
+        }
+
+        // Sanity cap (gamemode-spec-20260831.md §4): same 20-keystroke limit
+        // as the instant path's own `InstantCorrectionAnalyzer.maxLength`,
+        // enforced independently here because the boundary path never calls
+        // `evaluate()`. Catastrophic runs (a junk-override false switch
+        // backspacing/retyping 30 characters into a game) never even reach
+        // `detect()`. Double Shift is NOT capped (explicit gesture — see the
+        // constant's own doc comment).
+        guard pendingLeadingSymbols.count + keystrokes.count <= InstantCorrectionAnalyzer.maxLength else {
+            DebugLog.shared.log(
+                "KM", "word too long (len=\(pendingLeadingSymbols.count + keystrokes.count))", level: .verbose
+            )
+            return false
+        }
+
+        // Game mode gate (spec §5): ≥3 held-key autorepeats in this word —
+        // same threshold and evidence as the instant path's own gate.
+        if wordAutorepeatCount >= 3 {
+            gameMode.note(.heldKeys)
+            DebugLog.shared.log(
+                "KM", "boundary skip: held keys (autorepeat=\(wordAutorepeatCount))", level: .verbose
+            )
             return false
         }
 

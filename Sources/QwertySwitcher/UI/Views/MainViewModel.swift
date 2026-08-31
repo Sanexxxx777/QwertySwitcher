@@ -89,6 +89,25 @@ final class MainViewModel: ObservableObject {
     @Published var isVerboseLogEnabled: Bool {
         didSet { prefsService.isVerboseLogEnabled = isVerboseLogEnabled }
     }
+    /// Game Mode (gamemode-spec-20260831.md). `GameModeState` reads this
+    /// live off `PreferencesService` through its own `isEnabled` closure
+    /// (`GameModeState.shared`'s default argument), so — unlike
+    /// `isLearningEnabled` — there is no second live store to reach into
+    /// here; the plain preference write is the whole story. It doesn't see
+    /// the flip on its own, though (spec's open question from wave 1), so
+    /// turning it off logs the one event `GameModeState` itself can't.
+    @Published var isGameModeEnabled: Bool {
+        didSet {
+            prefsService.isGameModeEnabled = isGameModeEnabled
+            guard !isGameModeEnabled else { return }
+            DebugLog.shared.log("GM", "game mode OFF reason=disabled")
+        }
+    }
+    /// "Распознанные игры" list (wave 3) — a snapshot, refreshed after the
+    /// one action that can change it from this window (`denyGame`). Same
+    /// non-live-polling posture `ExceptionsViewModel.autoLearned` already
+    /// has for its own snapshot-on-init dictionary.
+    @Published var recognizedGames: [String] = []
     @Published var isPerAppLayoutEnabled: Bool {
         didSet { perAppLayoutService.isEnabled = isPerAppLayoutEnabled }
     }
@@ -193,6 +212,8 @@ final class MainViewModel: ObservableObject {
         self.isSmartCaseEnabled = prefsService.isSmartCaseEnabled
         self.isLearningEnabled = prefsService.isLearningEnabled
         self.isVerboseLogEnabled = prefsService.isVerboseLogEnabled
+        self.isGameModeEnabled = prefsService.isGameModeEnabled
+        self.recognizedGames = GameModeState.shared.recognizedGames
         self.isPerAppLayoutEnabled = perAppLayoutService.isEnabled
         self.isAutoStartEnabled = autoStartService.isEnabled
         self.themePreference = prefsService.themePreference
@@ -269,6 +290,15 @@ final class MainViewModel: ObservableObject {
 
     func resumeTimedPause() {
         timedPauseService.resumeNow()
+    }
+
+    /// "Это не игра" — per-entry action for the "Распознанные игры" list.
+    /// Permanent (spec §5: DENIED overrides declared/persisted/behavioral
+    /// alike, no undo surface in v1), same one-way delete shape as
+    /// `ExceptionsViewModel.removeAutoLearned`.
+    func denyGame(_ bundleID: String) {
+        GameModeState.shared.deny(bundleID)
+        recognizedGames = GameModeState.shared.recognizedGames
     }
 
     func exportSettings() {

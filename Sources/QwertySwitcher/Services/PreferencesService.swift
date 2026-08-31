@@ -113,6 +113,14 @@ final class PreferencesService {
         set { defaults.set(newValue, forKey: keyPrefix + "learningEnabled") }
     }
 
+    /// Game Mode (gamemode-spec-20260831.md): master switch, mirrored into
+    /// `GameModeState.shared`'s injected `isEnabled` closure. Default true,
+    /// same "on unless it gets in the way" posture as `isLearningEnabled`.
+    var isGameModeEnabled: Bool {
+        get { defaults.object(forKey: keyPrefix + "gameModeEnabled") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: keyPrefix + "gameModeEnabled") }
+    }
+
     /// Light / Dark / System — default follows the OS.
     var themePreference: ThemePreference {
         get { ThemePreference(rawValue: defaults.string(forKey: keyPrefix + "themePreference") ?? "") ?? .system }
