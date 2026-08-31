@@ -5,6 +5,15 @@ import Security
 /// Generic Keychain read/write helper shared by `DeviceIdentity`'s fallback
 /// UUID and `LicenseService`'s persisted state.
 enum KeychainStore {
+    /// Reads never show the "wants to use confidential information" dialog.
+    /// A self-signed dev build has an unstable CDHash (see CLAUDE.md
+    /// "Обновление установленной копии"), so an item written by a previous
+    /// build's process routinely looks like "someone else's ACL" to the
+    /// current one — `kSecUseAuthenticationUISkip` is documented (SecItem.h)
+    /// to silently skip such items instead of prompting; the caller already
+    /// treats a missing/inaccessible value as absent (DeviceIdentity's
+    /// persisted-fallback-UUID regenerates, LicenseService's first-seen
+    /// anchor falls back to its other candidates).
     static func read(service: String, account: String) -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -12,6 +21,7 @@ enum KeychainStore {
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
         ]
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -19,6 +29,38 @@ enum KeychainStore {
         return result as? Data
     }
 
+    /// Silent existence probe — reuses the same `kSecUseAuthenticationUISkip`
+    /// path as `read` (that flag is documented to apply only to
+    /// `SecItemCopyMatching`, not to `SecItemUpdate`/`SecItemAdd`), so `write`
+    /// can decide whether touching the item is safe *before* calling either.
+    private static func silentStatus(service: String, account: String) -> OSStatus {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
+        ]
+        var result: AnyObject?
+        return SecItemCopyMatching(query as CFDictionary, &result)
+    }
+
+    /// This is the exact class of failure that used to pop the auth dialog
+    /// for a stale item owned by a previous build: the item exists but its
+    /// ACL can't be satisfied without UI.
+    private static func isAuthBlocked(_ status: OSStatus) -> Bool {
+        status == errSecInteractionNotAllowed || status == errSecAuthFailed
+    }
+
+    /// Writes never show UI either. `kSecUseAuthenticationUISkip` can't be
+    /// passed directly to `SecItemUpdate`/`SecItemAdd` (Apple's SecItem.h:
+    /// "This value can be used only with SecItemCopyMatching") — so instead
+    /// of guessing at their undocumented behavior, `write` probes silently
+    /// first: item already readable by us → update it (same ACL, no auth
+    /// expected); genuinely absent → add fresh (a brand-new item has no ACL
+    /// to authenticate against yet); present but auth-blocked → give up
+    /// without touching it, no retry. Callers that hit `false` already keep
+    /// a non-Keychain source of truth (file anchor / freshly generated UUID).
     @discardableResult
     static func write(
         _ data: Data, service: String, account: String,
@@ -29,11 +71,24 @@ enum KeychainStore {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
+
+        let probe = silentStatus(service: service, account: account)
+        if isAuthBlocked(probe) { return false }
+
+        if probe == errSecItemNotFound {
+            var addQuery = baseQuery
+            addQuery[kSecValueData as String] = data
+            addQuery[kSecAttrAccessible as String] = accessible
+            return SecItemAdd(addQuery as CFDictionary, nil) == errSecSuccess
+        }
+
         let updateStatus = SecItemUpdate(baseQuery as CFDictionary, [
             kSecValueData as String: data,
             kSecAttrAccessible as String: accessible,
         ] as CFDictionary)
+        if isAuthBlocked(updateStatus) { return false }
         if updateStatus == errSecItemNotFound {
+            // Raced with a delete between the probe above and here.
             var addQuery = baseQuery
             addQuery[kSecValueData as String] = data
             addQuery[kSecAttrAccessible as String] = accessible

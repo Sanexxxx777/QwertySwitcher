@@ -318,10 +318,21 @@ final class LicenseService: ObservableObject {
     /// the license file/state alone (with no network) can't restart the
     /// provisional trial. The server stays authoritative; this only bounds
     /// what an offline-only attacker can get by wiping local state.
+    /// `firstSeenCandidates()` also looks at the anchor already embedded in
+    /// a surviving provisional trial's `payload.start` (see below) — so
+    /// wiping UserDefaults alone, with the license file left intact, can't
+    /// rejuvenate the anchor either. Wiping BOTH still resets it to `now`,
+    /// same as pre-27.08: decided acceptable (01.09.2026) — the offline
+    /// window is only 3 days, and a full trial only ever comes from the
+    /// server, which remembers this hwid regardless of local state. A third
+    /// copy in Keychain (27.08–01.09) was removed: `SecItemCopyMatching` on
+    /// a self-signed dev build (unstable CDHash every rebuild) popped the
+    /// "wants to use confidential information" dialog for a stale item from
+    /// a previous build — real field cost, for anti-tamper value judged not
+    /// worth it. `KeychainStore` itself (DeviceIdentity.swift) stays, still
+    /// used by the device-UUID fallback and the legacy license-migration
+    /// reader, both already silent.
     private static let firstSeenKeyPrefix = AppIdentity.keyPrefix + "licenseFirstSeen."
-    /// Второе хранилище того же якоря — переживает удаление приложения,
-    /// его настроек и файла состояния.
-    private static let firstSeenService = AppIdentity.bundleIdentifier + ".firstseen"
 
     enum ServerError: Equatable {
         case invalidKey
@@ -530,40 +541,36 @@ final class LicenseService: ObservableObject {
         recomputeEntitlement()
     }
 
-    /// Якорь живёт в ДВУХ местах: UserDefaults и Keychain. Причина — состояние
-    /// лицензии лежит обычным файлом, и `rm license.json` + `defaults delete`
-    /// раньше начинали офлайн-триал заново; Keychain это переживает, потому что
-    /// не удаляется ни вместе с приложением, ни вместе с его настройками.
-    /// При чтении берём САМОЕ РАННЕЕ из известных: удалив одно хранилище,
-    /// якорь нельзя омолодить.
+    /// Якорь живёт в ДВУХ местах: UserDefaults и сам файл лицензии (через уже
+    /// персистентный `state`, не отдельное хранилище). При чтении берём
+    /// САМОЕ РАННЕЕ из известных, как и раньше — удаление ОДНОГО из двух не
+    /// омолаживает якорь. Удаление ОБОИХ сразу всё ещё сбрасывает его на
+    /// `now` — сознательно принято 01.09.2026 (см. комментарий у
+    /// `firstSeenKeyPrefix`), Keychain как третья копия убран.
     private func recordFirstSeenIfNeeded(now: Int64) {
         let key = Self.firstSeenKeyPrefix + hwid
         let defaults = UserDefaults.standard
-        let known = firstSeenCandidates()
-        let anchor = known.min() ?? now
+        let anchor = firstSeenCandidates().min() ?? now
 
         if defaults.object(forKey: key) == nil || Int64(defaults.integer(forKey: key)) > anchor {
             defaults.set(Int(anchor), forKey: key)
         }
-        if KeychainStore.read(service: Self.firstSeenService, account: hwid) == nil
-            || known.min() != readFirstSeenFromKeychain() {
-            KeychainStore.write(String(anchor).data(using: .utf8) ?? Data(),
-                                service: Self.firstSeenService, account: hwid)
-        }
     }
 
-    private func readFirstSeenFromKeychain() -> Int64? {
-        guard let data = KeychainStore.read(service: Self.firstSeenService, account: hwid),
-              let text = String(data: data, encoding: .utf8),
-              let value = Int64(text) else { return nil }
-        return value
-    }
-
+    /// Two sources, no Keychain: the UserDefaults mark, and — when a
+    /// provisional trial for this hwid is already persisted in the license
+    /// file (`state`, loaded from `store` before this runs) — the anchor
+    /// embedded in its own `payload.start` at the moment that trial was
+    /// created. A signed, non-provisional state's `start` is a
+    /// server-issued activation time, not a first-seen anchor, so it's
+    /// deliberately excluded here.
     private func firstSeenCandidates() -> [Int64] {
         var out: [Int64] = []
         let key = Self.firstSeenKeyPrefix + hwid
         if let stored = UserDefaults.standard.object(forKey: key) as? Int { out.append(Int64(stored)) }
-        if let fromKeychain = readFirstSeenFromKeychain() { out.append(fromKeychain) }
+        if let trial = state, trial.provisional, let payload = trial.payload, payload.hwid == hwid {
+            out.append(payload.start)
+        }
         return out
     }
 
