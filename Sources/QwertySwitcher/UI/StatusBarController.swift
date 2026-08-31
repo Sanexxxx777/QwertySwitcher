@@ -98,12 +98,15 @@ final class StatusBarController {
     /// or `blockInstantCorrection` set left this badge on `.none` — silence
     /// that reads as "broken" rather than "configured off for this app".
     private func currentBlockReason() -> SwitchBlockReason {
-        SwitchBlockReason.resolve(
+        let gameActive = GameModeState.shared.isActiveForFrontmost()
+        return SwitchBlockReason.resolve(
             health: keyboardMonitor.health,
             isAutoSwitchEnabled: prefsService.isAutoSwitchEnabled,
             isEntitled: LicenseService.shared.isEntitled,
-            secureInputAppName: keyboardMonitor.health == .secureInput ? secureInputAppName() : nil,
-            appProfileBlock: appProfileBlock()
+            secureInputAppName: keyboardMonitor.health == .secureInput ? frontmostAppLocalizedName() : nil,
+            appProfileBlock: appProfileBlock(),
+            gameDetected: gameActive,
+            gameAppName: gameActive ? frontmostAppLocalizedName() : nil
         )
     }
 
@@ -117,13 +120,16 @@ final class StatusBarController {
         return nil
     }
 
-    /// Best-effort label for whichever app is holding secure input —
-    /// approximated as the frontmost app, since `IsSecureEventInputEnabled()`
-    /// is a session-wide WindowServer flag that in practice is only ever set
-    /// by the app owning the currently focused secure field. Never guessed
-    /// beyond that: if there's no frontmost app, the menu line falls back to
-    /// the generic "Ввод пароля" wording (`SwitchBlockReason.title`, nil case).
-    private func secureInputAppName() -> String? {
+    /// Best-effort label for whichever app is holding secure input, or —
+    /// since wave 3 — whichever app Game Mode silenced correction for.
+    /// Approximated as the frontmost app in both cases:
+    /// `IsSecureEventInputEnabled()` is a session-wide WindowServer flag only
+    /// ever set by the app owning the focused secure field, and Game Mode by
+    /// definition only ever applies to the frontmost app
+    /// (`GameModeState.isActiveForFrontmost`). Never guessed beyond that: no
+    /// frontmost app → the menu line falls back to the generic wording
+    /// (`SwitchBlockReason.title`, nil case).
+    private func frontmostAppLocalizedName() -> String? {
         NSWorkspace.shared.frontmostApplication?.localizedName
     }
 
@@ -247,6 +253,19 @@ final class StatusBarController {
             }
             pauseItem.submenu = pauseMenu
             menu.addItem(pauseItem)
+        }
+
+        // Only shown while Game Mode actually thinks the frontmost app is a
+        // game — the grey diagnostic line above already names it via
+        // `currentBlockReason().title`, this is the one-click undo (spec
+        // §5: DENIED is permanent, no menu path back in v1).
+        if GameModeState.shared.isActiveForFrontmost() {
+            let denyGameItem = NSMenuItem(
+                title: "Это не игра — включить коррекцию",
+                action: #selector(denyGameMode), keyEquivalent: ""
+            )
+            denyGameItem.target = self
+            menu.addItem(denyGameItem)
         }
 
         let permissionsItem = NSMenuItem(title: "Настройка разрешений…",
@@ -442,6 +461,12 @@ final class StatusBarController {
 
     @objc private func resumeTimedPause() {
         timedPauseService.resumeNow()
+    }
+
+    @objc private func denyGameMode() {
+        guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else { return }
+        GameModeState.shared.deny(bundleID)
+        refreshMenu()
     }
 
     @objc private func openPermissions() {

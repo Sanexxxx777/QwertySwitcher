@@ -705,6 +705,16 @@ struct MainView: View {
                     )
                     rowDivider
                     SettingToggleRow(
+                        icon: "gamecontroller",
+                        title: "Игровой режим",
+                        subtitle: "не трогать раскладку во время игр — определяется автоматически",
+                        help: "Пока распознанное приложение похоже на игру (по типу или по стилю "
+                            + "набора), Qwerty Switcher не переключает раскладку и не исправляет "
+                            + "слова. Список распознанных игр — ниже.",
+                        isOn: $viewModel.isGameModeEnabled
+                    )
+                    rowDivider
+                    SettingToggleRow(
                         icon: "brain.head.profile",
                         title: "Учиться на моих исправлениях",
                         subtitle: "запоминать слово после двух исправлений Double Shift и чинить его само",
@@ -746,10 +756,51 @@ struct MainView: View {
                 }
                 .settingsCard()
             }
+            gameModeSection
             logsSection
             dataSection
         }
         .padding(.bottom, 4)
+    }
+
+    /// Wave 3 (gamemode-spec-20260831.md §3): shows what Game Mode has
+    /// locked onto, since a silent correction pause with no visible reason
+    /// reads as "broken" rather than "configured" — same reasoning as the
+    /// grey diagnostic line StatusBarController already shows. "Это не
+    /// игра" mirrors the per-entry delete pattern in ExceptionsView, but
+    /// here it calls `GameModeState.deny`, which is permanent (spec §5).
+    private var gameModeSection: some View {
+        VStack(alignment: .leading, spacing: Space.xs) {
+            SectionTitle("Распознанные игры")
+            VStack(spacing: 0) {
+                if viewModel.recognizedGames.isEmpty {
+                    Text("Пока пусто — появится, как только Qwerty Switcher распознает игру")
+                        .font(.appText(11))
+                        .foregroundStyle(theme.textSecondary)
+                        .padding(.horizontal, Space.md)
+                        .padding(.vertical, Space.sm + 1)
+                } else {
+                    ForEach(Array(viewModel.recognizedGames.enumerated()), id: \.element) { index, bundleID in
+                        if index > 0 { rowDivider }
+                        HStack(spacing: Space.sm) {
+                            Text(bundleID)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(theme.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Button("Это не игра") { viewModel.denyGame(bundleID) }
+                                .buttonStyle(.plain)
+                                .font(.appText(11, weight: .medium))
+                                .foregroundStyle(theme.accent)
+                        }
+                        .padding(.horizontal, Space.md)
+                        .padding(.vertical, Space.sm)
+                    }
+                }
+            }
+            .settingsCard()
+        }
     }
 
     // MARK: Logs — moved in from the status-bar menu (03.08.2026) so every

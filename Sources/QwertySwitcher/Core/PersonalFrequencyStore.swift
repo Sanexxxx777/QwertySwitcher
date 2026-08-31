@@ -110,6 +110,22 @@ final class PersonalFrequencyStore {
         return result
     }
 
+    /// Same as `promotedKeys`, but excludes entries whose most recent bump
+    /// was a dictionary word — for callers that need only the non-dictionary
+    /// half of Mechanism C's promoted set (wave-2 provider wiring in
+    /// `KeyboardMonitor`). `promotedSet`/`isPromoted` are untouched:
+    /// `undoLastCorrection`'s unlearn path is keyed on `isPromoted` and must
+    /// keep seeing the full set regardless of this split.
+    func promotedNonDictionaryKeys(lang: String) -> Set<String> {
+        let prefix = lang + ":"
+        var result: Set<String> = []
+        for key in promotedSet where key.hasPrefix(prefix) {
+            guard let entry = entries[key], !entry.isDictionaryWord else { continue }
+            result.insert(String(key.dropFirst(prefix.count)))
+        }
+        return result
+    }
+
     /// For UI ("топ-20 по частоте" etc.) — includes in-memory-only
     /// `count == 1` entries, unlike what actually reaches disk.
     var allEntries: [String: PersonalFrequencyEntry] { entries }
