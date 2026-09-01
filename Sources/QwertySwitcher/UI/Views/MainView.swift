@@ -356,6 +356,29 @@ struct MainView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedTab: MainTab = .status
 
+    /// Which groups of the "Ещё" tab are unfolded. Lives on `MainView`, not on
+    /// the tab body, so switching tabs and back does not re-collapse what you
+    /// just opened; a fresh window starts with everything closed, which is the
+    /// compact state the tab is meant to be met in.
+    @State private var expandedMoreSections: Set<MoreSection> = []
+
+    enum MoreSection: Hashable {
+        case corrections, games, sound, app, logs, backup
+    }
+
+    private func moreSectionBinding(_ section: MoreSection) -> Binding<Bool> {
+        Binding(
+            get: { expandedMoreSections.contains(section) },
+            set: { isOpen in
+                if isOpen {
+                    expandedMoreSections.insert(section)
+                } else {
+                    expandedMoreSections.remove(section)
+                }
+            }
+        )
+    }
+
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
     }
@@ -663,11 +686,21 @@ struct MainView: View {
     }
 
     // MARK: Tab 3 — Ещё
+    //
+    // Six collapsible groups, all closed by default. Before this the tab was
+    // one continuous column of every switch the app has — on a laptop screen
+    // its bottom half, footer included, sat below the screen edge, and finding
+    // one setting meant reading all of them. Closed headers carry a summary
+    // line, so the state of a group is legible without opening it.
 
     private var moreTab: some View {
-        VStack(alignment: .leading, spacing: Space.md) {
-            VStack(alignment: .leading, spacing: Space.xs) {
-                SectionTitle("Дополнительно")
+        VStack(alignment: .leading, spacing: Space.sm) {
+            CollapsibleSection(
+                icon: "wand.and.rays",
+                title: "Исправления",
+                summary: correctionsSummary,
+                isExpanded: moreSectionBinding(.corrections)
+            ) {
                 VStack(spacing: 0) {
                     SettingToggleRow(
                         icon: "bolt",
@@ -676,15 +709,6 @@ struct MainView: View {
                         help: "Исправляет прямо во время набора, не дожидаясь пробела. "
                             + "Если мешает в терминале — выключи её здесь.",
                         isOn: $viewModel.isInstantCorrectionEnabled
-                    )
-                    rowDivider
-                    SettingToggleRow(
-                        icon: "text.badge.plus",
-                        title: "Текстовые шаблоны",
-                        subtitle: "разворачивать короткие команды из окна «Исключения»",
-                        help: "Например, trigger «addr» может вставлять полный адрес. "
-                            + "Шаблоны хранятся только локально и поддерживают несколько строк.",
-                        isOn: $viewModel.isSnippetExpansionEnabled
                     )
                     rowDivider
                     SettingToggleRow(
@@ -705,13 +729,12 @@ struct MainView: View {
                     )
                     rowDivider
                     SettingToggleRow(
-                        icon: "gamecontroller",
-                        title: "Игровой режим",
-                        subtitle: "не трогать раскладку во время игр — определяется автоматически",
-                        help: "Пока распознанное приложение похоже на игру (по типу или по стилю "
-                            + "набора), Qwerty Switcher не переключает раскладку и не исправляет "
-                            + "слова. Список распознанных игр — ниже.",
-                        isOn: $viewModel.isGameModeEnabled
+                        icon: "text.badge.plus",
+                        title: "Текстовые шаблоны",
+                        subtitle: "разворачивать короткие команды из окна «Исключения»",
+                        help: "Например, trigger «addr» может вставлять полный адрес. "
+                            + "Шаблоны хранятся только локально и поддерживают несколько строк.",
+                        isOn: $viewModel.isSnippetExpansionEnabled
                     )
                     rowDivider
                     SettingToggleRow(
@@ -722,7 +745,37 @@ struct MainView: View {
                             + "исправляться само. Список выученных слов — в «Исключения» → «Обучение».",
                         isOn: $viewModel.isLearningEnabled
                     )
+                }
+            }
+
+            CollapsibleSection(
+                icon: "gamecontroller",
+                title: "Игровой режим",
+                summary: gameModeSummary,
+                isExpanded: moreSectionBinding(.games)
+            ) {
+                VStack(spacing: 0) {
+                    SettingToggleRow(
+                        icon: "gamecontroller",
+                        title: "Не трогать раскладку в играх",
+                        subtitle: "игра определяется автоматически",
+                        help: "Пока распознанное приложение похоже на игру (по типу или по стилю "
+                            + "набора), Qwerty Switcher не переключает раскладку и не исправляет "
+                            + "слова. Список распознанных игр — ниже.",
+                        isOn: $viewModel.isGameModeEnabled
+                    )
                     rowDivider
+                    recognizedGamesList
+                }
+            }
+
+            CollapsibleSection(
+                icon: "speaker.wave.2",
+                title: "Звук",
+                summary: soundSummary,
+                isExpanded: moreSectionBinding(.sound)
+            ) {
+                VStack(spacing: 0) {
                     SettingToggleRow(
                         icon: "speaker.wave.2",
                         title: "Звуки",
@@ -744,7 +797,16 @@ struct MainView: View {
                         selection: $viewModel.layoutSoundName,
                         onPreview: { viewModel.previewLayoutSound() }
                     )
-                    rowDivider
+                }
+            }
+
+            CollapsibleSection(
+                icon: "gearshape",
+                title: "Программа",
+                summary: appSummary,
+                isExpanded: moreSectionBinding(.app)
+            ) {
+                VStack(spacing: 0) {
                     SettingToggleRow(
                         icon: "power",
                         title: "Запускать при входе в систему",
@@ -754,13 +816,63 @@ struct MainView: View {
                     rowDivider
                     themeRow
                 }
-                .settingsCard()
             }
-            gameModeSection
-            logsSection
-            dataSection
+
+            CollapsibleSection(
+                icon: "text.magnifyingglass",
+                title: "Логи",
+                summary: logsSummary,
+                isExpanded: moreSectionBinding(.logs)
+            ) {
+                logsContent
+            }
+
+            CollapsibleSection(
+                icon: "arrow.up.arrow.down",
+                title: "Резервная копия",
+                summary: "экспорт и импорт настроек",
+                isExpanded: moreSectionBinding(.backup)
+            ) {
+                dataContent
+            }
         }
         .padding(.bottom, 4)
+    }
+
+    // MARK: — summaries shown on the closed headers
+
+    private var correctionsSummary: String {
+        let flags = [
+            viewModel.isInstantCorrectionEnabled,
+            viewModel.isSmartCaseEnabled,
+            viewModel.isYoficatorEnabled,
+            viewModel.isSnippetExpansionEnabled,
+            viewModel.isLearningEnabled
+        ]
+        let on = flags.filter { $0 }.count
+        return on == 0 ? "все выключены" : "включено \(on) из \(flags.count)"
+    }
+
+    private var gameModeSummary: String {
+        guard viewModel.isGameModeEnabled else { return "выключен" }
+        let count = viewModel.recognizedGames.count
+        return count == 0 ? "включён · игры пока не встречались" : "включён · распознано игр: \(count)"
+    }
+
+    private var soundSummary: String {
+        guard viewModel.isSoundEnabled else { return "выключены" }
+        return viewModel.isLayoutSoundEnabled
+            ? "мелодия «\(viewModel.layoutSoundName)»"
+            : "только исправления, без смены раскладки"
+    }
+
+    private var appSummary: String {
+        let start = viewModel.isAutoStartEnabled ? "запускается при входе" : "не запускается при входе"
+        return "\(start) · тема «\(viewModel.themePreference.label)»"
+    }
+
+    private var logsSummary: String {
+        viewModel.isVerboseLogEnabled ? "подробный лог включён" : "только значимые события"
     }
 
     /// Wave 3 (gamemode-spec-20260831.md §3): shows what Game Mode has
@@ -769,37 +881,34 @@ struct MainView: View {
     /// grey diagnostic line StatusBarController already shows. "Это не
     /// игра" mirrors the per-entry delete pattern in ExceptionsView, but
     /// here it calls `GameModeState.deny`, which is permanent (spec §5).
-    private var gameModeSection: some View {
-        VStack(alignment: .leading, spacing: Space.xs) {
-            SectionTitle("Распознанные игры")
-            VStack(spacing: 0) {
-                if viewModel.recognizedGames.isEmpty {
-                    Text("Пока пусто — появится, как только Qwerty Switcher распознает игру")
-                        .font(.appText(11))
-                        .foregroundStyle(theme.textSecondary)
-                        .padding(.horizontal, Space.md)
-                        .padding(.vertical, Space.sm + 1)
-                } else {
-                    ForEach(Array(viewModel.recognizedGames.enumerated()), id: \.element) { index, bundleID in
-                        if index > 0 { rowDivider }
-                        HStack(spacing: Space.sm) {
-                            Text(bundleID)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(theme.textPrimary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Spacer()
-                            Button("Это не игра") { viewModel.denyGame(bundleID) }
-                                .buttonStyle(.plain)
-                                .font(.appText(11, weight: .medium))
-                                .foregroundStyle(theme.accent)
-                        }
-                        .padding(.horizontal, Space.md)
-                        .padding(.vertical, Space.sm)
+    private var recognizedGamesList: some View {
+        VStack(spacing: 0) {
+            if viewModel.recognizedGames.isEmpty {
+                Text("Распознанных игр пока нет — появятся, как только Qwerty Switcher встретит игру")
+                    .font(.appText(11))
+                    .foregroundStyle(theme.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, Space.md)
+                    .padding(.vertical, Space.sm + 1)
+            } else {
+                ForEach(Array(viewModel.recognizedGames.enumerated()), id: \.element) { index, bundleID in
+                    if index > 0 { rowDivider }
+                    HStack(spacing: Space.sm) {
+                        Text(bundleID)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Button("Это не игра") { viewModel.denyGame(bundleID) }
+                            .buttonStyle(.plain)
+                            .font(.appText(11, weight: .medium))
+                            .foregroundStyle(theme.accent)
                     }
+                    .padding(.horizontal, Space.md)
+                    .padding(.vertical, Space.sm)
                 }
             }
-            .settingsCard()
         }
     }
 
@@ -810,74 +919,66 @@ struct MainView: View {
     /// subject, and giving each its own card cost ~70pt of height for nothing —
     /// which is most of what made this tab tower over the other two and made
     /// the window lurch when you selected it.
-    private var logsSection: some View {
-        VStack(alignment: .leading, spacing: Space.xs) {
-            SectionTitle("Логи")
-            VStack(spacing: 0) {
-                SettingToggleRow(
-                    icon: "text.magnifyingglass",
-                    title: "Подробный лог",
-                    subtitle: "писать в лог каждое слово, не только значимые события",
-                    help: "Включайте, если нужно прислать диагностику. "
-                        + "В обычном режиме лог не засоряется рутиной вроде каждого набранного слова.",
-                    isOn: $viewModel.isVerboseLogEnabled
-                )
-                rowDivider
-                VStack(alignment: .leading, spacing: Space.xs + 2) {
-                    HStack(spacing: Space.md) {
-                        Button("Показать лог") { viewModel.openLogFile() }
-                        Button("Открыть папку") { viewModel.revealLogFolder() }
-                        Spacer()
-                        Text("хранится 5 дней")
-                            .font(.appText(10))
-                            .foregroundStyle(theme.textMuted)
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.appText(11, weight: .medium))
-                    .foregroundStyle(theme.accent)
-
-                    ScrollView {
-                        Text(viewModel.logTail.isEmpty ? "Пока пусто" : viewModel.logTail)
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(theme.textSecondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                    .frame(height: 78)
-                    .padding(Space.xs + 2)
-                    .background(theme.bgInput)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-                .padding(.horizontal, Space.md)
-                .padding(.vertical, Space.sm + 1)
-            }
-            .settingsCard()
-        }
-    }
-
-    private var dataSection: some View {
-        VStack(alignment: .leading, spacing: Space.xs) {
-            SectionTitle("Резервная копия")
+    private var logsContent: some View {
+        VStack(spacing: 0) {
+            SettingToggleRow(
+                icon: "text.magnifyingglass",
+                title: "Подробный лог",
+                subtitle: "писать в лог каждое слово, не только значимые события",
+                help: "Включайте, если нужно прислать диагностику. "
+                    + "В обычном режиме лог не засоряется рутиной вроде каждого набранного слова.",
+                isOn: $viewModel.isVerboseLogEnabled
+            )
+            rowDivider
             VStack(alignment: .leading, spacing: Space.xs + 2) {
                 HStack(spacing: Space.md) {
-                    Button("Экспортировать…") { viewModel.exportSettings() }
-                    Button("Импортировать…") { viewModel.importSettings() }
+                    Button("Показать лог") { viewModel.openLogFile() }
+                    Button("Открыть папку") { viewModel.revealLogFolder() }
                     Spacer()
+                    Text("хранится 5 дней")
+                        .font(.appText(10))
+                        .foregroundStyle(theme.textMuted)
                 }
                 .buttonStyle(.borderless)
                 .font(.appText(11, weight: .medium))
                 .foregroundStyle(theme.accent)
 
-                Text(viewModel.settingsBackupMessage
-                    ?? "Настройки, исключения и профили. Лицензия, логи и набранный текст не экспортируются.")
-                    .font(.appText(10))
-                    .foregroundStyle(theme.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                ScrollView {
+                    Text(viewModel.logTail.isEmpty ? "Пока пусто" : viewModel.logTail)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(height: 78)
+                .padding(Space.xs + 2)
+                .background(theme.bgInput)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .padding(.horizontal, Space.md)
             .padding(.vertical, Space.sm + 1)
-            .settingsCard()
         }
+    }
+
+    private var dataContent: some View {
+        VStack(alignment: .leading, spacing: Space.xs + 2) {
+            HStack(spacing: Space.md) {
+                Button("Экспортировать…") { viewModel.exportSettings() }
+                Button("Импортировать…") { viewModel.importSettings() }
+                Spacer()
+            }
+            .buttonStyle(.borderless)
+            .font(.appText(11, weight: .medium))
+            .foregroundStyle(theme.accent)
+
+            Text(viewModel.settingsBackupMessage
+                ?? "Настройки, исключения и профили. Лицензия, логи и набранный текст не экспортируются.")
+                .font(.appText(10))
+                .foregroundStyle(theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, Space.md)
+        .padding(.vertical, Space.sm + 1)
     }
 
     private var themeRow: some View {
