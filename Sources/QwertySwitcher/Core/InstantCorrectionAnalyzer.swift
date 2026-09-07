@@ -222,10 +222,12 @@ final class InstantCorrectionAnalyzer {
         // synchronously from there (as `contains` used to) put a 100+ms-worst-
         // case IPC call on essentially every letter of ordinary typing,
         // which is what disabled the event tap and dropped keystrokes
-        // (CLAUDE.md perf audit). `mightContain` (bloom-only) and the
+        // (CLAUDE.md perf audit). `isConfirmedWord` (Bloom pre-filter + exact
+        // binary-search confirm over the same in-memory index
+        // `isPrefixOfBundledWord` already uses on this hot path) and the
         // bundled-dictionary prefix index are both deterministic AND
         // in-memory-only — safe for this hot path.
-        if dictionary.mightContain(lowered, language: language) {
+        if dictionary.isConfirmedWord(lowered, language: language) {
             return 80 + min(20, lowered.count * 2) // complete, confirmed word
         }
         if dictionary.isPrefixOfBundledWord(lowered, language: language) {
