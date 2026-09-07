@@ -42,11 +42,21 @@ enum GameAppProbe {
 }
 
 /// Runtime "is the frontmost app a game right now" state machine (spec §5).
-/// Per-bundleID state lives in memory; two verdicts survive on disk —
-/// `gameModeDenied` (permanent "this is not a game", set from the UI) and
-/// `gameModeAuto` (a bundleID recognized ≥3 times in one session, so the
-/// NEXT activation recognizes it from the first keystroke instead of
-/// waiting on a fresh behavioral signal).
+/// Per-bundleID state lives in memory; exactly one verdict survives on disk —
+/// `gameModeDenied` (permanent "this is not a game", set from the UI).
+///
+/// A behavioral verdict used to persist too (`gameModeAuto`: a bundleID
+/// recognized ≥3 times in one session recognized itself from the first
+/// keystroke on every later activation, forever). Removed deliberately
+/// (06–08.09.2026 field incident): Brave earned that persisted verdict from
+/// one session's web-game evidence, and every activation after that had
+/// autocorrect/Double Shift/L+R Shift silenced with no way back short of
+/// the "Это не игра" button — 1.5 days, 0 recoveries. The asymmetry doesn't
+/// favor persisting: a fresh behavioral clue re-enters GAME within seconds
+/// of the app actually behaving like a game (cost of NOT persisting ≈ 0),
+/// while a wrong permanent verdict silently kills the product for that app
+/// forever (cost of persisting = unbounded). `recognizedGames` now only
+/// ever reflects the CURRENT session's live verdicts.
 ///
 /// `isActive(bundleID:)` and `note(_:)` touch only in-memory dictionaries/
 /// sets and the injected `now`/`isEnabled` closures — no `UserDefaults`,
@@ -72,11 +82,10 @@ final class GameModeState {
     }
 
     /// Where the current GAME verdict for a bundleID came from — logged
-    /// verbatim (`declared`/`persisted`) except `.behavioral`, which the
-    /// spec's log format spells `behavior`.
+    /// verbatim (`declared`) except `.behavioral`, which the spec's log
+    /// format spells `behavior`.
     private enum ModeSource {
         case declared
-        case persisted
         case behavioral
     }
 
@@ -94,14 +103,15 @@ final class GameModeState {
 
     private struct BundleState {
         var mode: Mode = .unknown
-        /// Evidence notes received this session (declared/persisted entries
-        /// don't count) — gates the `gameModeAuto` persist at deactivation.
-        var evidenceCountThisSession = 0
         var proseWordCount = 0
         var proseWindowStart: Date?
         /// Set when this bundleID stops being frontmost; cleared again on
         /// reactivation. `nil` while frontmost or never yet deactivated.
         var deactivatedAt: Date?
+        /// Timestamp of the most recent Double Shift that arrived while this
+        /// app was in GAME and got blocked (see `noteDoubleShiftWhileActive`).
+        /// `nil` once matched by a release within `doubleShiftReleaseWindow`.
+        var lastBlockedDoubleShiftAt: Date?
     }
 
     private let defaults: UserDefaults
@@ -116,18 +126,25 @@ final class GameModeState {
     private let isEnabled: () -> Bool
 
     private let deniedKey = AppIdentity.keyPrefix + "gameModeDenied"
+    /// No longer written — kept only so `load()` can wipe the stale 0.9.x
+    /// persisted verdict a returning user (or this Mac) still has on disk.
     private let autoKey = AppIdentity.keyPrefix + "gameModeAuto"
-    private let autoCap = 50
     private let ttl: TimeInterval = 30 * 60
     private let proseWindow: TimeInterval = 30
-    private let proseWordThreshold = 4
+    /// Field argument (08.09.2026, was 4): 4 qualifying words meant 4 words
+    /// of garbage typed into the game window before correction came back. A
+    /// dictionary word ≥4 letters in EITHER active layout is already rare
+    /// inside a real game session, so any clue re-enters GAME per the
+    /// hysteresis below — the false-positive cost of exiting one word early
+    /// is one missed correction, not a stuck session.
+    private let proseWordThreshold = 2
     private let proseWordMinLength = 4
-    private let persistEvidenceThreshold = 3
+    /// Double Shift pressed twice within this window while GAME is active
+    /// releases it back to TYPING — see `noteDoubleShiftWhileActive`.
+    private let doubleShiftReleaseWindow: TimeInterval = 8
 
     private var states: [String: BundleState] = [:]
     private var deniedSet: Set<String> = []
-    /// bundleID -> lastSeen. Persisted verdict; cap 50, LRU by `lastSeen`.
-    private var autoVerdicts: [String: Date] = [:]
     /// Cached frontmost bundleID — the only thing `note`/`noteProseWord`
     /// read to know which app's state to touch.
     private var currentAppBundleID: String?
@@ -182,9 +199,9 @@ final class GameModeState {
     /// them — `GameAppProbe` is a pure function of what's passed in).
     ///
     /// Resolves the entering app's mode in priority order: denied (no-op) >
-    /// declared (Layer 0) > persisted (`gameModeAuto`) > leave UNKNOWN,
-    /// waiting for a behavioral `note(_:)`. Also treats the PREVIOUS
-    /// frontmost bundleID (if different) as just having deactivated.
+    /// declared (Layer 0) > leave UNKNOWN, waiting for a behavioral
+    /// `note(_:)`. Also treats the PREVIOUS frontmost bundleID (if
+    /// different) as just having deactivated.
     func noteActivation(bundleID: String, infoDictionary: [String: Any]?, bundlePath: String?) {
         if let previous = currentAppBundleID, previous != bundleID {
             deactivate(bundleID: previous)
@@ -207,15 +224,6 @@ final class GameModeState {
             return
         }
 
-        if autoVerdicts[bundleID] != nil {
-            state.mode = .game(source: .persisted)
-            state.proseWordCount = 0
-            state.proseWindowStart = nil
-            states[bundleID] = state
-            if !wasGame { log("game mode ON app=\(bundleID) src=persisted") }
-            return
-        }
-
         states[bundleID] = state
     }
 
@@ -228,7 +236,6 @@ final class GameModeState {
     func note(_ evidence: Evidence) {
         guard let bundleID = currentAppBundleID, !deniedSet.contains(bundleID) else { return }
         var state = states[bundleID] ?? BundleState()
-        state.evidenceCountThisSession += 1
         state.proseWordCount = 0
         state.proseWindowStart = nil
         let wasGame = isGameMode(state.mode)
@@ -244,8 +251,9 @@ final class GameModeState {
     /// Notes a word crossing the boundary while the frontmost app is in
     /// GAME — a no-op unless the word itself qualifies as "prose" (spec
     /// §5: dictionary word, core ≥4 letters, no held-key autorepeat) and the
-    /// app is actually in GAME (nothing to exit from UNKNOWN/TYPING). Four
-    /// qualifying words within a rolling 30s window flip GAME -> TYPING.
+    /// app is actually in GAME (nothing to exit from UNKNOWN/TYPING). Two
+    /// qualifying words within a rolling 30s window flip GAME -> TYPING
+    /// (field argument for the threshold — see `proseWordThreshold` above).
     func noteProseWord(isDictionaryWord: Bool, len: Int, hasHeldKeys: Bool) {
         guard let bundleID = currentAppBundleID else { return }
         guard var state = states[bundleID], isGameMode(state.mode) else { return }
@@ -272,6 +280,36 @@ final class GameModeState {
         log("game mode OFF app=\(bundleID) reason=prose")
     }
 
+    /// Double Shift arrived while the frontmost app is in GAME. First press:
+    /// remembered, returns false (caller logs "blocked"). Second press within
+    /// `doubleShiftReleaseWindow` (8 s): the app leaves GAME → TYPING (same
+    /// hysteresis as the prose exit — any new clue re-enters GAME), logs
+    /// `game mode OFF app=<bundle> reason=doubleShift`, returns true so the
+    /// caller performs the gesture. Field 08.09.2026: 17 Double Shifts died
+    /// silently under a wrong GAME verdict; a real game double-taps Shift
+    /// (sprint) rarely twice within 8 s, and a false exit only re-enables
+    /// correction until the next clue.
+    func noteDoubleShiftWhileActive() -> Bool {
+        guard let bundleID = currentAppBundleID, !deniedSet.contains(bundleID) else { return true }
+        guard var state = states[bundleID], isGameMode(state.mode) else { return true }
+
+        let t = now()
+        if let lastBlocked = state.lastBlockedDoubleShiftAt,
+           t.timeIntervalSince(lastBlocked) <= doubleShiftReleaseWindow {
+            state.mode = .typing
+            state.proseWordCount = 0
+            state.proseWindowStart = nil
+            state.lastBlockedDoubleShiftAt = nil
+            states[bundleID] = state
+            log("game mode OFF app=\(bundleID) reason=doubleShift")
+            return true
+        }
+
+        state.lastBlockedDoubleShiftAt = t
+        states[bundleID] = state
+        return false
+    }
+
     // MARK: - Queries
 
     func isActive(bundleID: String?) -> Bool {
@@ -288,32 +326,27 @@ final class GameModeState {
     }
 
     /// Wave-3 "Распознанные игры" list wiring: bundle IDs currently in GAME
-    /// this session (not yet deactivated long enough to earn a persisted
-    /// verdict) UNION the persisted verdicts themselves — a session's first
-    /// two-clue game wouldn't show up at all if this only read
-    /// `autoVerdicts` (persist needs 3 clues, spec §5). Denied bundleIDs
-    /// never appear in either source (`deny` removes both). Pure read of
-    /// existing state, no automaton change. Sorted for stable UI ordering.
+    /// THIS session — no persisted verdicts to union with anymore (see class
+    /// doc). Denied bundleIDs never appear (`deny` removes them from
+    /// `states`). Pure read of existing state, no automaton change. Sorted
+    /// for stable UI ordering.
     var recognizedGames: [String] {
-        let sessionGames = states.compactMap { bundleID, state in
+        states.compactMap { bundleID, state in
             isGameMode(state.mode) ? bundleID : nil
-        }
-        return Array(Set(sessionGames).union(autoVerdicts.keys)).sorted()
+        }.sorted()
     }
 
     // MARK: - Denial (UI/menu action — not hot path)
 
-    /// Permanently marks `bundleID` as "not a game" — overrides declared,
-    /// persisted, and behavioral recognition alike until reversed (there is
-    /// no reversal API in v1; the spec's list UI is the only undo surface,
-    /// planned for wave 3). Persists immediately: this is a rare, deliberate
-    /// user action, not hot-path traffic.
+    /// Permanently marks `bundleID` as "not a game" — overrides declared and
+    /// behavioral recognition alike until reversed (there is no reversal API
+    /// in v1; the spec's list UI is the only undo surface, planned for wave
+    /// 3). Persists immediately: this is a rare, deliberate user action, not
+    /// hot-path traffic.
     func deny(_ bundleID: String) {
         guard deniedSet.insert(bundleID).inserted else { return }
         states.removeValue(forKey: bundleID)
-        autoVerdicts.removeValue(forKey: bundleID)
         persistDenied()
-        saveAuto()
         log("game mode OFF app=\(bundleID) reason=denied")
     }
 
@@ -324,17 +357,11 @@ final class GameModeState {
         return false
     }
 
-    /// Marks `bundleID` as no longer frontmost: persists the session's
-    /// verdict if it earned it (≥3 clues total — declared/persisted entries
-    /// don't count, only `note(_:)` calls do), then starts its TTL clock.
-    /// This — not `note`/`noteProseWord` — is the one write to disk, and it
-    /// only ever runs from an activation-notification callback, never from
-    /// the CGEventTap callback.
+    /// Marks `bundleID` as no longer frontmost and starts its TTL clock. No
+    /// longer persists anything to disk (see class doc — the behavioral
+    /// auto-persist was removed 06–08.09.2026).
     private func deactivate(bundleID: String) {
         guard var state = states[bundleID] else { return }
-        if state.evidenceCountThisSession >= persistEvidenceThreshold {
-            persistAutoVerdict(bundleID: bundleID)
-        }
         state.deactivatedAt = now()
         states[bundleID] = state
     }
@@ -350,33 +377,18 @@ final class GameModeState {
         }
     }
 
-    private func persistAutoVerdict(bundleID: String) {
-        autoVerdicts[bundleID] = now()
-        enforceAutoCap()
-        saveAuto()
-    }
-
-    private func enforceAutoCap() {
-        while autoVerdicts.count > autoCap {
-            guard let oldest = autoVerdicts.min(by: { $0.value < $1.value }) else { break }
-            autoVerdicts.removeValue(forKey: oldest.key)
-        }
-    }
-
-    private func saveAuto() {
-        let payload = autoVerdicts.mapValues { $0.timeIntervalSince1970 }
-        guard let data = try? JSONEncoder().encode(payload) else { return }
-        defaults.set(data, forKey: autoKey)
-    }
-
     private func persistDenied() {
         defaults.set(Array(deniedSet), forKey: deniedKey)
     }
 
+    /// One-time cleanup, not a load: this class no longer persists a
+    /// behavioral verdict at all (see class doc), but a Mac that ran 0.9.x
+    /// may still have one sitting under `autoKey` — this Mac's owner did,
+    /// stuck on Brave for 1.5 days. Wipe it on the first run of this build
+    /// so nothing can read it by mistake later.
     private func load() {
-        if let data = defaults.data(forKey: autoKey),
-           let payload = try? JSONDecoder().decode([String: TimeInterval].self, from: data) {
-            autoVerdicts = payload.mapValues { Date(timeIntervalSince1970: $0) }
+        if defaults.object(forKey: autoKey) != nil {
+            defaults.removeObject(forKey: autoKey)
         }
         if let deniedArray = defaults.array(forKey: deniedKey) as? [String] {
             deniedSet = Set(deniedArray)
