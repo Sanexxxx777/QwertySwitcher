@@ -186,6 +186,15 @@ final class InputBuffer {
         }
     }
 
+    /// Game-control sprees are plain letters (WASD…). A run holding a digit,
+    /// `/`, `-`, `=` or a Cyrillic-only key that reads as punctuation on the
+    /// Latin side (`.`, `,`, `;`, `[`, `]`, `'`, `` ` ``) is a URL, path, token
+    /// or password — never game evidence (field 06–08.09.2026: a browser got a
+    /// persisted GAME verdict).
+    static func isGameControlRun(_ run: [BufferedKeystroke]) -> Bool {
+        !run.isEmpty && run.allSatisfy { isLetterKey($0.keycode) && !isAlphabetAmbiguous($0.keycode) }
+    }
+
     static func isModifierActive(_ flags: CGEventFlags) -> Bool {
         !flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty
     }

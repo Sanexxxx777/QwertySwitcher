@@ -104,6 +104,7 @@ enum TestRunner {
         BoundaryLearningBypassTests.run()
         LearningKeyboardMonitorIntegrationTests.run()
         LearningReplayChainTests.run()
+        GameModeReleaseGuardTests.run()
         GameAppProbeTests.run()
         GameModeStateTests.run()
         HeldKeysGameModeGateTests.run()
@@ -401,6 +402,30 @@ enum InputBufferTests {
         let overflowBuf = InputBuffer()
         for i in 0..<80 { overflowBuf.append(UInt16(i % 128)) }
         TestRunner.assertTrue(overflowBuf.count <= 64, "ring buffer capped at 64")
+
+        // isGameControlRun (06–08.09.2026 field incident): a game-control
+        // spree is plain letters — a run holding a digit, `/`, or a
+        // Cyrillic-only ambiguous key is a URL/path/token/password instead.
+        let letterRun = Array(repeating: BufferedKeystroke(keycode: 13, flags: []), count: 32)
+        TestRunner.assertTrue(
+            InputBuffer.isGameControlRun(letterRun), "32 plain letter keystrokes (kc 13) is a game-control run"
+        )
+        var slashRun = letterRun
+        slashRun[10] = BufferedKeystroke(keycode: 44, flags: []) // "/"
+        TestRunner.assertTrue(
+            !InputBuffer.isGameControlRun(slashRun), "a run containing kc 44 (/) is not a game-control run"
+        )
+        var dotRun = letterRun
+        dotRun[10] = BufferedKeystroke(keycode: 47, flags: []) // "." (ambiguous: ю in ru)
+        TestRunner.assertTrue(
+            !InputBuffer.isGameControlRun(dotRun), "a run containing kc 47 (.) is not a game-control run"
+        )
+        var digitRun = letterRun
+        digitRun[10] = BufferedKeystroke(keycode: 18, flags: []) // "1"
+        TestRunner.assertTrue(
+            !InputBuffer.isGameControlRun(digitRun), "a run containing kc 18 (digit) is not a game-control run"
+        )
+        TestRunner.assertTrue(!InputBuffer.isGameControlRun([]), "an empty run is not a game-control run")
     }
 }
 
@@ -5230,10 +5255,14 @@ enum GameModeSourceGuardTests {
 
         // Step 5: exactly ONE direct call to
         // exceptionsService.areHotkeysBlockedForCurrentApp() per file — the
-        // wrapper's own body — everywhere else routes through
-        // `hotkeysBlocked()` (StatusBarController is untouched by this wave
-        // and deliberately not scanned here — it still checks the per-app
-        // profile directly, outside any hotkey path).
+        // wrapper's own body (`hotkeysBlocked()` in KeyboardMonitor.swift,
+        // `profileBlocksHotkeys()` in HotkeyManager.swift since the 08.09.2026
+        // Double Shift release-hatch split it out so Double Shift can tell a
+        // silent per-app-profile block apart from a Game Mode block) —
+        // everywhere else routes through that one wrapper, never the raw
+        // exceptionsService call (StatusBarController is untouched by this
+        // wave and deliberately not scanned here — it still checks the
+        // per-app profile directly, outside any hotkey path).
         func countDirectCalls(_ path: String, _ text: String?) {
             guard let text else { return }
             var count = 0
@@ -5246,7 +5275,7 @@ enum GameModeSourceGuardTests {
             TestRunner.assertEqual(
                 count, 1,
                 "\(path): exactly 1 direct call to areHotkeysBlockedForCurrentApp()"
-                    + " — inside its own hotkeysBlocked() wrapper, nowhere else"
+                    + " — inside its own wrapper, nowhere else"
             )
         }
         countDirectCalls("Core/KeyboardMonitor.swift", kmText)
@@ -6951,6 +6980,88 @@ private final class GameModeTestClock {
     func advance(_ seconds: TimeInterval) { date = date.addingTimeInterval(seconds) }
 }
 
+/// Structural guards for the 08.09.2026 game-mode release work — the real
+/// exit paths (dictionary lookups against the frontmost app's active
+/// layouts, the CGEventTap hot path) can't be exercised live from a headless
+/// test binary, same precedent as `GameModeSourceGuardTests` right below.
+enum GameModeReleaseGuardTests {
+    private static func readSource(_ path: String) -> String? {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()      // Tests/
+            .deletingLastPathComponent()      // QwertySwitcher/
+            .appendingPathComponent(path)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            TestRunner.skip("\(path) not readable from \(url.path)")
+            return nil
+        }
+        return text
+    }
+
+    static func run() {
+        TestRunner.section("Game mode release — structural guards on KeyboardMonitor.swift / HotkeyManager.swift")
+
+        if let kmText = readSource("Core/KeyboardMonitor.swift") {
+            // 1) The prose-exit block fires on any real word boundary
+            //    (proseBoundary — space/Enter/Tab, field 08.09.2026: Enter
+            //    closes a word in chat apps too) and checks the OTHER active
+            //    layout when own-reading isn't a dictionary word (field
+            //    08.09.2026: 13 Russian words typed in the wrong/English
+            //    layout while GAME was active never read as words on their
+            //    OWN side).
+            if let boundaryMarker = kmText.range(
+                of: "if proseBoundary, !captured.isEmpty, gameMode.isActiveForFrontmost()"
+            ) {
+                let block = String(kmText[boundaryMarker.lowerBound...].prefix(1500))
+                TestRunner.assertTrue(
+                    block.contains("activeLayouts.first(where:"),
+                    "the prose-exit block also checks the OTHER active layout, not just own reading"
+                )
+                TestRunner.assertTrue(
+                    block.contains("gameMode.noteProseWord("),
+                    "the proseBoundary/activeLayouts block is the one that calls gameMode.noteProseWord("
+                )
+            } else {
+                TestRunner.assertTrue(false, "proseBoundary prose-exit guard not found — test needs updating")
+            }
+
+            // 2) longRun evidence is gated by isGameControlRun on the SAME
+            //    line as the note(.longRun) call — a run.count==32 check
+            //    without it would readmit URLs/paths/tokens/passwords as
+            //    game evidence (field 06–08.09.2026: a browser got a
+            //    persisted GAME verdict this way).
+            if let longRunLine = kmText.components(separatedBy: "\n")
+                .first(where: { $0.contains("gameMode.note(.longRun)") }) {
+                TestRunner.assertTrue(
+                    longRunLine.contains("InputBuffer.isGameControlRun("),
+                    "gameMode.note(.longRun) is called on the SAME line as InputBuffer.isGameControlRun("
+                )
+            } else {
+                TestRunner.assertTrue(false, "gameMode.note(.longRun) line not found — test needs updating")
+            }
+        }
+
+        // 3) Double Shift's game-mode release hatch: a blocked first press
+        //    while GAME is active is logged (not silently swallowed like
+        //    the old bare `guard !hotkeysBlocked()`, field 08.09.2026: 17
+        //    Double Shifts died silently with zero log trace).
+        if let hkText = readSource("Core/HotkeyManager.swift") {
+            if let funcStart = hkText.range(of: "private func handleDoubleShift() {") {
+                let body = String(hkText[funcStart.upperBound...].prefix(1200))
+                TestRunner.assertTrue(
+                    body.contains("noteDoubleShiftWhileActive()"),
+                    "handleDoubleShift consults gameMode.noteDoubleShiftWhileActive()"
+                )
+                TestRunner.assertTrue(
+                    body.contains("doubleShift blocked: game mode"),
+                    "a Double Shift blocked by game mode is logged, not silently dropped"
+                )
+            } else {
+                TestRunner.assertTrue(false, "handleDoubleShift not found — test needs updating")
+            }
+        }
+    }
+}
+
 enum GameAppProbeTests {
     static func run() {
         TestRunner.section("GameAppProbe")
@@ -7057,7 +7168,7 @@ enum GameModeStateTests {
             )
         }
 
-        // выход по 4 прозаическим словам за 30с
+        // выход по 2 прозаическим словам за 30с (порог снижен 4→2, 08.09.2026)
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date })
@@ -7065,16 +7176,14 @@ enum GameModeStateTests {
             let bundleID = "com.example.prose"
             state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
             state.note(.longRun)
-            for _ in 0..<3 {
-                state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
-                clock.advance(1)
-            }
-            TestRunner.assertTrue(state.isActive(bundleID: bundleID), "3 prose words in 30s are not enough to exit yet")
             state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
-            TestRunner.assertTrue(!state.isActive(bundleID: bundleID), "the 4th prose word within 30s exits GAME to TYPING")
+            clock.advance(1)
+            TestRunner.assertTrue(state.isActive(bundleID: bundleID), "1 prose word in 30s is not enough to exit yet")
+            state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
+            TestRunner.assertTrue(!state.isActive(bundleID: bundleID), "the 2nd prose word within 30s exits GAME to TYPING")
         }
 
-        // сброс счётчика прозы уликой
+        // сброс счётчика прозы уликой (порог 2)
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date })
@@ -7083,18 +7192,18 @@ enum GameModeStateTests {
             state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
             state.note(.longRun)
             state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
-            state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
             state.note(.heldKeys) // any clue resets the prose counter
-            state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
-            state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
             TestRunner.assertTrue(
                 state.isActive(bundleID: bundleID),
-                "2 prose words before a clue + 2 after do not add up — the clue reset the counter"
+                "1 prose word before a clue does not carry over — the clue reset the counter"
             )
             state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
+            TestRunner.assertTrue(
+                state.isActive(bundleID: bundleID), "only 1 prose word counted fresh after the reset is not enough yet"
+            )
             state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
             TestRunner.assertTrue(
-                !state.isActive(bundleID: bundleID), "4 prose words counted fresh after the reset do exit"
+                !state.isActive(bundleID: bundleID), "2 prose words counted fresh after the reset do exit"
             )
         }
 
@@ -7106,10 +7215,10 @@ enum GameModeStateTests {
             let bundleID = "com.example.hysteresis"
             state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
             state.note(.longRun)
-            for _ in 0..<4 {
+            for _ in 0..<2 {
                 state.noteProseWord(isDictionaryWord: true, len: 4, hasHeldKeys: false)
             }
-            TestRunner.assertTrue(!state.isActive(bundleID: bundleID), "4 prose words exited to TYPING")
+            TestRunner.assertTrue(!state.isActive(bundleID: bundleID), "2 prose words exited to TYPING")
             state.note(.longRun)
             TestRunner.assertTrue(
                 state.isActive(bundleID: bundleID), "a single clue in TYPING re-enters GAME (hysteresis)"
@@ -7147,7 +7256,8 @@ enum GameModeStateTests {
             TestRunner.assertTrue(!state.isActive(bundleID: bundleID), "denial overrides behavioral evidence too")
         }
 
-        // персист вердикта при ≥3 уликах за сессию (и НЕ персист при < 3)
+        // НЕ персистит поведенческий вердикт (снято 08.09.2026 — field-инцидент
+        // Brave: 3 улики за сессию раньше замораживали GAME навсегда)
         do {
             let suite = AppIdentity.bundleIdentifier + ".tests.gameMode." + UUID().uuidString
             guard let defaults = UserDefaults(suiteName: suite) else {
@@ -7156,32 +7266,48 @@ enum GameModeStateTests {
             }
             defer { defaults.removePersistentDomain(forName: suite) }
             let clock = GameModeTestClock(t0)
-
-            let persisted = "com.example.persisted"
-            let notPersisted = "com.example.notpersisted"
+            let bundleID = "com.example.notpersistedanymore"
 
             let state1 = GameModeState(defaults: defaults, now: { clock.date }, isEnabled: { true })
-            state1.noteActivation(bundleID: persisted, infoDictionary: nil, bundlePath: nil)
+            state1.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
             state1.note(.longRun)
             state1.note(.heldKeys)
-            state1.note(.longRun) // 3 clues this session
-            state1.noteActivation(bundleID: notPersisted, infoDictionary: nil, bundlePath: nil) // deactivates `persisted`, persists it
-            state1.note(.longRun)
-            state1.note(.heldKeys) // only 2 clues this session
-            state1.noteActivation(bundleID: "com.example.third", infoDictionary: nil, bundlePath: nil) // deactivates `notPersisted`, does NOT persist
+            state1.note(.longRun) // 3 clues this session — used to be enough to persist
+            state1.noteActivation(bundleID: "com.example.other", infoDictionary: nil, bundlePath: nil) // deactivates bundleID
 
             let state2 = GameModeState(defaults: defaults, now: { clock.date }, isEnabled: { true })
-            state2.noteActivation(bundleID: persisted, infoDictionary: nil, bundlePath: nil)
+            state2.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
             TestRunner.assertTrue(
-                state2.isActive(bundleID: persisted),
-                "≥3 clues in one session persist the verdict — a fresh instance recognizes it from activation alone"
+                !state2.isActive(bundleID: bundleID),
+                "≥3 clues in one session no longer persist a verdict — a fresh instance does not recognize it"
             )
-
-            let state3 = GameModeState(defaults: defaults, now: { clock.date }, isEnabled: { true })
-            state3.noteActivation(bundleID: notPersisted, infoDictionary: nil, bundlePath: nil)
             TestRunner.assertTrue(
-                !state3.isActive(bundleID: notPersisted),
-                "fewer than 3 clues does not persist — a fresh instance does not recognize it"
+                defaults.data(forKey: AppIdentity.keyPrefix + "gameModeAuto") == nil,
+                "nothing is ever written under the old gameModeAuto key"
+            )
+        }
+
+        // очистка устаревшего вердикта 0.9.x при первом запуске новой сборки
+        do {
+            let suite = AppIdentity.bundleIdentifier + ".tests.gameMode." + UUID().uuidString
+            guard let defaults = UserDefaults(suiteName: suite) else {
+                TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+                return
+            }
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let staleKey = AppIdentity.keyPrefix + "gameModeAuto"
+            defaults.set("{\"com.example.stale\":1.0}".data(using: .utf8), forKey: staleKey)
+
+            let clock = GameModeTestClock(t0)
+            let state = GameModeState(defaults: defaults, now: { clock.date }, isEnabled: { true })
+            TestRunner.assertTrue(
+                defaults.data(forKey: staleKey) == nil,
+                "a stale 0.9.x gameModeAuto verdict is wiped on the very first init"
+            )
+            state.noteActivation(bundleID: "com.example.stale", infoDictionary: nil, bundlePath: nil)
+            TestRunner.assertTrue(
+                !state.isActive(bundleID: "com.example.stale"),
+                "the wiped stale verdict does not resurrect a GAME verdict for the bundleID it named"
             )
         }
 
@@ -7201,6 +7327,70 @@ enum GameModeStateTests {
                 "behavioral evidence does not read as active while the toggle is off either"
             )
             TestRunner.assertTrue(!state.isActiveForFrontmost(), "isActiveForFrontmost also respects the toggle")
+        }
+
+        // Double Shift release hatch (08.09.2026): first press while GAME is
+        // active is blocked (remembered), a second press within 8s releases
+        // GAME to TYPING and lets the gesture through.
+        do {
+            let clock = GameModeTestClock(t0)
+            let (state, suite) = freshState(now: { clock.date })
+            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            let bundleID = "com.example.dsrelease"
+            state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
+            state.note(.longRun)
+            TestRunner.assertTrue(
+                !state.noteDoubleShiftWhileActive(),
+                "the first Double Shift while GAME is active is blocked (remembered, not performed)"
+            )
+            TestRunner.assertTrue(
+                state.isActive(bundleID: bundleID), "the app is still in GAME after the blocked first press"
+            )
+            clock.advance(3)
+            TestRunner.assertTrue(
+                state.noteDoubleShiftWhileActive(),
+                "a second Double Shift within 8s releases GAME and lets the gesture through"
+            )
+            TestRunner.assertTrue(!state.isActive(bundleID: bundleID), "GAME is released to TYPING after the second press")
+        }
+
+        // A press outside the 8s window is NOT a release — it's remembered as
+        // a fresh first press, and a THIRD press within 8s of THAT one is
+        // what finally releases GAME.
+        do {
+            let clock = GameModeTestClock(t0)
+            let (state, suite) = freshState(now: { clock.date })
+            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            let bundleID = "com.example.dsreleasewindow"
+            state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
+            state.note(.longRun)
+            TestRunner.assertTrue(!state.noteDoubleShiftWhileActive(), "first Double Shift is blocked")
+            clock.advance(9)
+            TestRunner.assertTrue(
+                !state.noteDoubleShiftWhileActive(),
+                "a press 9s after the first (past the 8s window) is blocked too, not treated as a release"
+            )
+            TestRunner.assertTrue(
+                state.isActive(bundleID: bundleID), "GAME is still active — the late press did not release it"
+            )
+            clock.advance(1)
+            TestRunner.assertTrue(
+                state.noteDoubleShiftWhileActive(),
+                "a third press 1s after the second (within the second press's own 8s window) releases GAME"
+            )
+            TestRunner.assertTrue(!state.isActive(bundleID: bundleID), "GAME released on the third press")
+        }
+
+        // No GAME active → the gesture is never blocked by this method.
+        do {
+            let clock = GameModeTestClock(t0)
+            let (state, suite) = freshState(now: { clock.date })
+            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            let bundleID = "com.example.dsnotgame"
+            state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
+            TestRunner.assertTrue(
+                state.noteDoubleShiftWhileActive(), "outside GAME, Double Shift is never blocked by this method"
+            )
         }
     }
 }
