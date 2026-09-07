@@ -113,6 +113,7 @@ enum TestRunner {
         DoubleShiftInapplicableLogTests.run()
         ProviderSingleReadGuardTests.run()
         GameModeSourceGuardTests.run()
+        DetectorExactnessTests.run()
         print("---")
         print("\(passed) passed, \(failed) failed, \(skipped) skipped")
         return failed == 0 ? 0 : 1
