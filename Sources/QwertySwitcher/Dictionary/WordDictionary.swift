@@ -108,6 +108,37 @@ final class WordDictionary {
         return bigramSets[language]
     }
 
+    /// Exact membership in the bundled word list — binary search over the same
+    /// `sortedWords` index `isPrefixOfBundledWord` uses. `nil` while the
+    /// background index is still loading (first seconds after launch).
+    func containsBundled(_ word: String, language: String) -> Bool? {
+        guard !word.isEmpty else { return false }
+        sortedWordsLock.lock()
+        let words = sortedWords[language]
+        sortedWordsLock.unlock()
+        guard let words else { return nil }
+
+        var lo = 0
+        var hi = words.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if words[mid] < word { lo = mid + 1 } else { hi = mid }
+        }
+        guard lo < words.count else { return false }
+        return words[lo] == word
+    }
+
+    /// Dictionary hit as the hot paths must see it: Bloom stays the O(1)
+    /// pre-filter (rejects almost everything instantly), and a positive is
+    /// confirmed exactly whenever the index is ready. Field 07–08.09.2026:
+    /// three Bloom false positives (`jgnbvbpbhjdfyyhj`, `ghjghwb`, `erfposdf`
+    /// all pass the en filter) each flipped a Russian typo into Latin garbage.
+    /// Before the index is ready this degrades to Bloom-only (documented).
+    func isConfirmedWord(_ word: String, language: String) -> Bool {
+        guard mightContain(word, language: language) else { return false }
+        return containsBundled(word, language: language) ?? true
+    }
+
     var stats: String {
         let parts = bloomFilters.map { "\($0.key) bloom: \($0.value.sizeInBytes / 1024)KB" }
         return parts.joined(separator: ", ")
