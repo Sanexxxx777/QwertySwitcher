@@ -62,13 +62,23 @@ final class HotkeyManager {
         self.gameMode = gameMode
     }
 
-    /// Single choke point for "hotkeys must not fire right now" — per-app
-    /// profile block (existing) OR the frontmost app being in Game Mode
-    /// (gamemode-spec-20260831.md §2: Single/Double/L+R Shift all silenced
-    /// in-game). All 3 hotkey call sites in this file route through here
-    /// instead of calling the per-app-profile check directly.
+    /// The ONE direct call to the per-app-profile check in this file (the
+    /// wrapper's own body) — `hotkeysBlocked()` below and `handleDoubleShift`
+    /// both route through THIS, never through `exceptionsService` directly.
+    /// Structural guard: `GameModeSourceGuardTests`.
+    private func profileBlocksHotkeys() -> Bool {
+        exceptionsService.areHotkeysBlockedForCurrentApp()
+    }
+
+    /// Single Shift / L+R Shift combo choke point: per-app profile block OR
+    /// the frontmost app being in Game Mode (gamemode-spec-20260831.md §2).
+    /// Double Shift does NOT use this — it needs to tell the two reasons
+    /// apart (a profile block stays silent, a Game Mode block gets a
+    /// release-hatch and a log line — see `handleDoubleShift`), so it calls
+    /// `profileBlocksHotkeys()` and `gameMode.isActiveForFrontmost()`
+    /// separately instead.
     private func hotkeysBlocked() -> Bool {
-        exceptionsService.areHotkeysBlockedForCurrentApp() || gameMode.isActiveForFrontmost()
+        profileBlocksHotkeys() || gameMode.isActiveForFrontmost()
     }
 
     /// Whether a modifier present on THIS flagsChanged event disqualifies the
@@ -334,7 +344,14 @@ final class HotkeyManager {
     private func handleDoubleShift() {
         DebugLog.shared.log("HK", "doubleShift triggered")
         guard keyboardMonitor?.isPaused != true else { return }
-        guard !hotkeysBlocked() else { return }
+        guard !profileBlocksHotkeys() else { return }          // per-app profile: silent, user configured it
+        if gameMode.isActiveForFrontmost() {
+            guard gameMode.noteDoubleShiftWhileActive() else {
+                DebugLog.shared.log("HK", "doubleShift blocked: game mode — press again within 8s to release")
+                return
+            }
+            DebugLog.shared.log("HK", "doubleShift released game mode (second press within 8s)")
+        }
 
         switch convertAXSelection() {
         case .converted:
