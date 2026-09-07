@@ -745,7 +745,8 @@ final class KeyboardMonitor {
                 canAutoCorrect: canAutoCorrect && correctable,
                 keepForManualSwitch: correctable,
                 triggerEvent: event,
-                wordHadHeldKeys: wordHadHeldKeys
+                wordHadHeldKeys: wordHadHeldKeys,
+                proseBoundary: true
             )
             return
         }
@@ -759,8 +760,10 @@ final class KeyboardMonitor {
             // control spree — measured 0 occurrences outside game windows
             // (max run 29, n=309) vs 57 inside (max 260, n=599). One-shot:
             // this line runs exactly once as the count crosses 32, not on
-            // every keystroke after.
-            if runKeystrokes.count == 32 { gameMode.note(.longRun) }
+            // every keystroke after. `isGameControlRun` (06–08.09.2026 field
+            // incident) excludes digits/`/`/`-`/`=`/ambiguous-letter runs —
+            // those are URLs, paths, tokens, passwords, never game evidence.
+            if runKeystrokes.count == 32, InputBuffer.isGameControlRun(runKeystrokes) { gameMode.note(.longRun) }
             // Field-debugging trace ("Подробный лог"): which keystroke stopped
             // growing the run. buf is pre-append for the letter path below.
             DebugLog.shared.log(
@@ -893,7 +896,8 @@ final class KeyboardMonitor {
 
     private func handleWordBoundary(
         trailing: String?, canAutoCorrect: Bool, keepForManualSwitch: Bool, triggerEvent: CGEvent,
-        triggerKeystroke: BufferedKeystroke? = nil, wordHadHeldKeys: Bool = false
+        triggerKeystroke: BufferedKeystroke? = nil, wordHadHeldKeys: Bool = false,
+        proseBoundary: Bool = false
     ) {
         let captured = buffer.currentWord()
         let capitalizeSentenceStart = captured.isEmpty ? false : sentenceStartTracker.consumeForWord()
@@ -955,21 +959,39 @@ final class KeyboardMonitor {
         // dictionary-ness check): that branch only runs when `canAutoCorrect`
         // is true, and game mode being ACTIVE is exactly what makes it false
         // (see `canAutoCorrect`'s `!gameActive`) — the one case this signal
-        // exists to observe. So it's computed independently here, at the
-        // real word boundary (space only, matching spec §5 "граница =
-        // пробел"), gated behind `gameMode.isActiveForFrontmost()` (an
+        // exists to observe. So it's computed independently here, at any
+        // real word boundary — `proseBoundary` now covers Enter/Tab too, not
+        // just space: field 08.09.2026 showed chat apps close a word with
+        // Enter, and the old `trailing == " "` check silently lost every one
+        // of those words — gated behind `gameMode.isActiveForFrontmost()` (an
         // in-memory read, same cost class as the rest of this hot path) so
-        // the extra dictionary lookup is only ever paid while a bundleID is
-        // actually flagged GAME — `noteProseWord` itself is a no-op
-        // otherwise, so skipping the check when not needed changes nothing
-        // observable.
-        if trailing == " ", !captured.isEmpty, gameMode.isActiveForFrontmost(),
+        // the extra dictionary lookups below are only ever paid while a
+        // bundleID is actually flagged GAME — `noteProseWord` itself is a
+        // no-op otherwise, so skipping the check when not needed changes
+        // nothing observable.
+        //
+        // Own-layout reading is not enough on its own: field 08.09.2026, the
+        // owner typed 13 Russian words in the WRONG (English) layout while
+        // GAME was active ("lfdfq xnj nj lheujq" = "давай что то другой") —
+        // own reading is dictionary-shaped exactly when the switcher ISN'T
+        // needed, and junk exactly when it is. So a word also counts as
+        // prose if it reads as a dictionary word in the other active layout.
+        if proseBoundary, !captured.isEmpty, gameMode.isActiveForFrontmost(),
            let ownLayout = languageDetector.inputSourceManager.currentLayout {
             let ownText = languageDetector.inputSourceManager.convertKeystrokes(captured, toLayout: ownLayout)
             let ownCore = LanguageDetector.core(of: ownText)?.lowercased() ?? ""
-            let isWord = !ownCore.isEmpty
+            var isWord = !ownCore.isEmpty
                 && languageDetector.isDictionaryWord(ownCore, language: ownLayout.languageCode)
-            gameMode.noteProseWord(isDictionaryWord: isWord, len: ownCore.count, hasHeldKeys: wordHadHeldKeys)
+            var coreLength = ownCore.count
+            if !isWord, let other = languageDetector.activeLayouts.first(where: { $0.id != ownLayout.id }) {
+                let otherText = languageDetector.inputSourceManager.convertKeystrokes(captured, toLayout: other)
+                if let otherCore = LanguageDetector.core(of: otherText)?.lowercased(), !LanguageDetector.isMixedScript(otherCore),
+                   languageDetector.isDictionaryWord(otherCore, language: other.languageCode) {
+                    isWord = true
+                    coreLength = otherCore.count
+                }
+            }
+            gameMode.noteProseWord(isDictionaryWord: isWord, len: coreLength, hasHeldKeys: wordHadHeldKeys)
         }
 
         buffer.clear()
