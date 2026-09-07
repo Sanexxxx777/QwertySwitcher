@@ -238,6 +238,8 @@ DICT = {
 
 
 def score_word(word, lang):
+    # Swift: Bloom + exact confirm since 0.9.2 (WordDictionary.isConfirmedWord)
+    # — matches this exact `set` lookup byte-for-byte, no port change needed.
     lowered = word.lower()
     if len(lowered) == 1:
         return 70 if lowered in ONE_LETTER.get(lang, set()) else 0
@@ -341,7 +343,18 @@ def detect_boundary(own_word, own_lang, context="same"):
     own_core = core_of(own_reading)
     if own_core and is_mixed_script(own_core):
         own_core = None
-    other_core = core_of(other_reading) if other_reading is not None else None
+
+    # Swift: LanguageDetector.projections() `leadingLetterLost` (08.09.2026) —
+    # a physical key that is a Cyrillic-only letter (б ж э х ъ ю ё) renders as
+    # punctuation on the Latin side. No English word begins with punctuation,
+    # so a reading that turns the user's FIRST typed letter into a leading
+    # comma/semicolon is not a candidate ("боут"→",jen"). The mirror direction
+    # (own_reading itself starting with punctuation) is left untouched — it
+    # GAINS a letter on the other side, same as Swift.
+    if own_reading and other_reading and own_reading[0].isalpha() and not other_reading[0].isalpha():
+        other_core = None
+    else:
+        other_core = core_of(other_reading) if other_reading is not None else None
     if other_core and is_mixed_script(other_core):
         other_core = None
 

@@ -521,8 +521,18 @@ final class LanguageDetector {
     ) -> [Projection] {
         var result: [Projection] = []
 
+        // A physical key that is a Cyrillic-only letter (б ж э х ъ ю ё) renders as
+        // punctuation on the Latin side. No English word begins with punctuation, so
+        // a reading that turns the user's FIRST typed letter into a leading comma /
+        // semicolon is not a candidate ("боут"→",jen", field 08.09.2026). The
+        // current layout is untouched (its reading IS `asTyped`), and the mirror
+        // direction (en-typed ",jn" → «бот») GAINS a letter — also untouched.
+        func leadingLetterLost(_ rendered: String) -> Bool {
+            (asTyped.first?.isLetter ?? false) && !(rendered.first?.isLetter ?? true)
+        }
+
         let whole = inputSourceManager.convertKeystrokes(keystrokes, toLayout: layout)
-        if let core = Self.core(of: whole) {
+        if let core = Self.core(of: whole), !leadingLetterLost(whole) {
             result.append(Projection(core: core, replacement: whole))
         }
 
@@ -533,7 +543,7 @@ final class LanguageDetector {
             let head = Array(keystrokes.dropLast(trailingPunct))
             let tail = String(asTyped.suffix(trailingPunct))
             let headRendered = inputSourceManager.convertKeystrokes(head, toLayout: layout)
-            if let core = Self.core(of: headRendered) {
+            if let core = Self.core(of: headRendered), !leadingLetterLost(headRendered) {
                 result.append(Projection(core: core, replacement: headRendered + tail))
             }
         }
@@ -609,19 +619,28 @@ final class LanguageDetector {
         }
         guard lowered.count >= 2 else { return 0 }
 
-        // BloomFilter-only membership check (pure in-memory, no IPC) — this
-        // runs synchronously on every word boundary (space/punctuation) for
-        // every candidate layout, inside the CGEventTap callback.
-        // `dictionary.contains`/`isSpellCheckerValid` used to be called here,
-        // confirming via `NSSpellChecker.checkSpelling` — a call that can
-        // block for 100+ms (macOS spell-checking IPC), which is exactly what
-        // disabled the event tap and dropped keystrokes during normal typing
-        // (CLAUDE.md perf audit). `mightContain` accepts the BloomFilter's
-        // ~0.5% false-positive rate instead: the cost is an occasional missed
-        // correction (falls through to `.noSwitch`, user can still Double
-        // Shift manually) or a slightly wider net for a genuinely valid word
-        // outside the bundled 714K list — never a blocked keystroke.
-        if dictionary.mightContain(lowered, language: language) {
+        // BloomFilter pre-filter (O(1), pure in-memory) + exact confirmation
+        // (binary search over the same in-memory index `isPrefixOfBundledWord`
+        // uses) — this runs synchronously on every word boundary (space/
+        // punctuation) for every candidate layout, inside the CGEventTap
+        // callback, so it must stay IPC-free. `dictionary.contains`/
+        // `isSpellCheckerValid` used to be called here, confirming via
+        // `NSSpellChecker.checkSpelling` — a call that can block for 100+ms
+        // (macOS spell-checking IPC), which is exactly what disabled the
+        // event tap and dropped keystrokes during normal typing (CLAUDE.md
+        // perf audit). `isConfirmedWord` keeps Bloom as the cheap pre-filter
+        // (rejects almost everything instantly) and resolves its ~0.5%
+        // false-positive rate with one exact binary search ONLY on the rare
+        // Bloom positive — field 07–08.09.2026: three Bloom false positives
+        // (`jgnbvbpbhjdfyyhj`, `ghjghwb`, `erfposdf`) each flipped a Russian
+        // typo into Latin garbage that then won as a "dictionary word". Cost
+        // is still just an occasional missed correction (falls through to
+        // `.noSwitch`, user can still Double Shift manually) or a slightly
+        // wider net for a genuinely valid word outside the bundled 714K list
+        // — never a blocked keystroke. Before the background index is ready
+        // this degrades to Bloom-only (documented on `isConfirmedWord`),
+        // same behavior as before this change.
+        if dictionary.isConfirmedWord(lowered, language: language) {
             let lengthBonus = min(20, lowered.count * 2)
             return 80 + lengthBonus  // 84-100
         }
