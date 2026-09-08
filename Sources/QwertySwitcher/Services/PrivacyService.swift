@@ -1,7 +1,7 @@
 import Foundation
 
-/// Privacy & Security hardening. The only network client is the license
-/// transport; there is no analytics or telemetry SDK.
+/// Privacy & Security hardening. The app makes no network calls at all —
+/// there is no analytics, telemetry, or license transport.
 final class PrivacyService {
     /// Privacy policy summary (shown in About view)
     static let policyText = """
@@ -9,9 +9,7 @@ final class PrivacyService {
 
     1. Весь ввод обрабатывается локально и никогда не покидает Mac.
     2. Приложение не хранит историю набора и сырые нажатия клавиш.
-    3. Аналитики и телеметрии нет. Лицензионная проверка отправляет на сервер
-       идентификатор Mac (hwid) и версию приложения —
-       никогда набираемый текст.
+    3. Приложение не ходит в сеть. Аналитики и телеметрии нет.
     4. Для определения раскладки анализируется только текущее слово в памяти.
     5. Защищённые поля автоматически пропускаются и не буферизуются.
 

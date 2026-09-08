@@ -53,9 +53,6 @@ enum TestRunner {
         InstantCorrectionAnalyzerTests.run()
         InstantCorrectionCorpusTests.run()
         InstantCorrectionJunkGateTests.run()
-        LicenseServiceTests.run()
-        FileLicenseStoreTests.run()
-        KeychainSilenceGuardTests.run()
         DebugLogTests.run()
         PendingUserEventQueueTests.run()
         EventRouteTests.run()
@@ -112,6 +109,7 @@ enum TestRunner {
         DoubleShiftInapplicableLogTests.run()
         ProviderSingleReadGuardTests.run()
         GameModeSourceGuardTests.run()
+        AuthorLinksViewTests.run()
         print("---")
         print("\(passed) passed, \(failed) failed, \(skipped) skipped")
         return failed == 0 ? 0 : 1
@@ -875,8 +873,6 @@ enum SettingsBackupTests {
             return
         }
         let json = String(data: data, encoding: .utf8) ?? ""
-        TestRunner.assertTrue(!json.contains("hwid"), "backup excludes the license device identifier")
-        TestRunner.assertTrue(!json.contains("licenseFirstSeen"), "backup excludes license anti-tamper state")
         TestRunner.assertTrue(json.contains("\"clear\""), "backup includes an active Mechanism A entry")
         TestRunner.assertTrue(json.contains("\"vmc\""), "backup includes a not-yet-promoted Mechanism A entry too")
         TestRunner.assertTrue(
@@ -2487,430 +2483,6 @@ enum InstantCorrectionJunkGateTests {
     }
 }
 
-// MARK: - License test seams (no network, no real Keychain)
-
-private final class TestLicenseClock: LicenseClock {
-    var current: Int64
-    init(_ now: Int64) { current = now }
-    func now() -> Int64 { current }
-}
-
-private final class InMemoryLicenseStore: LicenseStateStore {
-    var stored: LicenseState?
-    func load() -> LicenseState? { stored }
-    func save(_ state: LicenseState) { stored = state }
-}
-
-private final class StubLicenseTransport: LicenseTransport {
-    var helloResult: LicenseService.ServerResult = .failure(.network)
-    var activateResult: LicenseService.ServerResult = .failure(.network)
-    private(set) var lastBaseURL: URL?
-
-    func hello(
-        baseURL: URL, hwid: String, appVersion: String,
-        completion: @escaping (LicenseService.ServerResult) -> Void
-    ) {
-        lastBaseURL = baseURL
-        completion(helloResult)
-    }
-
-    func activate(
-        baseURL: URL, hwid: String, key: String,
-        completion: @escaping (LicenseService.ServerResult) -> Void
-    ) {
-        lastBaseURL = baseURL
-        completion(activateResult)
-    }
-}
-
-enum LicenseServiceTests {
-    private static let day: Int64 = 24 * 3600
-    private static let grace: Int64 = 14 * day
-    private static let rollbackTolerance: Int64 = 3600
-
-    static func run() {
-        TestRunner.section("LicenseService")
-
-        // Anti-tamper first-seen marks are scoped by hwid in UserDefaults —
-        // clean up every fake hwid this suite touches so re-runs stay isolated.
-        defer {
-            for hwid in ["TRIALHW", "ACTHW", "ANTITAMPERHW", "ENDPOINTHW"] {
-                UserDefaults.standard.removeObject(forKey: AppIdentity.keyPrefix + "licenseFirstSeen." + hwid)
-            }
-        }
-
-        // (a) canonicalization — golden vector
-        let golden = LicensePayload(
-            hwid: "ABC-123", plan: "trial", start: 1_754_100_000, until: 1_755_309_600, issued: 1_754_200_000
-        )
-        TestRunner.assertEqual(
-            golden.canonicalString,
-            "{\"hwid\":\"ABC-123\",\"issued\":1754200000,\"plan\":\"trial\",\"start\":1754100000,\"until\":1755309600}",
-            "canonical payload string matches the golden vector"
-        )
-
-        let endpointTransport = StubLicenseTransport()
-        let injectedEndpoint = URL(string: "https://license.invalid/qsw-test")!
-        let endpointService = LicenseService(
-            clock: TestLicenseClock(1_000), transport: endpointTransport,
-            store: InMemoryLicenseStore(), hwid: "ENDPOINTHW", appVersion: "test",
-            baseURL: injectedEndpoint
-        )
-        endpointService.checkIn()
-        TestRunner.assertEqual(
-            endpointTransport.lastBaseURL?.absoluteString ?? "", injectedEndpoint.absoluteString,
-            "license endpoint is constructor-injected, not read from mutable UserDefaults"
-        )
-
-        let testKey = Curve25519.Signing.PrivateKey()
-        let testPublicHex = Self.hex(testKey.publicKey.rawRepresentation)
-
-        // (b) roundtrip: a test-generated key signs the canon → verify OK; a corrupted payload fails
-        let payload = LicensePayload(
-            hwid: "TESTHWID", plan: "sub", start: 1_700_000_000, until: 1_800_000_000, issued: 1_700_000_100
-        )
-        guard let sigData = try? testKey.signature(for: Data(payload.canonicalString.utf8)) else {
-            TestRunner.assertTrue(false, "test key signs the canonical payload")
-            return
-        }
-        let sigHex = Self.hex(sigData)
-        TestRunner.assertTrue(
-            LicenseVerifier.verifySignature(payload: payload, sigHex: sigHex, publicKeyHex: testPublicHex),
-            "roundtrip: valid signature verifies"
-        )
-        let corrupted = LicensePayload(
-            hwid: payload.hwid, plan: payload.plan, start: payload.start, until: payload.until + 1, issued: payload.issued
-        )
-        TestRunner.assertTrue(
-            !LicenseVerifier.verifySignature(payload: corrupted, sigHex: sigHex, publicKeyHex: testPublicHex),
-            "roundtrip: corrupted payload fails verification"
-        )
-
-        // (c) a payload signed for a different hwid must be rejected
-        TestRunner.assertTrue(
-            !LicenseVerifier.accept(
-                payload: payload, sigHex: sigHex, hwid: "OTHER-HWID", now: payload.issued, publicKeyHex: testPublicHex
-            ),
-            "payload signed for a different hwid is rejected"
-        )
-        TestRunner.assertTrue(
-            LicenseVerifier.accept(
-                payload: payload, sigHex: sigHex, hwid: payload.hwid, now: payload.issued, publicKeyHex: testPublicHex
-            ),
-            "payload matching our hwid with a fresh issued time is accepted"
-        )
-
-        // (d) grace window: signed cache stays valid until 14 days after the last check
-        let subPayload = LicensePayload(hwid: "GRACEHW", plan: "sub", start: 0, until: 10_000_000, issued: 1_000_000)
-        guard let graceSigData = try? testKey.signature(for: Data(subPayload.canonicalString.utf8)) else {
-            TestRunner.assertTrue(false, "test key signs the grace-window payload")
-            return
-        }
-        let graceSigHex = Self.hex(graceSigData)
-        let now: Int64 = 2_000_000
-
-        let stale15 = LicenseState(
-            payload: subPayload, sig: graceSigHex, lastCheckUnix: now - 15 * Self.day, maxSeenUnix: now, provisional: false
-        )
-        TestRunner.assertTrue(
-            !LicenseService.evaluate(
-                state: stale15, hwid: "GRACEHW", now: now,
-                graceSeconds: Self.grace, rollbackTolerance: Self.rollbackTolerance, publicKeyHex: testPublicHex
-            ),
-            "grace expired at 15 days since last check → not entitled"
-        )
-
-        let stale13 = LicenseState(
-            payload: subPayload, sig: graceSigHex, lastCheckUnix: now - 13 * Self.day, maxSeenUnix: now, provisional: false
-        )
-        TestRunner.assertTrue(
-            LicenseService.evaluate(
-                state: stale13, hwid: "GRACEHW", now: now,
-                graceSeconds: Self.grace, rollbackTolerance: Self.rollbackTolerance, publicKeyHex: testPublicHex
-            ),
-            "13 days since last check is still within grace → entitled"
-        )
-
-        // (e) clock rollback: cache is untrusted once "now" falls behind the highest seen time
-        let rolledBack = LicenseState(
-            payload: subPayload, sig: graceSigHex, lastCheckUnix: now, maxSeenUnix: now + 2 * Self.day, provisional: false
-        )
-        TestRunner.assertTrue(
-            !LicenseService.evaluate(
-                state: rolledBack, hwid: "GRACEHW", now: now,
-                graceSeconds: Self.grace, rollbackTolerance: Self.rollbackTolerance, publicKeyHex: testPublicHex
-            ),
-            "clock appears rolled back past maxSeen with no server reachable → not entitled"
-        )
-
-        // (f) provisional trial is created on an empty store while offline; until = +14 days
-        let trialClock = TestLicenseClock(5_000_000)
-        let trialStore = InMemoryLicenseStore()
-        let trialTransport = StubLicenseTransport()
-        trialTransport.helloResult = .failure(.network)
-        let trialService = LicenseService(
-            clock: trialClock, transport: trialTransport, store: trialStore,
-            hwid: "TRIALHW", appVersion: "0.4.0", publicKeyHex: testPublicHex
-        )
-        trialService.checkIn()
-        TestRunner.assertTrue(trialService.isEntitled, "offline first launch grants a provisional trial")
-        TestRunner.assertTrue(trialStore.stored?.provisional ?? false, "provisional trial is flagged in stored state")
-        TestRunner.assertEqual(
-            trialStore.stored?.payload?.until ?? -1, trialClock.now() + 3 * Self.day,
-            "provisional trial lasts exactly 3 days until the server is reached"
-        )
-
-        // (g) activation via mock transport with a signed sub payload → entitled, plan=sub
-        let actClock = TestLicenseClock(6_000_000)
-        let actStore = InMemoryLicenseStore()
-        let actTransport = StubLicenseTransport()
-        let subActivation = LicensePayload(
-            hwid: "ACTHW", plan: "sub", start: actClock.now(), until: actClock.now() + 30 * Self.day, issued: actClock.now()
-        )
-        guard let actSigData = try? testKey.signature(for: Data(subActivation.canonicalString.utf8)) else {
-            TestRunner.assertTrue(false, "test key signs the activation payload")
-            return
-        }
-        actTransport.activateResult = .success(payload: subActivation, sigHex: Self.hex(actSigData))
-        let actService = LicenseService(
-            clock: actClock, transport: actTransport, store: actStore,
-            hwid: "ACTHW", appVersion: "0.4.0", publicKeyHex: testPublicHex
-        )
-        var outcome: LicenseService.ActivationOutcome = .network
-        actService.activate(key: "QSW-TEST-TEST-TEST") { result in outcome = result }
-        TestRunner.assertEqual(outcome, .success, "activation with a valid signed response succeeds")
-        TestRunner.assertTrue(actService.isEntitled, "activated subscription is entitled")
-        TestRunner.assertEqual(actStore.stored?.payload?.plan ?? "", "sub", "activated state carries plan=sub")
-
-        // (h) anti-tamper: deleting the license state (simulated by a fresh
-        // empty store) while offline must NOT restart the provisional trial —
-        // the second instance has to anchor on the first instance's
-        // first-seen mark, not on its own later "now".
-        let firstClock = TestLicenseClock(1_000_000)
-        let firstStore = InMemoryLicenseStore()
-        let offlineTransport = StubLicenseTransport()
-        offlineTransport.helloResult = .failure(.network)
-        let firstService = LicenseService(
-            clock: firstClock, transport: offlineTransport, store: firstStore,
-            hwid: "ANTITAMPERHW", appVersion: "test", publicKeyHex: testPublicHex
-        )
-        firstService.checkIn()
-        let firstUntil = firstStore.stored?.payload?.until ?? -1
-        TestRunner.assertEqual(
-            firstUntil, firstClock.now() + 3 * Self.day,
-            "genuinely first launch anchors the offline window at its own now"
-        )
-
-        // "File deleted": a brand new, empty store — same hwid, 20 days later.
-        let laterClock = TestLicenseClock(1_000_000 + 20 * Self.day)
-        let wipedStore = InMemoryLicenseStore()
-        let secondService = LicenseService(
-            clock: laterClock, transport: offlineTransport, store: wipedStore,
-            hwid: "ANTITAMPERHW", appVersion: "test", publicKeyHex: testPublicHex
-        )
-        secondService.checkIn()
-        TestRunner.assertEqual(
-            wipedStore.stored?.payload?.until ?? -1, firstUntil,
-            "trial restored after local state loss keeps the ORIGINAL until — it is not restarted"
-        )
-        TestRunner.assertTrue(
-            !secondService.isEntitled,
-            "restored trial is already expired 20 days after a 14-day anchor, exactly as it should be"
-        )
-    }
-
-    private static func hex(_ data: Data) -> String {
-        data.map { String(format: "%02x", $0) }.joined()
-    }
-}
-
-private final class StubLegacyLicenseKeychainReader: LegacyLicenseKeychainReader {
-    var stateToReturn: LicenseState?
-    private(set) var deleteCalled = false
-    func readSilently() -> LicenseState? { stateToReturn }
-    func deleteSilently() { deleteCalled = true }
-}
-
-enum FileLicenseStoreTests {
-    static func run() {
-        TestRunner.section("FileLicenseStore — migration off Keychain")
-
-        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("qsw-license-store-test-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        let legacyPayload = LicensePayload(hwid: "MIGRATEHW", plan: "trial", start: 1, until: 2, issued: 1)
-        let legacyState = LicenseState(
-            payload: legacyPayload, sig: "deadbeef", lastCheckUnix: 1, maxSeenUnix: 1, provisional: false
-        )
-        let legacyReader = StubLegacyLicenseKeychainReader()
-        legacyReader.stateToReturn = legacyState
-
-        let store = FileLicenseStore(directory: tempDir, legacyReader: legacyReader)
-
-        if let migrated = store.load() {
-            TestRunner.assertEqual(
-                migrated, legacyState,
-                "state read from the old Keychain source is migrated into the file store"
-            )
-        } else {
-            TestRunner.assertTrue(false, "state read from the old Keychain source is migrated into the file store")
-        }
-        TestRunner.assertTrue(
-            legacyReader.deleteCalled,
-            "legacy Keychain entry is deleted once migration completes"
-        )
-
-        let fileURL = tempDir.appendingPathComponent("license.json")
-        let perms = (try? FileManager.default.attributesOfItem(atPath: fileURL.path))?[.posixPermissions] as? NSNumber
-        TestRunner.assertEqual(
-            perms?.intValue ?? -1, 0o600,
-            "license.json is created with 0600 permissions"
-        )
-
-        // A second store pointed at the same directory must never re-read
-        // (or delete from) Keychain — the file already exists.
-        let secondReader = StubLegacyLicenseKeychainReader()
-        secondReader.stateToReturn = LicenseState(
-            payload: LicensePayload(hwid: "SHOULDNOTAPPEAR", plan: "trial", start: 0, until: 0, issued: 0),
-            sig: nil, lastCheckUnix: 0, maxSeenUnix: 0, provisional: true
-        )
-        let secondStore = FileLicenseStore(directory: tempDir, legacyReader: secondReader)
-        TestRunner.assertEqual(
-            secondStore.load()?.payload?.hwid ?? "", "MIGRATEHW",
-            "an existing file is never overwritten by a second migration attempt"
-        )
-        TestRunner.assertTrue(
-            !secondReader.deleteCalled,
-            "Keychain is not touched at all once a file already exists"
-        )
-
-        // Fresh install, nothing in Keychain either: store starts empty, no crash.
-        let emptyDir = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("qsw-license-store-empty-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: emptyDir) }
-        let emptyReader = StubLegacyLicenseKeychainReader()
-        let emptyStore = FileLicenseStore(directory: emptyDir, legacyReader: emptyReader)
-        TestRunner.assertNil(emptyStore.load(), "fresh install with no legacy state has an empty file store")
-    }
-}
-
-/// Structural guards for the Keychain-dialog fix. Two parts:
-/// (1)/(2) `KeychainStore` (DeviceIdentity.swift) itself stays silent — it's
-/// still used by the device-UUID fallback and the legacy license-migration
-/// reader — a self-signed dev build's CDHash changes on every rebuild, so a
-/// stale item from a previous build routinely looks like "someone else's
-/// ACL" and `SecItemCopyMatching` pops the "wants to use confidential
-/// information" dialog unless told to stay silent.
-/// (3) The offline-trial first-seen anchor no longer touches Keychain at
-/// all (removed 01.09.2026 — see LicenseService.swift comment at
-/// `firstSeenKeyPrefix`): low anti-tamper value (3-day offline window, full
-/// trial only from the server) wasn't worth a second class of dialog on
-/// every update. `LicenseService.swift` must have zero `KeychainStore`
-/// calls — `SystemLegacyLicenseKeychainReader`'s own migration read/delete
-/// uses raw `SecItemCopyMatching`/`SecItemDelete` directly, not
-/// `KeychainStore`, so it doesn't trip this guard.
-/// None of this is unit-testable against the real Keychain (system
-/// dependency, and a regression here means a GUI dialog appears — nothing
-/// to assert on programmatically), so — same `#filePath`-source-read
-/// precedent as `ComboWindowGuardTests` — these check the source directly.
-enum KeychainSilenceGuardTests {
-    private static func readSource(_ relativePath: String) -> String? {
-        let servicesDir = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent("Services")
-        return try? String(contentsOf: servicesDir.appendingPathComponent(relativePath), encoding: .utf8)
-    }
-
-    /// Text of a function body starting right after `marker`, up to (not
-    /// including) its closing `\n    }` — kept as a single `.range(of:)` +
-    /// slice on the SAME string value throughout, unlike an earlier version
-    /// of this helper that re-derived the substring a second time for
-    /// slicing: indices from a `.range(of:)` call on one String value are
-    /// not guaranteed valid on a different (even textually identical)
-    /// String/Substring value and trapped at runtime ("Range requires
-    /// lowerBound <= upperBound") the first time this ran.
-    private static func body(after marker: String, in source: String) -> String? {
-        guard let markerRange = source.range(of: marker) else { return nil }
-        let rest = String(source[markerRange.upperBound...])
-        guard let closingRange = rest.range(of: "\n    }") else { return rest }
-        return String(rest[..<closingRange.lowerBound])
-    }
-
-    static func run() {
-        TestRunner.section("KeychainStore/LicenseService — silent Keychain access, no auth dialogs")
-
-        guard let deviceIdentitySource = readSource("DeviceIdentity.swift") else {
-            TestRunner.skip("DeviceIdentity.swift not readable")
-            return
-        }
-
-        // (1) Reads must never allow the auth UI.
-        guard let readBody = body(after: "static func read(service: String, account: String) -> Data? {", in: deviceIdentitySource) else {
-            TestRunner.assertTrue(false, "KeychainStore.read not found — test needs updating")
-            return
-        }
-        TestRunner.assertTrue(
-            readBody.contains("kSecUseAuthenticationUISkip"),
-            "KeychainStore.read passes kSecUseAuthenticationUISkip — a stale item from a previous"
-                + " self-signed build is silently treated as absent, never prompts"
-        )
-
-        // (2) kSecUseAuthenticationUISkip is documented (SecItem.h) to apply
-        // only to SecItemCopyMatching — write() must not rely on passing it
-        // to SecItemUpdate/SecItemAdd, and must bail out without UI (and
-        // without retrying) when an existing item turns out to be auth-blocked.
-        guard let writeMarker = deviceIdentitySource.range(of: "static func write(") else {
-            TestRunner.assertTrue(false, "KeychainStore.write not found — test needs updating")
-            return
-        }
-        let writeBody = String(deviceIdentitySource[writeMarker.upperBound...])
-        TestRunner.assertTrue(
-            writeBody.contains("isAuthBlocked(probe)") || writeBody.contains("isAuthBlocked(updateStatus)"),
-            "write() checks for an auth-blocked existing item before/around SecItemUpdate,"
-                + " instead of assuming kSecUseAuthenticationUISkip silences it too"
-        )
-        guard let updateCall = writeBody.range(of: "SecItemUpdate(baseQuery"),
-              let firstGuardAfterUpdate = writeBody.range(of: "if isAuthBlocked(updateStatus) { return false }") else {
-            TestRunner.assertTrue(false, "SecItemUpdate call or its auth-blocked guard not found — test needs updating")
-            return
-        }
-        TestRunner.assertTrue(
-            updateCall.upperBound < firstGuardAfterUpdate.lowerBound,
-            "an auth-blocked SecItemUpdate result returns false immediately — no retry, no fallthrough to SecItemAdd"
-        )
-
-        // (3) The offline-trial anchor's Keychain duplicate is gone entirely —
-        // LicenseService must not call KeychainStore at all anymore.
-        // SystemLegacyLicenseKeychainReader (the license-state migration
-        // reader) is exempt by construction: it uses its own raw
-        // SecItemCopyMatching/SecItemDelete, never KeychainStore, so this
-        // assertion doesn't need to special-case it.
-        guard let licenseSource = readSource("LicenseService.swift") else {
-            TestRunner.skip("LicenseService.swift not readable")
-            return
-        }
-        TestRunner.assertTrue(
-            !licenseSource.contains("KeychainStore.read(") && !licenseSource.contains("KeychainStore.write("),
-            "LicenseService no longer calls KeychainStore for the offline-trial first-seen anchor"
-                + " (removed 01.09.2026 — anchor now lives in UserDefaults + the license file's own"
-                + " persisted provisional-trial state, see firstSeenCandidates())"
-        )
-        guard let candidatesBody = body(after: "private func firstSeenCandidates() -> [Int64] {", in: licenseSource) else {
-            TestRunner.assertTrue(false, "firstSeenCandidates not found — test needs updating")
-            return
-        }
-        TestRunner.assertTrue(
-            candidatesBody.contains("UserDefaults.standard.object(forKey: key)")
-                && candidatesBody.contains("trial.provisional")
-                && candidatesBody.contains("payload.start"),
-            "firstSeenCandidates still combines the two surviving sources —"
-                + " UserDefaults and the persisted provisional trial's own anchor — and takes the earliest"
-        )
-    }
-}
-
 enum DebugLogTests {
     static func run() {
         TestRunner.section("DebugLog — verbose gate & rotation")
@@ -3662,13 +3234,6 @@ enum KeyboardMonitorIntegrationTests {
             return
         }
 
-        guard LicenseService.shared.isEntitled else {
-            TestRunner.skip(
-                "KeyboardMonitor integration harness requires an entitled LicenseService.shared "
-                    + "(Double Shift and auto-correct are both license-gated)"
-            )
-            return
-        }
         let inputSources = InputSourceManager()
         guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
               let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
@@ -4446,10 +4011,6 @@ enum HeldKeysGameModeGateTests {
             TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
             return
         }
-        guard LicenseService.shared.isEntitled else {
-            TestRunner.skip("KeyboardMonitor integration harness requires an entitled LicenseService.shared")
-            return
-        }
         let inputSources = InputSourceManager()
         guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
               let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
@@ -4537,10 +4098,6 @@ enum SanityCapBoundaryGuardTests {
             TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
             return
         }
-        guard LicenseService.shared.isEntitled else {
-            TestRunner.skip("KeyboardMonitor integration harness requires an entitled LicenseService.shared")
-            return
-        }
         let inputSources = InputSourceManager()
         guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
               let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
@@ -4584,10 +4141,6 @@ enum BackspaceResetsInstantGateTests {
 
         guard TestRunner.syntheticKeyboardEventsAreSafe else {
             TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
-            return
-        }
-        guard LicenseService.shared.isEntitled else {
-            TestRunner.skip("KeyboardMonitor integration harness requires an entitled LicenseService.shared")
             return
         }
         let inputSources = InputSourceManager()
@@ -4666,10 +4219,6 @@ enum DoubleShiftInapplicableLogTests {
 
         guard TestRunner.syntheticKeyboardEventsAreSafe else {
             TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
-            return
-        }
-        guard LicenseService.shared.isEntitled else {
-            TestRunner.skip("Double Shift is license-gated")
             return
         }
         let inputSources = InputSourceManager()
@@ -5836,49 +5385,49 @@ enum SwitchBlockReasonTests {
 
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil
+                health: .running, isAutoSwitchEnabled: true, secureInputAppName: nil
             ),
             .none,
             "everything working → no reason, no line in the menu"
         )
         TestRunner.assertNil(
             SwitchBlockReason.resolve(
-                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil
+                health: .running, isAutoSwitchEnabled: true, secureInputAppName: nil
             ).title,
             "'.none' has no title — absence of a line, never a reassuring filler"
         )
 
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .secureInput, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: "Safari"
+                health: .secureInput, isAutoSwitchEnabled: true, secureInputAppName: "Safari"
             ),
             .secureInput(appName: "Safari"),
             "secure input with a known app name is reported as its own case"
         )
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .secureInput, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: "Safari"
+                health: .secureInput, isAutoSwitchEnabled: true, secureInputAppName: "Safari"
             ).title,
             "Пароль в Safari — переключение приостановлено",
             "known app name is folded into the line"
         )
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .secureInput, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil
+                health: .secureInput, isAutoSwitchEnabled: true, secureInputAppName: nil
             ).title,
             "Ввод пароля — переключение приостановлено",
             "unknown app name falls back to the generic wording — never a guessed name"
         )
         TestRunner.assertTrue(
             SwitchBlockReason.resolve(
-                health: .secureInput, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil
+                health: .secureInput, isAutoSwitchEnabled: true, secureInputAppName: nil
             ).blocksSwitching,
             "secure input blocks switching"
         )
 
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .missingPermissions, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil
+                health: .missingPermissions, isAutoSwitchEnabled: true, secureInputAppName: nil
             ).title,
             "Нет разрешения Универсального доступа",
             "missing permissions wins over every other check"
@@ -5887,7 +5436,7 @@ enum SwitchBlockReasonTests {
         for downHealth: EventTapHealth in [.starting, .unavailable, .stopped] {
             TestRunner.assertEqual(
                 SwitchBlockReason.resolve(
-                    health: downHealth, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil
+                    health: downHealth, isAutoSwitchEnabled: true, secureInputAppName: nil
                 ).title,
                 "Перехват клавиш остановлен",
                 "\(downHealth) health reads as 'interception stopped'"
@@ -5896,36 +5445,28 @@ enum SwitchBlockReasonTests {
 
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .running, isAutoSwitchEnabled: false, isEntitled: true, secureInputAppName: nil
+                health: .running, isAutoSwitchEnabled: false, secureInputAppName: nil
             ).title,
             "Автопереключение выключено",
             "healthy tap but auto-switch off"
         )
 
+        // Priority: health problems outrank auto-switch even when it's also
+        // off — the user should see the more urgent, actionable cause first,
+        // not whichever check happens to run last.
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .running, isAutoSwitchEnabled: true, isEntitled: false, secureInputAppName: nil
-            ).title,
-            "Подписка истекла",
-            "healthy tap, auto-switch on, but license lapsed"
-        )
-
-        // Priority: health problems outrank auto-switch/license even when
-        // BOTH are also off/expired — the user should see the more urgent,
-        // actionable cause first, not whichever check happens to run last.
-        TestRunner.assertEqual(
-            SwitchBlockReason.resolve(
-                health: .missingPermissions, isAutoSwitchEnabled: false, isEntitled: false, secureInputAppName: nil
+                health: .missingPermissions, isAutoSwitchEnabled: false, secureInputAppName: nil
             ).title,
             "Нет разрешения Универсального доступа",
-            "missing permissions outranks auto-switch-off AND expired license together"
+            "missing permissions outranks auto-switch-off"
         )
 
         // Per-app profile block (0.7.0's per-app profiles otherwise leave
         // this badge silent while the app itself is effectively disabled).
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                health: .running, isAutoSwitchEnabled: true, secureInputAppName: nil,
                 appProfileBlock: (.autoSwitch, "Terminal")
             ).title,
             "Автопереключение выключено для Terminal",
@@ -5933,7 +5474,7 @@ enum SwitchBlockReasonTests {
         )
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                health: .running, isAutoSwitchEnabled: true, secureInputAppName: nil,
                 appProfileBlock: (.autoSwitch, nil)
             ).title,
             "Автопереключение выключено для этого приложения",
@@ -5941,7 +5482,7 @@ enum SwitchBlockReasonTests {
         )
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                health: .running, isAutoSwitchEnabled: true, secureInputAppName: nil,
                 appProfileBlock: (.instantCorrectionOnly, "Ghostty")
             ).title,
             "Мгновенная коррекция выключена для Ghostty",
@@ -5949,14 +5490,14 @@ enum SwitchBlockReasonTests {
         )
         TestRunner.assertNil(
             SwitchBlockReason.resolve(
-                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                health: .running, isAutoSwitchEnabled: true, secureInputAppName: nil,
                 appProfileBlock: nil
             ).title,
             "no app-profile block passed → still '.none', unchanged from before 0.7.0"
         )
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .running, isAutoSwitchEnabled: false, isEntitled: true, secureInputAppName: nil,
+                health: .running, isAutoSwitchEnabled: false, secureInputAppName: nil,
                 appProfileBlock: (.autoSwitch, "Terminal")
             ).title,
             "Автопереключение выключено",
@@ -5967,7 +5508,7 @@ enum SwitchBlockReasonTests {
         // per-app profile block.
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                health: .running, isAutoSwitchEnabled: true, secureInputAppName: nil,
                 gameDetected: true, gameAppName: "Chess"
             ).title,
             "Игра — коррекция приостановлена",
@@ -5975,7 +5516,7 @@ enum SwitchBlockReasonTests {
         )
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                health: .running, isAutoSwitchEnabled: true, secureInputAppName: nil,
                 gameDetected: true, gameAppName: nil
             ).title,
             "Игра — коррекция приостановлена",
@@ -5983,7 +5524,7 @@ enum SwitchBlockReasonTests {
         )
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                health: .running, isAutoSwitchEnabled: true, secureInputAppName: nil,
                 appProfileBlock: (.autoSwitch, "Terminal"), gameDetected: true, gameAppName: "Terminal"
             ).title,
             "Автопереключение выключено для Terminal",
@@ -5991,7 +5532,7 @@ enum SwitchBlockReasonTests {
         )
         TestRunner.assertEqual(
             SwitchBlockReason.resolve(
-                health: .running, isAutoSwitchEnabled: false, isEntitled: true, secureInputAppName: nil,
+                health: .running, isAutoSwitchEnabled: false, secureInputAppName: nil,
                 gameDetected: true, gameAppName: "Chess"
             ).title,
             "Автопереключение выключено",
@@ -5999,7 +5540,7 @@ enum SwitchBlockReasonTests {
         )
         TestRunner.assertNil(
             SwitchBlockReason.resolve(
-                health: .running, isAutoSwitchEnabled: true, isEntitled: true, secureInputAppName: nil,
+                health: .running, isAutoSwitchEnabled: true, secureInputAppName: nil,
                 gameDetected: false
             ).title,
             "no game-mode block passed → still '.none'"
@@ -7202,5 +6743,43 @@ enum GameModeStateTests {
             )
             TestRunner.assertTrue(!state.isActiveForFrontmost(), "isActiveForFrontmost also respects the toggle")
         }
+    }
+}
+
+/// Structural guard for the 0.10.0 license removal: `AuthorLinksView.swift`
+/// (its replacement) carries all four outbound links + the author's Telegram
+/// handle, and `LicenseView.swift` no longer exists at all — same
+/// source-read precedent as `ComboWindowGuardTests` (no live window to click
+/// through in this headless harness).
+enum AuthorLinksViewTests {
+    static func run() {
+        TestRunner.section("AuthorLinksView — outbound links present, LicenseView gone")
+
+        let viewsDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()      // Tests/
+            .deletingLastPathComponent()      // QwertySwitcher/
+            .appendingPathComponent("UI/Views")
+
+        guard let source = try? String(
+            contentsOf: viewsDir.appendingPathComponent("AuthorLinksView.swift"), encoding: .utf8
+        ) else {
+            TestRunner.assertTrue(false, "AuthorLinksView.swift not readable — test needs updating")
+            return
+        }
+
+        for url in [
+            "https://shulgin.is-a.dev/store/prosto/",
+            "https://shulgin.is-a.dev/",
+            "https://shulgin.is-a.dev/store/",
+            "https://t.me/Aleksandr_NFA",
+        ] {
+            TestRunner.assertTrue(source.contains(url), "AuthorLinksView links to \(url)")
+        }
+        TestRunner.assertTrue(source.contains("@Aleksandr_NFA"), "AuthorLinksView names the Telegram handle")
+
+        TestRunner.assertTrue(
+            !FileManager.default.fileExists(atPath: viewsDir.appendingPathComponent("LicenseView.swift").path),
+            "LicenseView.swift no longer exists — replaced by AuthorLinksView in 0.10.0"
+        )
     }
 }

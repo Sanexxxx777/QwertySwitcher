@@ -49,14 +49,15 @@ struct AboutView: View {
                     infoRow("Движок", "BloomFilter + NSSpellChecker")
                     infoRow("Горячие клавиши", "Shift / Double Shift / L+R Shift")
                     infoRow("Аналитика", "Нет (privacy-first)")
-                    infoRow("Статус", "Локальная beta")
+                    infoRow("Статус", "Бесплатно, без подписки")
                     infoRow("Приватность", "Ввод — локально, 0 телеметрии")
+                    infoRow("Автор", "Александр Шульгин · @Aleksandr_NFA")
                 }
                 .padding(.horizontal, 24)
 
                 Rectangle().fill(theme.border).frame(height: 1).padding(.horizontal, 40)
 
-                    Text("Весь ввод обрабатывается локально и никогда не покидает Mac.\nЛицензионная проверка отправляет идентификатор Mac и версию приложения.")
+                    Text("Весь ввод обрабатывается локально и никогда не покидает Mac.")
                     .font(.appText(11))
                     .foregroundColor(theme.textMuted)
                     .multilineTextAlignment(.center)
