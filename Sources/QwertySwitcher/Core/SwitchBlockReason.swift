@@ -1,18 +1,17 @@
 import Foundation
 
 /// Single source of truth for "why can't Qwerty Switcher switch layouts right
-/// now" — resolved from the same three signals `StatusBarController` already
-/// reads (`KeyboardMonitor.health`, `PreferencesService.isAutoSwitchEnabled`,
-/// `LicenseService.isEntitled`). Consumed by the status-bar badge color, the
-/// grey diagnostic line in the menu and the tooltip, so all three always
-/// agree instead of re-deriving the same logic three times.
+/// now" — resolved from the same two signals `StatusBarController` already
+/// reads (`KeyboardMonitor.health`, `PreferencesService.isAutoSwitchEnabled`).
+/// Consumed by the status-bar badge color, the grey diagnostic line in the
+/// menu and the tooltip, so all three always agree instead of re-deriving the
+/// same logic three times.
 enum SwitchBlockReason: Equatable {
     case none
     case secureInput(appName: String?)
     case missingPermissions
     case interceptionStopped
     case autoSwitchDisabled
-    case subscriptionExpired
     /// The 0.7.0 per-app profile (`ExceptionsService.AppProfile`) blocks
     /// something for the frontmost app specifically — everything else (tap,
     /// global toggle, license) is fine. Without this case the badge/menu/
@@ -49,8 +48,6 @@ enum SwitchBlockReason: Equatable {
             return "Перехват клавиш остановлен"
         case .autoSwitchDisabled:
             return "Автопереключение выключено"
-        case .subscriptionExpired:
-            return "Подписка истекла"
         case .blockedForApp(let kind, let appName):
             let app = appName ?? "этого приложения"
             switch kind {
@@ -68,10 +65,10 @@ enum SwitchBlockReason: Equatable {
 
     /// Priority mirrors how urgently each cause needs attention: a hard stop
     /// (missing permissions / event tap down) always wins over a soft one
-    /// (auto-switch toggled off / license lapsed), and secure input — a
-    /// deliberately transient, self-resolving pause — is checked first since
-    /// it needs no user action at all. The per-app profile block is checked
-    /// LAST and only reported when nothing more global already explains the
+    /// (auto-switch toggled off), and secure input — a deliberately
+    /// transient, self-resolving pause — is checked first since it needs no
+    /// user action at all. The per-app profile block is checked LAST and
+    /// only reported when nothing more global already explains the
     /// silence — no point saying "off for Terminal" when auto-switch is off
     /// everywhere anyway. `autoSwitch` outranks `instantCorrectionOnly`
     /// within the app-profile case itself: a full block is the more complete
@@ -79,7 +76,6 @@ enum SwitchBlockReason: Equatable {
     static func resolve(
         health: EventTapHealth,
         isAutoSwitchEnabled: Bool,
-        isEntitled: Bool,
         secureInputAppName: String?,
         appProfileBlock: (kind: AppProfileBlockKind, appName: String?)? = nil,
         // A single labeled-tuple field (`(appName: String?)`) isn't legal
@@ -99,7 +95,6 @@ enum SwitchBlockReason: Equatable {
             break
         }
         guard isAutoSwitchEnabled else { return .autoSwitchDisabled }
-        guard isEntitled else { return .subscriptionExpired }
         if let appProfileBlock {
             return .blockedForApp(appProfileBlock.kind, appName: appProfileBlock.appName)
         }

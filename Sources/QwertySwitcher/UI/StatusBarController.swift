@@ -16,7 +16,7 @@ final class StatusBarController {
     private var mainWindow: NSWindow?
     private var exceptionsWindow: NSWindow?
     private var aboutWindow: NSWindow?
-    private var licenseWindow: NSWindow?
+    private var authorWindow: NSWindow?
     /// Set by AppDelegate. The one guaranteed way back to onboarding after the
     /// window was closed — without it a dismissed onboarding is lost until the
     /// app is restarted (the app is `.accessory`, so there is no Dock/Cmd+Tab
@@ -50,10 +50,6 @@ final class StatusBarController {
         NotificationCenter.default.addObserver(
             self, selector: #selector(refreshMenu),
             name: .activeLayoutsChanged, object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(refreshMenu),
-            name: .licenseStatusChanged, object: nil
         )
     }
 
@@ -102,7 +98,6 @@ final class StatusBarController {
         return SwitchBlockReason.resolve(
             health: keyboardMonitor.health,
             isAutoSwitchEnabled: prefsService.isAutoSwitchEnabled,
-            isEntitled: LicenseService.shared.isEntitled,
             secureInputAppName: keyboardMonitor.health == .secureInput ? frontmostAppLocalizedName() : nil,
             appProfileBlock: appProfileBlock(),
             gameDetected: gameActive,
@@ -312,7 +307,7 @@ final class StatusBarController {
         )
         vm.onOpenAbout = { [weak self] in self?.openAbout() }
         vm.onOpenExceptions = { [weak self] in self?.openExceptions() }
-        vm.onOpenLicense = { [weak self] in self?.openLicense() }
+        vm.onOpenAuthorLinks = { [weak self] in self?.openAuthorLinks() }
 
         // Sizes itself to its content, so switching tabs changes the window's
         // own height — see SmoothResizeWindow for why that has to be animated
@@ -384,26 +379,26 @@ final class StatusBarController {
         aboutWindow = window
     }
 
-    @objc private func openLicense() {
-        if let w = licenseWindow, w.isVisible {
+    @objc private func openAuthorLinks() {
+        if let w = authorWindow, w.isVisible {
             w.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 360),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false
         )
-        window.title = "Лицензия"
-        window.contentView = NSHostingView(rootView: LicenseView().gammaThemedRoot())
+        window.title = "Автор и проекты"
+        window.contentView = NSHostingView(rootView: AuthorLinksView().gammaThemedRoot())
         window.center()
         window.isReleasedWhenClosed = false
         trackWindowForDockIcon(window)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        licenseWindow = window
+        authorWindow = window
     }
 
     /// Registers a freshly-created window with `DockIconController` (Dock

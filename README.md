@@ -96,6 +96,8 @@ and release gates are in [`docs/VOICE_SPIKE.md`](docs/VOICE_SPIKE.md).
 
 ## Privacy
 
+⚠️Снято в 0.10.0: приложение бесплатное, сетевых вызовов нет.
+
 All typing analysis runs locally: no analytics, no keystroke logging. The
 license check transmits a stable Mac identifier and the app version for trial,
 activation, and subscription validation. It never transmits typed text.

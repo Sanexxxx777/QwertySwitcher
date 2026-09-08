@@ -351,7 +351,6 @@ private enum MainTab: String, CaseIterable, Identifiable {
 
 struct MainView: View {
     @ObservedObject var viewModel: MainViewModel
-    @ObservedObject private var licenseService = LicenseService.shared
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedTab: MainTab = .status
@@ -972,7 +971,7 @@ struct MainView: View {
             .foregroundStyle(theme.accent)
 
             Text(viewModel.settingsBackupMessage
-                ?? "Настройки, исключения и профили. Лицензия, логи и набранный текст не экспортируются.")
+                ?? "Настройки, исключения и профили. Логи и набранный текст не экспортируются.")
                 .font(.appText(10))
                 .foregroundStyle(theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1022,11 +1021,11 @@ struct MainView: View {
             FooterButton(icon: "info.circle", title: "О программе") {
                 viewModel.onOpenAbout?()
             }
-            LicenseBadge(
-                color: licenseBadgeColor, icon: licenseBadgeIcon, text: licenseService.statusSummary,
-                help: "Статус подписки и активация ключа"
+            FooterButton(
+                icon: "person.crop.circle", title: "Автор и проекты",
+                help: "Портфолио автора, витрина и Telegram"
             ) {
-                viewModel.onOpenLicense?()
+                viewModel.onOpenAuthorLinks?()
             }
 
             Spacer()
@@ -1036,13 +1035,12 @@ struct MainView: View {
     }
 
     /// Falls back to the bare version number (drops the "Версия" word) when the footer
-    /// is too tight for the full label — e.g. a long license badge ("Лицензия · 365
-    /// дн.") squeezing this trailing item. `FooterButton`/`LicenseBadge` are already
-    /// `.fixedSize`, so any width shortfall used to land entirely on this Text, which
-    /// had no such protection and wrapped mid-word ("Вер / сия / 0.4 / .9" — the
-    /// reported bug). `ViewThatFits` now picks whichever candidate fits the space left
-    /// after the fixed-size siblings, at any window width, and both candidates are
-    /// still `.lineLimit(1)` so even a starved worst case clips instead of wrapping.
+    /// is too tight for the full label — the footer buttons are already `.fixedSize`,
+    /// so any width shortfall used to land entirely on this Text, which had no such
+    /// protection and wrapped mid-word ("Вер / сия / 0.4 / .9" — the reported bug).
+    /// `ViewThatFits` now picks whichever candidate fits the space left after the
+    /// fixed-size siblings, at any window width, and both candidates are still
+    /// `.lineLimit(1)` so even a starved worst case clips instead of wrapping.
     private var versionLabel: some View {
         ViewThatFits(in: .horizontal) {
             Text("Версия \(appVersion)")
@@ -1057,19 +1055,6 @@ struct MainView: View {
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
         }
-    }
-
-    /// Trial → amber, active subscription → green, expired → red (все приглушённые).
-    private var licenseBadgeColor: Color {
-        guard licenseService.isEntitled else { return theme.accentRed }
-        let isTrial = licenseService.currentPayload?.plan == "trial" || licenseService.isProvisionalTrial
-        return isTrial ? theme.accentAmber : theme.accentGreen
-    }
-
-    /// "All ok" seal (active or in-grace trial) vs. attention mark (expired) —
-    /// same SF-Symbols vocabulary as the hero badge.
-    private var licenseBadgeIcon: String {
-        licenseService.isEntitled ? "checkmark.seal.fill" : "exclamationmark.circle.fill"
     }
 }
 
@@ -1206,40 +1191,6 @@ private struct FooterButton: View {
                 .padding(.vertical, 5)
                 .background(isHovered ? theme.bgCardHover : Color.clear)
                 .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isHovered)
-        .help(help ?? "")
-    }
-}
-
-/// License status as a muted colored pill — SF Symbol seal/attention mark
-/// (amber=trial / green=active / red=expired), no plain color dot.
-private struct LicenseBadge: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let color: Color
-    let icon: String
-    let text: String
-    var help: String? = nil
-    let action: () -> Void
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: icon).font(.system(size: 9, weight: .semibold))
-                Text(text)
-                    .font(.appText(11, weight: .medium))
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-            }
-            .foregroundStyle(color)
-            .padding(.horizontal, Space.sm)
-            .padding(.vertical, 5)
-            .background(color.opacity(isHovered ? 0.18 : 0.12))
-            .clipShape(Capsule())
-            .overlay(Capsule().stroke(color.opacity(0.3), lineWidth: 1))
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }

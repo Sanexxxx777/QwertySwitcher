@@ -328,9 +328,7 @@ final class HotkeyManager {
 
     // MARK: - Double Shift: convert selection / last word / word before caret
 
-    /// Priority chain (each step gated by `LicenseService.isEntitled` like
-    /// every other conversion, except the final Undo fallback — Undo is
-    /// deliberately never license-gated, see CLAUDE.md):
+    /// Priority chain:
     ///  1. Selected text via the Accessibility API (no side effect).
     ///  2. Internal buffer + last-word history — BEFORE the clipboard probe:
     ///     the probe's synthetic Cmd+C reaches kitty-protocol terminals as a
@@ -394,7 +392,6 @@ final class HotkeyManager {
     }
 
     private func convertAXSelection() -> AXSelectionOutcome {
-        guard LicenseService.shared.isEntitled else { return .noSelection }
         guard let element = AXTextSelectionService.focusedElement(),
               let selected = AXTextSelectionService.selectedText(element) else { return .noSelection }
         // From here on a selection demonstrably exists, so every failure below
@@ -451,7 +448,7 @@ final class HotkeyManager {
         }
         ClipboardSelectionProbe.probe(toPid: overlayPid) { [weak self] copied, snapshot in
             guard let self else { return }
-            if let copied, !copied.isEmpty, LicenseService.shared.isEntitled,
+            if let copied, !copied.isEmpty,
                let target = self.convertedReplacement(for: copied) {
                 self.pasteConverted(target.text, restoring: snapshot, toPid: overlayPid)
                 self.recordDoubleShiftSuccess(via: "clipboard selection", length: copied.count, targetLayout: target.layout)
@@ -465,7 +462,7 @@ final class HotkeyManager {
             }
             if copied != nil {
                 // We copied a real selection but couldn't/shouldn't convert it
-                // (license, URL-like text, already correct) — restore what we
+                // (URL-like text, already correct) — restore what we
                 // clobbered before falling through to the next path.
                 snapshot.restore(to: NSPasteboard.general)
             }
@@ -486,7 +483,6 @@ final class HotkeyManager {
     }
 
     private func convertWordBeforeCaret() -> Bool {
-        guard LicenseService.shared.isEntitled else { return false }
         guard let element = AXTextSelectionService.focusedElement(),
               let (text, caret) = AXTextSelectionService.valueAndCaret(element),
               let extracted = CaretWordExtractor.wordBeforeCaret(text: text, caretUTF16Offset: caret) else { return false }

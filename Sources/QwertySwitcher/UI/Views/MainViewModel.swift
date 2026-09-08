@@ -15,7 +15,7 @@ final class MainViewModel: ObservableObject {
     private var isSyncingAutoSwitch = false
     var onOpenAbout: (() -> Void)?
     var onOpenExceptions: (() -> Void)?
-    var onOpenLicense: (() -> Void)?
+    var onOpenAuthorLinks: (() -> Void)?
 
     @Published var autoSwitchCount: Int = 0
     @Published var shiftSwitchCount: Int = 0
