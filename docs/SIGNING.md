@@ -65,6 +65,8 @@ xcrun notarytool store-credentials notarize-sasha \
 
 ## 3. Mac App Store
 
+⚠️Снято в 0.10.0: приложение бесплатное, сетевых вызовов нет.
+
 App Store-сборка подготовлена как отдельный sandboxed вариант:
 
 - `Resources/QwertySwitcher.appstore.entitlements` включает только App Sandbox;

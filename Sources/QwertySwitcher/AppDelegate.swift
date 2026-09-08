@@ -103,8 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSLog("[QwertySwitcher] v\(version) Started. Dictionary: \(dictionary.stats)")
         NSLog("[QwertySwitcher] Layouts: \(inputSourceManager.availableLayouts.map(\.name))")
         NSLog("[QwertySwitcher] Privacy: all input processed locally, never leaves the Mac. "
-            + "License check sends a device identifier and app version.")
-        LicenseService.shared.start()
+            + "No network access.")
 
         let layoutsStr = inputSourceManager.availableLayouts
             .map { "\($0.languageCode):\($0.name)" }.joined(separator: ",")
