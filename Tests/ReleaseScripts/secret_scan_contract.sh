@@ -35,20 +35,10 @@ grep -q 'release-secret-scan.sh.*DMG_STAGE' "$PROJECT_DIR/Scripts/make-dmg.sh" |
     exit 1
 }
 
-if grep -q 'String(key.prefix' "$PROJECT_DIR/Sources/QwertySwitcher/Services/LicenseService.swift"; then
-    echo "FAIL: license logs retain an activation-key prefix"
-    exit 1
-fi
-
-if grep -q 'licenseServerURL' "$PROJECT_DIR/Sources/QwertySwitcher/Services/LicenseService.swift"; then
-    echo "FAIL: production license endpoint remains UserDefaults-overridable"
-    exit 1
-fi
-
 PLIST="$PROJECT_DIR/Resources/PrivacyInfo.xcprivacy"
-if ! plutil -convert xml1 -o - "$PLIST" | grep -q 'NSPrivacyCollectedDataTypeDeviceID'; then
-    echo "FAIL: privacy manifest does not declare the transmitted device identifier"
+if plutil -convert xml1 -o - "$PLIST" | grep -q 'NSPrivacyCollectedDataTypeDeviceID'; then
+    echo "FAIL: privacy manifest declares a collected data type, but the app is offline (0.10.0+)"
     exit 1
 fi
 
-echo "PASS: release gates block credential files/material and license logs expose no key prefix"
+echo "PASS: release gates block credential files/material"

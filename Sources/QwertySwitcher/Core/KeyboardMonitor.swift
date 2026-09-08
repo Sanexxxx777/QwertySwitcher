@@ -698,7 +698,6 @@ final class KeyboardMonitor {
         // `else if` branches below and the `.noSwitch` bump call).
         let gameActive = gameMode.isActive(bundleID: activeAppBundleID)
         let canAutoCorrect = prefsService.isAutoSwitchEnabled
-            && LicenseService.shared.isEntitled
             && appProfile?.blockAutoSwitch != true
             && !gameActive
 
@@ -914,7 +913,6 @@ final class KeyboardMonitor {
 
         let snippetStarted = learned == nil
             && prefsService.isSnippetExpansionEnabled
-            && LicenseService.shared.isEntitled
             && pendingLeadingSymbols.isEmpty
             && !captured.isEmpty
             && expandSnippet(keystrokes: captured, trigger: trailing, triggerEvent: triggerEvent)
@@ -1645,7 +1643,7 @@ final class KeyboardMonitor {
     /// Returns true if a correction was applied. Called from Double Shift hotkey.
     @discardableResult
     func swapLastWordInBuffer() -> Bool {
-        guard !isPaused, LicenseService.shared.isEntitled else { return false }
+        guard !isPaused else { return false }
         if convertWholeRun() { return true }
         var keystrokes = buffer.currentWord()
         var trailing: String? = nil

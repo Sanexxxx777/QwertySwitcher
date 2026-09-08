@@ -96,9 +96,7 @@ swiftc \
     Sources/QwertySwitcher/Dictionary/WordDictionary.swift \
     Sources/QwertySwitcher/Models/Language.swift \
     Sources/QwertySwitcher/Services/AutoStartService.swift \
-    Sources/QwertySwitcher/Services/DeviceIdentity.swift \
     Sources/QwertySwitcher/Services/ExceptionsService.swift \
-    Sources/QwertySwitcher/Services/LicenseService.swift \
     Sources/QwertySwitcher/Services/OnboardingState.swift \
     Sources/QwertySwitcher/Services/PerAppLayoutService.swift \
     Sources/QwertySwitcher/Services/PermissionsService.swift \
