@@ -363,6 +363,22 @@ final class KeyboardMonitor {
         personalFreqStore.isEnabled = enabled
     }
 
+    // MARK: - Read-only snapshot for the opt-in updater's idle policy (0.11.0)
+
+    /// Seconds since the last keystroke the tap saw (huge when nothing was
+    /// typed since launch), whether game mode is active for the frontmost
+    /// app, and whether a replacement transaction is in flight. Read on the
+    /// main thread by the update service before it decides to install —
+    /// never from inside the tap callback. Exposes existing private state
+    /// only; nothing here changes behavior.
+    var updateSafetySnapshot: (idleSeconds: TimeInterval, gameModeActive: Bool, replacing: Bool) {
+        (
+            idleSeconds: CFAbsoluteTimeGetCurrent() - lastKeyTime,
+            gameModeActive: gameMode.isActiveForFrontmost(),
+            replacing: isPaused
+        )
+    }
+
     @objc private func appDidActivate(_ notification: Notification) {
         if !CommandLine.arguments.contains("--test") {
             activeAppBundleID = (
