@@ -369,6 +369,11 @@ final class KeyboardMonitor {
                 notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             )?.bundleIdentifier
         }
+        // Verbose-only, logged on EVERY activation (not just when a buffer is
+        // wiped): the 10.09.2026 field analysis could not attribute a single
+        // correction or Double Shift to an app because nothing in the trace
+        // named the frontmost bundle. A bundle id is metadata, never text.
+        DebugLog.shared.log("KM", "app activated: app=\(activeAppBundleID ?? "?")", level: .verbose)
         invalidateEditingContext(reason: "app-activated")
     }
 
@@ -2210,7 +2215,19 @@ final class KeyboardMonitor {
         model: Int, measured: Int, modelWord: String, screenWord: String
     ) -> Bool {
         guard measured > model, measured - model <= 2, !modelWord.isEmpty else { return false }
-        return screenWord.hasSuffix(modelWord)
+        guard screenWord.hasSuffix(modelWord) else { return false }
+        // Field 10.09.2026 (`net=-1`): "r" typed in en, layout switched
+        // externally, "у" typed in ru, Double Shift — the screen word "rу"
+        // ends with the modelled "у", so the erase was widened to 2 while the
+        // payload came from the 1-key buffer and the user's own "r" was eaten.
+        // A dropped-keystroke artifact repeats OUR typing, i.e. letters of
+        // the same script as the model; a different script (or a non-letter)
+        // in the extra prefix is text the user already had — asymmetry rule:
+        // keep the modelled length and leave a stray character behind rather
+        // than erase real text.
+        let extra = String(screenWord.dropLast(modelWord.count))
+        guard !extra.isEmpty, extra.allSatisfy(\.isLetter) else { return false }
+        return !LanguageDetector.isMixedScript(extra + modelWord)
     }
 
     // MARK: - Callback-duration watchdog
