@@ -42,7 +42,12 @@ final class HotkeyManager {
 
     // Double-tap detection
     private var pendingSingleShift: DispatchWorkItem?
-    private let doubleTapWindow: CFAbsoluteTime = 0.45  // 450ms — give user more room for 2nd tap
+    // 600ms (was 450): field 08–10.09.2026 — 15 lone Shift taps landed at
+    // 450–600ms and 7 of them were immediately repeated as a successful
+    // Double Shift, i.e. the gesture was meant and missed. Two bare taps with
+    // no key in between is all the window gates, so the wider window costs
+    // nothing on ordinary typing.
+    private let doubleTapWindow: CFAbsoluteTime = 0.6
     private let maxShiftHoldForTap: CFAbsoluteTime = 0.4 // 400ms — users often hold slightly longer
 
     private var lastCapsLockEventTime: CFAbsoluteTime = 0

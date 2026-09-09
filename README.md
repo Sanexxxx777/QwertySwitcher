@@ -46,7 +46,7 @@ Full pipeline, scoring formula and file layout: [`ARCHITECTURE.md`](ARCHITECTURE
 | Shortcut | Action |
 |---|---|
 | Single Shift (tap) | Switch to the next layout |
-| Double Shift (tap × 2, < 350 ms) | Convert the last typed word |
+| Double Shift (tap × 2, < 600 ms) | Convert the last typed word |
 | Left+Right Shift | Toggle auto-switching on/off |
 | CapsLock | Switch layout |
 | Cmd+Shift+V | Paste without formatting |

@@ -112,6 +112,12 @@ enum TestRunner {
         GameModeSourceGuardTests.run()
         DetectorExactnessTests.run()
         AuthorLinksViewTests.run()
+        ResyncExtendGuardTests.run()
+        StorageMigrationV2Tests.run()
+        IslandTests.run()
+        ShortTokenTests.run()
+        BigramTablesTests.run()
+        UpdatesTests.run()
         print("---")
         print("\(passed) passed, \(failed) failed, \(skipped) skipped")
         return failed == 0 ? 0 : 1
@@ -4975,22 +4981,18 @@ enum RunResyncPredicateTests {
             ),
             "screen word does NOT end with the typed word → reject"
         )
-        // "x/ghb" ends with "ghb" — hasSuffix is a plain string check and
-        // cannot tell that "/" separates an unrelated path segment from the
-        // typed word. The design does not pretend otherwise: this predicate
-        // alone would accept it (delta=1 ≤ 2, suffix matches). What actually
-        // keeps "x/ghb"-style cases safe is that a "/" makes the on-screen
-        // text non-letters-only, which routes it through `convertWholeRun`
-        // (whole-run conversion) rather than through this scored-path
-        // predicate at all — a different guard, not a smarter suffix check.
-        // Documenting the honest behavior here rather than inventing a
-        // protection this function doesn't have.
+        // "x/ghb" ends with "ghb". Until 0.11.0 this predicate accepted it
+        // (delta=1 ≤ 2, suffix matches) and relied on `convertWholeRun`
+        // routing non-letter screen text away from the scored path. Since
+        // the 10.09.2026 field case (`net=-1`: Latin "r" before a Cyrillic
+        // model "у" was eaten) the extra prefix itself must be same-script
+        // LETTERS — a "/" is neither, so the predicate now refuses on its
+        // own, independent of the routing guard. See ResyncExtendGuardTests.
         TestRunner.assertTrue(
-            KeyboardMonitor.shouldExtendToScreen(
+            !KeyboardMonitor.shouldExtendToScreen(
                 model: 3, measured: 4, modelWord: "ghb", screenWord: "x/ghb"
             ),
-            "hasSuffix alone accepts \"x/ghb\" ending in \"ghb\" at delta=1 — the actual guard against this"
-                + " case is convertWholeRun routing non-letter screen text away from this predicate entirely"
+            "\"x/ghb\": a non-letter in the extra prefix is not a keystroke artifact → reject (0.11.0)"
         )
         TestRunner.assertTrue(
             !KeyboardMonitor.shouldExtendToScreen(
