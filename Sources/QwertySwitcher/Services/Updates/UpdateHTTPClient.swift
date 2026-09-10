@@ -11,6 +11,7 @@ final class UpdateHTTPClient: NSObject, URLSessionDataDelegate {
         case tooLarge
         case badStatus(Int)
         case transport(String)
+        case cancelled
     }
 
     private let maxBytes: Int
@@ -78,10 +79,28 @@ final class UpdateHTTPClient: NSObject, URLSessionDataDelegate {
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        defer { self.session = nil }
+        // MINOR fix (security review): `session` used to just be dropped —
+        // Apple's docs call `finishTasksAndInvalidate`/`invalidateAndCancel`
+        // the correct way to release a delegate-based session's resources.
+        defer {
+            self.session = nil
+            session.finishTasksAndInvalidate()
+        }
         if let error {
             let nsError = error as NSError
-            if nsError.code == NSURLErrorCancelled { return } // already reported by finish()
+            if nsError.code == NSURLErrorCancelled {
+                // MINOR fix (security review): this used to `return` WITHOUT
+                // calling `finish(...)`. That's a safe no-op for the ONE
+                // cancellation this class triggers itself (the `.tooLarge`
+                // path already calls `finish` before `dataTask.cancel()`, so
+                // `finish`'s own `guard !finished` absorbs the duplicate) —
+                // but any OTHER source of cancellation (system-level, a
+                // future caller) left `completion` never called at all,
+                // hanging whoever's waiting on it (`UpdateController` stuck
+                // in `.checking` forever). Always resolve the callback.
+                finish(.failure(.cancelled))
+                return
+            }
             finish(.failure(.transport(nsError.localizedDescription)))
             return
         }

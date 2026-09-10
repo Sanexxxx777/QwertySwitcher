@@ -37,14 +37,35 @@ enum UpdatePolicy {
         return true
     }
 
+    /// Whether a MANUAL "Установить" click may install right now. Only the
+    /// two gates that protect against actively destroying in-progress work
+    /// apply — idle time and Game Mode exist to keep the automatic path
+    /// silent/unsurprising, not to block an explicit user action.
+    static func shouldInstallManuallyNow(secureInput: Bool, replacing: Bool) -> Bool {
+        !secureInput && !replacing
+    }
+
+    /// Whether a NEW feed check may start. The 24h timer and the manual
+    /// button both funnel through this so a scheduled tick can never stomp
+    /// an already in-flight `.downloading`/`.installing`, and a manual click
+    /// during one is a no-op rather than a second, racing `stage()` call.
+    enum ActivityState { case idle, checking, downloading, installing }
+
+    static func canStartNewCheck(current: ActivityState) -> Bool {
+        current == .idle
+    }
+
     enum Outcome: Equatable {
         case upToDate
         case available(UpdateManifest)
         /// Signed, well-formed, but its own `validUntil` is in the past —
-        /// shown, never auto-installed.
-        case feedStale
-        /// `minSystemVersion` is newer than the running macOS — never offered.
-        case systemTooOld
+        /// shown, never auto-installed. Carries the manifest so the UI can
+        /// report how long ago the feed itself expired.
+        case feedStale(UpdateManifest)
+        /// `minSystemVersion` is newer than the running macOS — never
+        /// offered. Carries the manifest so the UI can name the version and
+        /// the macOS floor it needs.
+        case systemTooOld(UpdateManifest)
     }
 
     /// `build` must be strictly greater than the installed build AND not
@@ -60,10 +81,10 @@ enum UpdatePolicy {
         now: Date
     ) -> Outcome {
         if let validUntil = parseISO8601(manifest.validUntil), validUntil < now {
-            return .feedStale
+            return .feedStale(manifest)
         }
         guard systemVersionSatisfies(minimum: manifest.minSystemVersion, current: currentSystemVersion) else {
-            return .systemTooOld
+            return .systemTooOld(manifest)
         }
         guard manifest.build > installedBuild, manifest.build >= lastSeenBuild else {
             return .upToDate

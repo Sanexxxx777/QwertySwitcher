@@ -149,6 +149,54 @@ diff -r "$SNAPSHOT3" "$TARGET3" >/dev/null 2>&1 \
 
 rm -f "$QSW_UPDATES_ROOT_DIR/.transaction"
 
+# ── Case 4: a renamed target bundle is refused before anything is touched
+#    (security review item 17 — install.sh's `--dest` is a PARENT directory,
+#    the bundle name inside it is hardcoded, so a renamed target would get a
+#    second copy built next to it instead of being updated) ──
+TARGET4="$WORK/case4/dest/Not Qwerty Switcher.app"
+STAGE4="$WORK/case4/stage"
+mkdir -p "$(dirname "$TARGET4")" "$STAGE4"
+build_fixture_app "$TARGET4" "installed-v1"
+build_fixture_app "$STAGE4/Qwerty Switcher.app" "staged-v2"
+SNAPSHOT4="$WORK/case4-before-snapshot"
+cp -R "$TARGET4" "$SNAPSHOT4"
+
+"$DEBUG_BIN" --install-update --stage "$STAGE4" --target "$TARGET4" --parent-pid 0 \
+    && fail "a target not named 'Qwerty Switcher.app' should not report success"
+diff -r "$SNAPSHOT4" "$TARGET4" >/dev/null 2>&1 \
+    || fail "a renamed target was modified despite the name guard"
+
+# ── Case 5: --parent-pid 0 is refused OUTSIDE test mode (security review
+#    item 19 — accepting it in production would skip waiting for the
+#    outgoing app to quit and skip killing stragglers) ──
+TARGET5="$WORK/case5/dest/Qwerty Switcher.app"
+STAGE5="$WORK/case5/stage"
+mkdir -p "$(dirname "$TARGET5")" "$STAGE5"
+build_fixture_app "$TARGET5" "installed-v1"
+build_fixture_app "$STAGE5/Qwerty Switcher.app" "staged-v2"
+SNAPSHOT5="$WORK/case5-before-snapshot"
+cp -R "$TARGET5" "$SNAPSHOT5"
+
+if env -u QSW_UPDATE_HELPER_TEST_MODE "$DEBUG_BIN" --install-update --stage "$STAGE5" --target "$TARGET5" --parent-pid 0; then
+    fail "--parent-pid 0 outside test mode should not report success"
+fi
+diff -r "$SNAPSHOT5" "$TARGET5" >/dev/null 2>&1 \
+    || fail "target was modified despite --parent-pid 0 being refused outside test mode"
+
+# ── Structural: the transaction marker is cleared in SOURCE ORDER before the
+#    success path's own `open(target)` call — the CRITICAL fix (security
+#    review item 1) for the marker being live in the window between a
+#    confirmed-good sync and the relaunch. ──
+HELPER_SOURCE_FOR_ORDER="$PROJECT_DIR/Sources/QwertySwitcher/Services/Updates/UpdateInstallerMode.swift"
+finish_line=$(grep -n 'finishTransaction(markerURL: markerURL, log: log)' "$HELPER_SOURCE_FOR_ORDER" | head -1 | cut -d: -f1 || true)
+open_call_line=$(grep -n '^        open(target)$' "$HELPER_SOURCE_FOR_ORDER" | head -1 | cut -d: -f1 || true)
+[ -n "$finish_line" ] || fail "UpdateInstallerMode.swift does not clear the transaction marker on the success path before open()"
+[ -n "$open_call_line" ] || fail "could not locate the success path's open(target) call"
+[ "$finish_line" -lt "$open_call_line" ] \
+    || fail "the transaction marker is cleared AFTER open(target) is called on the success path, not before"
+
+rm -f "$QSW_UPDATES_ROOT_DIR/.transaction"
+
 # ── Source guards (also unit-tested in UpdatesTests.swift; re-checked here
 #    as a release-time gate independent of the Swift suite) ──
 HELPER_SOURCE="$PROJECT_DIR/Sources/QwertySwitcher/Services/Updates/UpdateInstallerMode.swift"
