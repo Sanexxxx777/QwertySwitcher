@@ -278,7 +278,12 @@ enum UpdateInstallerMode {
     private static func runRsync(source: URL, destination: URL) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/rsync")
-        process.arguments = ["-a", "--delete", source.path + "/", destination.path + "/"]
+        // --checksum: the rollback copies the backup over a half-updated
+        // bundle; a file the partial sync replaced with one of the same size
+        // and mtime (field e2e 10.09.2026, see install.sh) would otherwise be
+        // skipped by rsync's quick-check and the rollback would not be
+        // byte-identical.
+        process.arguments = ["-a", "--checksum", "--delete", source.path + "/", destination.path + "/"]
         do { try process.run() } catch { return false }
         process.waitUntilExit()
         return process.terminationStatus == 0

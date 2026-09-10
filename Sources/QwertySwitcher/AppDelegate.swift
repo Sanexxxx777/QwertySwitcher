@@ -83,7 +83,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             safetySnapshotProvider: { [weak self] in
                 self?.keyboardMonitor?.updateSafetySnapshot ?? (idleSeconds: 0, gameModeActive: false, replacing: true)
             },
-            secureInputProvider: { [weak self] in self?.updateSecureInputDetector.isSecureInput ?? true }
+            secureInputProvider: { [weak self] in self?.updateSecureInputDetector.isSecureInput ?? true },
+            screenLockedProvider: { ScreenLockState.isLocked }
         )
         updateController.start()
 

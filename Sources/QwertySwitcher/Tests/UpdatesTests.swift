@@ -13,6 +13,7 @@ enum UpdatesTests {
         versionOrdering()
         staleOutcomesCarryManifest()
         policyChecks()
+        screenLockPolicy()
         manualInstallGate()
         checkConcurrencyGate()
         limits()
@@ -280,6 +281,30 @@ enum UpdatesTests {
     /// stands between a click and `performInstall`. Idle time and Game Mode
     /// are deliberately absent: those only keep the SILENT automatic path
     /// unsurprising, not an explicit user action.
+    /// Field e2e 10.09.2026: with the Mac locked, `loginwindow` holds secure
+    /// input for the whole session and the plain gates deferred the install
+    /// for hours. A locked screen is the safest window — only an in-flight
+    /// replacement still blocks.
+    private static func screenLockPolicy() {
+        TestRunner.section("Updates — locked screen is a safe auto-install window")
+        TestRunner.assertTrue(
+            UpdatePolicy.shouldInstallNow(autoInstall: true, idleSeconds: 0, secureInput: true, replacing: false, gameModeActive: true, screenLocked: true),
+            "locked screen overrides idle/secure-input/game-mode gates"
+        )
+        TestRunner.assertTrue(
+            !UpdatePolicy.shouldInstallNow(autoInstall: true, idleSeconds: 0, secureInput: true, replacing: true, gameModeActive: false, screenLocked: true),
+            "an in-flight replacement still blocks even on a locked screen"
+        )
+        TestRunner.assertTrue(
+            !UpdatePolicy.shouldInstallNow(autoInstall: false, idleSeconds: 0, secureInput: false, replacing: false, gameModeActive: false, screenLocked: true),
+            "auto-install off: a locked screen never installs on its own"
+        )
+        TestRunner.assertTrue(
+            !UpdatePolicy.shouldInstallNow(autoInstall: true, idleSeconds: 200, secureInput: true, replacing: false, gameModeActive: false, screenLocked: false),
+            "unlocked screen keeps the secure-input gate (default parameter)"
+        )
+    }
+
     private static func manualInstallGate() {
         TestRunner.section("Updates — UpdatePolicy.shouldInstallManuallyNow")
 
@@ -656,6 +681,23 @@ enum UpdatesTests {
         TestRunner.assertTrue(
             launcherCode.contains("POSIX_SPAWN_SETSID"),
             "the helper is spawned detached (POSIX_SPAWN_SETSID), so it survives the parent's own termination"
+        )
+
+        // Field e2e 10.09.2026: the controller creates `UpdateStager` as a
+        // local and drops it right after `stage(...)` returns; a `[weak self]`
+        // in the download completion was nil by the time the zip arrived, the
+        // closure returned silently and the update sat in "downloading"
+        // forever with no log line. The one-shot stager must hold itself
+        // until its own completion.
+        guard let stagerSource = try? String(contentsOf: sourcesRoot.appendingPathComponent("UpdateStager.swift"), encoding: .utf8) else {
+            TestRunner.skip("UpdateStager.swift not readable — structural guard skipped")
+            return
+        }
+        let stagerCode = codeOnly(stagerSource)
+        let fetchLine = stagerCode.split(separator: "\n").first { $0.contains("client.fetch(archiveURL)") }
+        TestRunner.assertTrue(
+            fetchLine != nil && !(fetchLine ?? "").contains("[weak self]"),
+            "UpdateStager.stage's download completion captures the stager strongly — a weak capture dies before the download completes"
         )
     }
 

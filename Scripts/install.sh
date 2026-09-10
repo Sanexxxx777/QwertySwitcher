@@ -218,7 +218,14 @@ mkdir -p "$DEST_DIR"
 # old payload, i.e. exactly the broken-seal state this script exists to avoid.
 # `set -e` alone would abort here silently, before the step [5/5] gate could
 # report it — so the failure is reported explicitly instead.
-if ! rsync -a --delete "$SOURCE_APP/" "$DEST_APP/"; then
+# --checksum (field e2e 10.09.2026): rsync's default quick-check skips a file
+# whose size AND mtime already match — a re-signed executable of the same
+# size, signed within the same second the copy was taken, was left as the OLD
+# binary while its Info.plist was replaced, so the installed bundle failed
+# the [5/5] seal check ("invalid Info.plist") and the updater rolled back.
+# Content comparison costs a checksum over ~14 MB — nothing next to the
+# permission reset a broken seal would cause.
+if ! rsync -a --checksum --delete "$SOURCE_APP/" "$DEST_APP/"; then
     echo "✗ Sync failed — $DEST_APP is now HALF-UPDATED and its seal is broken."
     echo "  Do not launch it: macOS will ask for Accessibility / Input Monitoring"
     echo "  again while the bundle stays in this state."

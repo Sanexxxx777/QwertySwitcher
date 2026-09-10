@@ -57,8 +57,15 @@ final class UpdateStager {
             return
         }
         let client = UpdateHTTPClient(maxBytes: maxDownloadBytes, userAgent: userAgent)
-        client.fetch(archiveURL) { [weak self] result in
-            guard let self else { return }
+        // Strong capture on purpose (field e2e 10.09.2026): the controller
+        // creates the stager as a local and drops it right after this call,
+        // so a `[weak self]` here was nil by the time the 4 MB zip had
+        // arrived — the closure returned silently and `completion` was never
+        // called: status stuck in "downloading", no log line, no stage dir.
+        // A one-shot object holding itself until its own completion is the
+        // intended lifetime; there is no cycle (the client is released after
+        // `finish`).
+        client.fetch(archiveURL) { result in
             switch result {
             case .failure(let error):
                 completion(.failure(.network(error)))
