@@ -147,7 +147,15 @@ final class InstantCorrectionAnalyzer {
         // reading (no vowel — "работа"=hf,jnf, "привет"=ghbdtn) is untouched,
         // and nil bigrams (prefix index still building) leave the gate
         // silent — never blocking on a guess.
-        if let bigrams = dictionary.possibleBigrams(language: currentLayout.languageCode),
+        // `plausibleBigrams`, not `possibleBigrams` — this is the "does the
+        // own reading look enough like a real word to justify staying
+        // SILENT and waiting for the boundary path" question, same family
+        // as junk-override's target-side `isClean` (see
+        // `WordDictionary.plausibleBigramSets`'s doc comment: a single
+        // "occurs in >=1 word" table let `yjds` ("новы" on en) pass as
+        // plausible English and silenced 1372/1444 junk-gate checks over
+        // 1.5 days, field data 08-10.09.2026).
+        if let bigrams = dictionary.plausibleBigrams(language: currentLayout.languageCode),
            JunkMeter.isClean(currentText, language: currentLayout.languageCode, possibleBigrams: bigrams) {
             return (nil, .junkGate)
         }

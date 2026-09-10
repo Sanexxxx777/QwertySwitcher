@@ -262,12 +262,18 @@ def score_word(word, lang):
 #                      Используется ТОЛЬКО clean() — цель junk-override /
 #                      own-reading гейт instant-пути (instant_junk_gate_sim.py
 #                      импортирует этот же fs.clean).
-# PLAUSIBLE_MIN_WORDS задаётся снаружи (не трогая дефолт=1=старое поведение):
+# PLAUSIBLE_MIN_WORDS defaults to 8 (10.09.2026 — K-sweep passed every gate
+# the stand measures: 0 FP on the honest corpora, >=85% suppression of the
+# false ru->en/en->ru instant fires both directions, false switches/nonling/
+# dict-ru/OOV-en unchanged from the K=1 baseline; K>=13 fails suppression).
+# CLI/env override remain for re-sweeping if the bundled dictionaries change:
 #   CLI:  python3 false_switch_sim.py --plausible-min=50
 #   env:  QSW_PLAUSIBLE_MIN_WORDS=50 python3 false_switch_sim.py
-# Swift POSSIBLE-зеркало живёт в Dictionary/WordDictionary.swift
-# (possibleBigrams) — менять СИНХРОННО. PLAUSIBLE — research-стадия, в Swift
-# пока НЕ существует (эта пара стендов измеряет K ДО переноса).
+# Both tables now exist in Swift, kept SYNCHRONOUS with this file:
+# Dictionary/WordDictionary.swift `possibleBigrams`/`plausibleBigrams`
+# (built by `buildBigramTables`), `plausibleMinWords` == PLAUSIBLE_MIN_WORDS'
+# default (8). instant_junk_gate_sim.py picks this up transitively via
+# `fs.clean`/`fs.PLAUSIBLE` — no separate table there.
 # ============================================================================
 def _plausible_min_words():
     for _arg in sys.argv:
@@ -276,7 +282,7 @@ def _plausible_min_words():
     _env = os.environ.get("QSW_PLAUSIBLE_MIN_WORDS")
     if _env:
         return int(_env)
-    return 1
+    return 8
 
 
 PLAUSIBLE_MIN_WORDS = _plausible_min_words()
@@ -288,8 +294,21 @@ for _lang in ("ru", "en"):
     _counts = {}
     for _w in DICT[_lang]:
         if len(_w) >= 3:
+            # Count DISTINCT WORDS containing the bigram, not raw
+            # occurrences — a bigram repeated within one word (e.g. "ss" in
+            # "assess") must still count that word once, matching what the
+            # comment above (and the Swift mirror, `WordDictionary.
+            # buildBigramTables`) actually claims to measure: "occurs in N
+            # words". Verified empirically (10.09.2026) that this correction
+            # does not move the already-picked K=8: 337/646 en bigrams and
+            # 233/938 ru bigrams have a different raw count under the two
+            # methods, but ZERO of them cross the K=8 boundary on the
+            # bundled dictionaries — POSSIBLE/PLAUSIBLE at K=8 are
+            # byte-for-byte the same sets either way.
+            _seen_in_word = set()
             for _i in range(len(_w) - 1):
-                _bg = _w[_i:_i + 2]
+                _seen_in_word.add(_w[_i:_i + 2])
+            for _bg in _seen_in_word:
                 _counts[_bg] = _counts.get(_bg, 0) + 1
     BIGRAM_WORD_COUNTS[_lang] = _counts
     POSSIBLE[_lang] = {bg for bg, cnt in _counts.items() if cnt >= 1}

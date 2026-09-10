@@ -766,7 +766,12 @@ final class LanguageDetector {
     /// ("own-прочтение clean по JunkMeter") — same nil-degrades-to-false
     /// posture as `junkOverrideFires`/`learnedHitApplies`.
     func isCleanReading(_ core: String, language: String) -> Bool {
-        guard let bigrams = dictionary.possibleBigrams(language: language) else { return false }
+        // `plausibleBigrams`, not `possibleBigrams` — this asks "does the
+        // OWN reading look enough like a real word to count as a confirmed
+        // dictionary-quality bump", the same "should this stay SILENT/win
+        // as a plausible reading" question every other `isClean` call
+        // answers (see `WordDictionary.plausibleBigramSets`'s doc comment).
+        guard let bigrams = dictionary.plausibleBigrams(language: language) else { return false }
         return JunkMeter.isClean(core, language: language, possibleBigrams: bigrams)
     }
 
@@ -796,10 +801,15 @@ final class LanguageDetector {
     /// Scripts/research/false_switch_sim.py — the corpus numbers documented
     /// there (false switches, OOV recall, nonling false positives) are the
     /// authority on these thresholds, so keep both in sync on any change.
-    /// `possibleBigrams` availability is checked here rather than by the
-    /// callers because `junk`/`clean` need it to even run — nil from either
-    /// language degrades to "don't fire", never to "treat as impossible" or
-    /// "treat as always possible".
+    /// Bigram tables availability is checked here rather than by the callers
+    /// because `junk`/`clean` need it to even run — nil from either language
+    /// degrades to "don't fire", never to "treat as impossible" or "treat as
+    /// always possible". Two DIFFERENT tables, not the same one twice: `own`
+    /// asks "is this reading junk" (`possibleBigrams` — raising this bar
+    /// makes genuine typos harder to flag, the wrong direction), `target`
+    /// asks "does this look like a real word" (`plausibleBigrams` — see
+    /// `WordDictionary.plausibleBigramSets`'s doc comment for the field case
+    /// this split fixes).
     private func junkOverrideFires(
         ownCore: String, ownLang: String,
         targetCore: String, targetLang: String,
@@ -809,7 +819,7 @@ final class LanguageDetector {
         guard context != ownLang else { return false }
         guard scoreWord(ownCore, language: ownLang) == 0 else { return false }
         guard let ownBigrams = dictionary.possibleBigrams(language: ownLang),
-              let targetBigrams = dictionary.possibleBigrams(language: targetLang)
+              let targetBigrams = dictionary.plausibleBigrams(language: targetLang)
         else { return false }
         guard JunkMeter.isJunk(ownCore, language: ownLang, possibleBigrams: ownBigrams) else { return false }
         guard JunkMeter.isClean(targetCore, language: targetLang, possibleBigrams: targetBigrams) else { return false }
