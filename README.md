@@ -9,8 +9,9 @@ correct layout automatically.
 
 It's a from-scratch macOS analog of Punto Switcher / Caramba Switcher: menu-bar
 only (no Dock icon). All typing analysis is 100% local — keystrokes never
-leave the Mac; the only network call is a license check that sends a stable
-Mac identifier and the app version (14-day free trial, then a subscription key).
+leave the Mac. Network is used only if you enable update checks: once a day
+the app fetches a single JSON from shulgin.is-a.dev and sends nothing about
+you (see Privacy below). Free and offline since 0.10.0 — no license/trial.
 
 ## How it works
 
@@ -96,11 +97,16 @@ and release gates are in [`docs/VOICE_SPIKE.md`](docs/VOICE_SPIKE.md).
 
 ## Privacy
 
-⚠️Снято в 0.10.0: приложение бесплатное, сетевых вызовов нет.
+All typing analysis runs locally: no analytics, no keystroke logging.
+Free and offline since 0.10.0 — there is no license/trial/subscription
+network traffic anymore.
 
-All typing analysis runs locally: no analytics, no keystroke logging. The
-license check transmits a stable Mac identifier and the app version for trial,
-activation, and subscription validation. It never transmits typed text.
+Network is used only if you enable update checks: once a day the app fetches
+a single JSON manifest from shulgin.is-a.dev and sends nothing about you (no
+identifier, no telemetry). Installing an update stays a separate, manual
+opt-in toggle. See [`docs/SIGNING.md`](docs/SIGNING.md) for how that manifest
+is signed and verified before anything is installed.
+
 `PrivacyService` audits `UserDefaults` on launch for anything that looks like
 it could be leaking typed text.
 

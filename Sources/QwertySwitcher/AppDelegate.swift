@@ -18,12 +18,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var snippetService: SnippetService!
     private var onboardingController: OnboardingWindowController?
     private var healthTimer: Timer?
+    private var updateController: UpdateController!
+    /// Separate from whatever `KeyboardMonitor` uses internally — Core is
+    /// read-only for this wave, so the updater gets its own instance rather
+    /// than reaching into the monitor's private state.
+    private let updateSecureInputDetector = SecureInputDetector()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         StorageMigrationService.migrateIfNeeded()
         _ = PrivacyService.auditStorage()
 
         prefsService = PreferencesService()
+        UpdateStartupGuard.onNormalLaunchStarted(prefs: prefsService)
         timedPauseService = TimedPauseService(prefsService: prefsService)
         SoundService.prefs = prefsService
         statsService = StatisticsService()
@@ -72,6 +78,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.keyboardMonitor = keyboardMonitor
         keyboardMonitor.hotkeyManager = hotkeyManager
 
+        updateController = UpdateController(
+            prefsService: prefsService,
+            safetySnapshotProvider: { [weak self] in
+                self?.keyboardMonitor?.updateSafetySnapshot ?? (idleSeconds: 0, gameModeActive: false, replacing: true)
+            },
+            secureInputProvider: { [weak self] in self?.updateSecureInputDetector.isSecureInput ?? true }
+        )
+        updateController.start()
+
         statusBar = StatusBarController(
             statsService: statsService,
             prefsService: prefsService,
@@ -80,7 +95,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             inputSourceManager: inputSourceManager,
             perAppLayoutService: perAppLayoutService,
             timedPauseService: timedPauseService,
-            snippetService: snippetService
+            snippetService: snippetService,
+            updateController: updateController
         )
 
         // Status-bar escape hatch: onboarding can always be re-opened, so a
@@ -96,6 +112,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showOnboardingWindow()
         }
 
+        // Fresh installs (onboardingSeen still false) see this at their NEXT
+        // launch instead — a deliberate simplification, not a bug: piling a
+        // second alert on top of the onboarding window on day one is worse
+        // than asking a launch later.
+        if seen && !prefsService.updatesPromptSeen {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                self?.presentUpdateCheckPrompt()
+            }
+        }
+
         keyboardMonitor.refreshHealth()
         startHealthPolling()
 
@@ -103,7 +129,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSLog("[QwertySwitcher] v\(version) Started. Dictionary: \(dictionary.stats)")
         NSLog("[QwertySwitcher] Layouts: \(inputSourceManager.availableLayouts.map(\.name))")
         NSLog("[QwertySwitcher] Privacy: all input processed locally, never leaves the Mac. "
-            + "No network access.")
+            + "Network is used only if you enable update checks: once a day the app fetches "
+            + "a single JSON from shulgin.is-a.dev and sends nothing about you.")
 
         let layoutsStr = inputSourceManager.availableLayouts
             .map { "\($0.languageCode):\($0.name)" }.joined(separator: ",")
@@ -120,6 +147,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keyboardMonitor?.flushLearning()
         keyboardMonitor?.stop()
         statsService?.save()
+    }
+
+    // MARK: - Updates
+
+    /// One-time alert (see `updatesPromptSeen`): the answer sets
+    /// `updatesAutoCheck` and never asks again. Installation stays manual
+    /// until the owner separately flips it on in Settings.
+    private func presentUpdateCheckPrompt() {
+        guard !prefsService.updatesPromptSeen else { return }
+        let alert = NSAlert()
+        alert.messageText = "Проверять обновления автоматически?"
+        alert.informativeText = "Раз в сутки приложение запросит один файл с shulgin.is-a.dev. "
+            + "Ничего о вас не отправляется. Установка обновлений останется ручной, "
+            + "пока вы не включите её в настройках."
+        alert.addButton(withTitle: "Проверять")
+        alert.addButton(withTitle: "Не сейчас")
+        let response = alert.runModal()
+        prefsService.updatesAutoCheck = (response == .alertFirstButtonReturn)
+        prefsService.updatesPromptSeen = true
     }
 
     // MARK: - Onboarding

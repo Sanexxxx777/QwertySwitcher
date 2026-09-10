@@ -181,3 +181,24 @@ fi
 
 echo "PASS: install.sh updates the bundle in place, prunes orphans, gates on the signature and refuses bad input"
 echo "      identity-change gate: $identity_case"
+
+# ── 3. build.sh seals a copy of install.sh into Contents/Resources ─────────
+# UpdateInstallerMode (the opt-in updater's --install-update helper) runs a
+# COPY of install.sh taken from the STAGED bundle's own Contents/Resources —
+# if build.sh stopped sealing it in, every self-update would fail with "no
+# staged .app bundle" well before ever reaching an install.sh problem.
+BUILD_SCRIPT="$PROJECT_DIR/Scripts/build.sh"
+[ -f "$BUILD_SCRIPT" ] || fail "Scripts/build.sh is missing"
+BUILD_CODE_ONLY="$(grep -v '^[[:space:]]*#' "$BUILD_SCRIPT")"
+grep -q 'cp .*Scripts/install.sh.*Contents/Resources/install.sh' <<<"$BUILD_CODE_ONLY" \
+    || fail "build.sh does not copy Scripts/install.sh into Contents/Resources/install.sh"
+
+copy_line=$(grep -n 'cp .*Scripts/install.sh.*Contents/Resources/install.sh' "$BUILD_SCRIPT" | head -1 | cut -d: -f1 || true)
+sign_line=$(grep -n '^[[:space:]]*codesign --force --deep --options runtime \\$' "$BUILD_SCRIPT" | head -1 | cut -d: -f1 || true)
+[ -n "$copy_line" ] || fail "could not locate the install.sh copy step in build.sh"
+if [ -n "$sign_line" ]; then
+    [ "$copy_line" -lt "$sign_line" ] \
+        || fail "build.sh copies install.sh into the bundle AFTER signing — the seal would not cover it"
+fi
+
+echo "PASS: build.sh seals Scripts/install.sh into Contents/Resources before signing"

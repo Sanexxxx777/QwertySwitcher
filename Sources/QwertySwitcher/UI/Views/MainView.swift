@@ -814,6 +814,24 @@ struct MainView: View {
                     )
                     rowDivider
                     themeRow
+                    rowDivider
+                    SettingToggleRow(
+                        icon: "arrow.down.circle",
+                        title: "Проверять обновления автоматически",
+                        subtitle: "раз в сутки, один запрос к shulgin.is-a.dev, без данных о вас",
+                        isOn: $viewModel.isUpdatesAutoCheckEnabled
+                    )
+                    rowDivider
+                    SettingToggleRow(
+                        icon: "checkmark.circle",
+                        title: "Устанавливать обновления автоматически",
+                        subtitle: "когда вы не печатаете; права доступа сохраняются",
+                        isOn: $viewModel.isUpdatesAutoInstallEnabled
+                    )
+                    .disabled(!viewModel.isUpdatesAutoCheckEnabled)
+                    .opacity(viewModel.isUpdatesAutoCheckEnabled ? 1 : 0.4)
+                    rowDivider
+                    UpdateStatusRow(viewModel: viewModel)
                 }
             }
 
@@ -933,6 +951,7 @@ struct MainView: View {
                 HStack(spacing: Space.md) {
                     Button("Показать лог") { viewModel.openLogFile() }
                     Button("Открыть папку") { viewModel.revealLogFolder() }
+                    Button("Собрать отчёт") { viewModel.collectDiagnosticsReport() }
                     Spacer()
                     Text("хранится 5 дней")
                         .font(.appText(10))
@@ -941,6 +960,13 @@ struct MainView: View {
                 .buttonStyle(.borderless)
                 .font(.appText(11, weight: .medium))
                 .foregroundStyle(theme.accent)
+
+                if let diagnosticsMessage = viewModel.diagnosticsMessage {
+                    Text(diagnosticsMessage)
+                        .font(.appText(10))
+                        .foregroundStyle(theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
                 ScrollView {
                     Text(viewModel.logTail.isEmpty ? "Пока пусто" : viewModel.logTail)
@@ -1268,6 +1294,49 @@ private struct SettingToggleRow: View {
         .padding(.horizontal, Space.md)
         .padding(.vertical, Space.sm)
         .accessibilityHint(help ?? subtitle)
+    }
+}
+
+/// Status line + action button for the opt-in updater. A dedicated
+/// `@ObservedObject` on `UpdateController` (rather than reading it through
+/// `viewModel`, a plain `ObservableObject` wrapper) is what makes this row
+/// repaint the moment `UpdateController.status` changes — a background check
+/// finishing while the window is open updates the text without reopening it.
+private struct UpdateStatusRow: View {
+    @Environment(\.appTheme) private var theme
+    @ObservedObject var viewModel: MainViewModel
+    @ObservedObject private var controller: UpdateController
+
+    init(viewModel: MainViewModel) {
+        self.viewModel = viewModel
+        self._controller = ObservedObject(wrappedValue: viewModel.updateController)
+    }
+
+    var body: some View {
+        HStack(spacing: Space.sm) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(theme.textMuted)
+                .frame(width: 20)
+            Text(controller.displayStatusText)
+                .font(.appText(11))
+                .foregroundStyle(theme.textSecondary)
+                .lineLimit(2)
+            Spacer()
+            if controller.canOfferInstallButton {
+                Button("Установить") { viewModel.installAvailableUpdate() }
+                    .buttonStyle(.borderless)
+                    .font(.appText(11, weight: .medium))
+                    .foregroundStyle(theme.accent)
+            } else {
+                Button("Проверить сейчас") { viewModel.checkForUpdatesNow() }
+                    .buttonStyle(.borderless)
+                    .font(.appText(11, weight: .medium))
+                    .foregroundStyle(theme.accent)
+            }
+        }
+        .padding(.horizontal, Space.md)
+        .padding(.vertical, Space.sm)
     }
 }
 

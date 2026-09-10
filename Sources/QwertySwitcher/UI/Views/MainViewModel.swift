@@ -12,6 +12,7 @@ final class MainViewModel: ObservableObject {
     private let timedPauseService: TimedPauseService
     private let settingsBackupService: SettingsBackupService
     private let permissionsService = PermissionsService()
+    let updateController: UpdateController
     private var isSyncingAutoSwitch = false
     var onOpenAbout: (() -> Void)?
     var onOpenExceptions: (() -> Void)?
@@ -130,6 +131,17 @@ final class MainViewModel: ObservableObject {
     @Published var selectedRussianLayoutID: String {
         didSet { persistActiveLayouts() }
     }
+    /// The "install automatically" row below is only interactive while this
+    /// is on (see `MainView`) — turning this off does NOT itself clear a
+    /// previously saved `isUpdatesAutoInstallEnabled`, matching the rest of
+    /// this view model's plain "one property, one preference" pattern.
+    @Published var isUpdatesAutoCheckEnabled: Bool {
+        didSet { prefsService.updatesAutoCheck = isUpdatesAutoCheckEnabled }
+    }
+    @Published var isUpdatesAutoInstallEnabled: Bool {
+        didSet { prefsService.updatesAutoInstall = isUpdatesAutoInstallEnabled }
+    }
+    @Published var diagnosticsMessage: String?
 
     var englishLayouts: [KeyboardLayout] {
         inputSourceManager.supportedLayouts.filter { $0.isEnglish }
@@ -185,7 +197,8 @@ final class MainViewModel: ObservableObject {
          keyboardMonitor: KeyboardMonitor,
          autoStartService: AutoStartService,
          timedPauseService: TimedPauseService,
-         settingsBackupService: SettingsBackupService) {
+         settingsBackupService: SettingsBackupService,
+         updateController: UpdateController) {
         self.statsService = statsService
         self.prefsService = prefsService
         self.inputSourceManager = inputSourceManager
@@ -194,6 +207,7 @@ final class MainViewModel: ObservableObject {
         self.autoStartService = autoStartService
         self.timedPauseService = timedPauseService
         self.settingsBackupService = settingsBackupService
+        self.updateController = updateController
 
         isSyncingAutoSwitch = true
         self.isAutoSwitchEnabled = prefsService.isAutoSwitchEnabled
@@ -228,6 +242,9 @@ final class MainViewModel: ObservableObject {
             ?? ""
         self.eventTapHealth = keyboardMonitor.health
         self.settingsBackupMessage = nil
+        self.isUpdatesAutoCheckEnabled = prefsService.updatesAutoCheck
+        self.isUpdatesAutoInstallEnabled = prefsService.updatesAutoInstall
+        self.diagnosticsMessage = nil
         refreshStats()
 
         NotificationCenter.default.addObserver(
@@ -299,6 +316,26 @@ final class MainViewModel: ObservableObject {
     func denyGame(_ bundleID: String) {
         GameModeState.shared.deny(bundleID)
         recognizedGames = GameModeState.shared.recognizedGames
+    }
+
+    func checkForUpdatesNow() {
+        updateController.checkNow()
+    }
+
+    func installAvailableUpdate() {
+        updateController.installAvailableUpdate()
+    }
+
+    /// "Собрать отчёт" — writes a zip to ~/Downloads and reveals it in
+    /// Finder; the message doubles as this row's only feedback surface.
+    func collectDiagnosticsReport() {
+        do {
+            let url = try DiagnosticsExportService().export()
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+            diagnosticsMessage = "Отчёт сохранён: \(url.lastPathComponent). Отправьте файл в Telegram: t.me/Aleksandr_NFA"
+        } catch {
+            diagnosticsMessage = "Не удалось собрать отчёт: \(error.localizedDescription)"
+        }
     }
 
     func exportSettings() {

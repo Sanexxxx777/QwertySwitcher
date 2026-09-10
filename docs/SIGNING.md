@@ -130,3 +130,36 @@ spctl --assess --type open --context context:primary-signature \
 проверка на чистом пользовательском аккаунте, подпись, notarization или App Store
 validation. Наличие сертификатов и решение App Review — внешние этапы, которые
 локальный код не может подменить.
+
+## Обновления (opt-in auto-updater, wave W1-B)
+
+Network is used only if you enable update checks: once a day the app fetches
+a single JSON from shulgin.is-a.dev and sends nothing about you. Оба флага
+(«Проверять» и «Устанавливать автоматически») по умолчанию выключены.
+
+- **Фид**: `https://shulgin.is-a.dev/store/downloads/qwertyswitcher/appcast.json`
+  — `{"keyId","manifestBase64","signature"}`, подпись Ed25519 (CryptoKit)
+  над сырыми байтами `manifestBase64` (не над пересобранным JSON). Публичные
+  ключи `k1`/`k2` вшиты в `Services/Updates/UpdateKeyRing.swift`; приватные —
+  ТОЛЬКО `~/.claude/secrets/qsw_update_ed25519_<id>.key`, в репозиторий не
+  попадают никогда (гейт — `Scripts/release-secret-scan.sh`, паттерн `*_ed25519*`/`*.pem`/`*.key`).
+- **Правила приёмки** (`UpdatePolicy.evaluate`): `build` строго больше
+  установленного И не меньше `updates.lastSeenBuild` (анти-rollback);
+  `minSystemVersion` выше текущей macOS → не предлагать; `validUntil` в
+  прошлом → «фид устарел», не устанавливать.
+- **Установка**: `UpdateStager` скачивает zip → sha256 → `ditto -x -k` в
+  `~/Library/Application Support/QwertySwitcher/updates/<uuid>/` → проверяет
+  `codesign --verify --deep --strict` И designated-requirement identity
+  стейджа == identity установленной копии (та же редукция, что
+  `Scripts/install.sh`'s `signing_identity_of`, — см. `DesignatedRequirement.swift`).
+  Несовпадение identity (например, будущий переход на Developer ID) НИКОГДА
+  не устанавливается автоматически — статус «скачайте вручную с витрины».
+- **Хелпер**: `UpdateInstallerMode` (`--install-update`, диспетчер в
+  `main.swift` до создания `NSApplication`) исполняет КОПИЮ `install.sh`,
+  вынесенную из стейджевого бандла — тот же скрипт и те же TCC-инварианты,
+  что при ручном `./Scripts/install.sh` (см. секцию выше и корневой
+  `CLAUDE.md`). Откат при провале пост-синк проверки — `rsync -a --delete`
+  из бэкапа, сделанного ДО синка. Контракт — `Tests/ReleaseScripts/update_helper_contract.sh`.
+- **Релиз**: `./Scripts/release.sh [k1|k2]` собирает DMG+zip+appcast и
+  копирует их в `~/Projects/web/store/downloads/`, но НИКОГДА сам не пушит и
+  не публикует релиз — команды `git`/`gh release create` только печатаются.

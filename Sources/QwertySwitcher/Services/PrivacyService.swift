@@ -1,7 +1,8 @@
 import Foundation
 
-/// Privacy & Security hardening. The app makes no network calls at all —
-/// there is no analytics, telemetry, or license transport.
+/// Privacy & Security hardening. Network is used only if you enable update
+/// checks: once a day the app fetches a single JSON from shulgin.is-a.dev
+/// and sends nothing about you — there is no analytics or telemetry.
 final class PrivacyService {
     /// Privacy policy summary (shown in About view)
     static let policyText = """
@@ -9,7 +10,9 @@ final class PrivacyService {
 
     1. Весь ввод обрабатывается локально и никогда не покидает Mac.
     2. Приложение не хранит историю набора и сырые нажатия клавиш.
-    3. Приложение не ходит в сеть. Аналитики и телеметрии нет.
+    3. Сеть используется только если вы включите проверку обновлений в
+       настройках — раз в сутки один запрос к shulgin.is-a.dev, без каких-либо
+       данных о вас. Аналитики и телеметрии нет.
     4. Для определения раскладки анализируется только текущее слово в памяти.
     5. Защищённые поля автоматически пропускаются и не буферизуются.
 
