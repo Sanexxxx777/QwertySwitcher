@@ -6259,7 +6259,12 @@ enum BoundaryLearningBypassTests {
             }
         }
 
-        // len==2 learned is forbidden on the boundary even when active.
+        // 0.11.0 (field 08–10.09.2026: 21 of 38 Double Shifts were 2–3-letter
+        // tickers — bsc/okx/xrp/sc/hh — that the learned path could never
+        // fire on): an ACTIVE learned entry of length 2 now corrects at the
+        // boundary. The write gate (`KeyboardMonitor.learnableCoreDecision`,
+        // ShortTokenTests) is what keeps a real short word of the own language
+        // from ever being learned; the apply side no longer refuses by length.
         do {
             let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
             detector.learnedWordsProvider = { $0 == "en" ? ["xz"] : [] }
@@ -6268,15 +6273,20 @@ enum BoundaryLearningBypassTests {
                 return
             }
             switch detector.detect(keystrokes: strokes, typedLayout: ruLayout) {
-            case .switchTo:
-                TestRunner.assertTrue(false, "len==2 learned entry must NOT correct at the boundary")
+            case .switchTo(let layout, let word):
+                TestRunner.assertEqual(layout.languageCode, "en", "len==2 active learned entry switches to en (0.11.0)")
+                TestRunner.assertEqual(word, "xz", "len==2 active learned entry corrects to the learned token")
             case .noSwitch:
-                TestRunner.assertTrue(true, "len==2 learned entry stays noSwitch at the boundary")
+                TestRunner.assertTrue(false, "len==2 active learned entry must correct at the boundary (0.11.0 short tokens)")
             }
         }
 
-        // A junk (no-vowel) target is never authorized by the learned
-        // bypass, even active — mirrors the flagship "vmc" case: instant-only.
+        // 0.11.0: a vowel-less learned target ("vmc", "bsc", "xrp") is
+        // authorized by an EXACT learned match — `learnedHitApplies` checks
+        // `!isMixedScript` instead of `JunkMeter.isClean`, because an exact
+        // hit on a twice-confirmed pair is stronger evidence than the bigram
+        // heuristic that required a vowel. Before 0.11.0 this stayed
+        // noSwitch and the flagship "vmc" case was instant-only.
         do {
             let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
             detector.learnedWordsProvider = { $0 == "en" ? ["vmc"] : [] }
@@ -6285,10 +6295,11 @@ enum BoundaryLearningBypassTests {
                 return
             }
             switch detector.detect(keystrokes: strokes, typedLayout: ruLayout) {
-            case .switchTo:
-                TestRunner.assertTrue(false, "junk (no-vowel) learned target 'vmc' must NOT correct at the boundary")
+            case .switchTo(let layout, let word):
+                TestRunner.assertEqual(layout.languageCode, "en", "vowel-less active learned target 'vmc' switches to en (0.11.0)")
+                TestRunner.assertEqual(word, "vmc", "vowel-less active learned target corrects to the learned token")
             case .noSwitch:
-                TestRunner.assertTrue(true, "junk learned target 'vmc' stays noSwitch at the boundary — instant-only")
+                TestRunner.assertTrue(false, "vowel-less active learned target 'vmc' must correct at the boundary (0.11.0)")
             }
         }
 

@@ -723,17 +723,35 @@ final class LanguageDetector {
 
     /// Mechanism A/C boundary gate (learning_spec.md): `core` (already
     /// mixed-script-checked by the caller's loop) exactly matches an active
-    /// learned/promoted entry of `lang`, is at least 3 letters (len==2
-    /// learned on the boundary is explicitly forbidden — class 0.6.13), and
-    /// is itself CLEAN by `JunkMeter` (mirrors the junk-override target
-    /// gate). `possibleBigrams` unavailable (index still building) degrades
-    /// to "don't fire", same posture `junkOverrideFires` takes.
-    private func learnedHitApplies(core: String, lang: String) -> Bool {
-        guard core.count >= 3 else { return false }
+    /// learned/promoted entry of `lang`, is at least 2 letters (short-token
+    /// fix, field data 08-10.09.2026: 21 of 38 Double Shift ru→en fixes were
+    /// tokens ≤3 letters — bsc/okx/xrp/sc/hh/ff — and the boundary path
+    /// could never apply them back even after two confirmed manual fixes).
+    ///
+    /// Quality gate for a hit is `!isMixedScript`, NOT `JunkMeter.isClean`
+    /// (dropped 09.09.2026 review): `isClean` requires a VOWEL
+    /// unconditionally (`JunkMeter.vowels`), and bsc/xrp/sc/hh/ff have none
+    /// — lowering the length floor alone would have changed nothing, this
+    /// hit would still never have fired. An EXACT match against an entry
+    /// the owner already confirmed twice by hand is a strictly stronger
+    /// signal than a bigram-plausibility heuristic built for UNCONFIRMED
+    /// dictionary candidates — `isClean` exists to guess whether an
+    /// arbitrary run LOOKS like a word; this branch already knows it IS one
+    /// (the owner said so, twice). `isMixedScript` stays: that's not a
+    /// plausibility question, it's "this isn't a coherent single-alphabet
+    /// reading at all".
+    ///
+    /// `possibleBigrams`/`dictionary` no longer read here — nothing left in
+    /// this function needs them.
+    ///
+    /// Access widened from `private` to internal for `ShortTokenTests.swift`
+    /// (same precedent as `core(of:)` above — only the access level
+    /// changed, every existing call site keeps its exact behavior).
+    func learnedHitApplies(core: String, lang: String) -> Bool {
+        guard core.count >= 2 else { return false }
         let active = learnedWordsProvider(lang)
         guard !active.isEmpty, active.contains(core.lowercased()) else { return false }
-        guard let bigrams = dictionary.possibleBigrams(language: lang) else { return false }
-        return JunkMeter.isClean(core, language: lang, possibleBigrams: bigrams)
+        return !Self.isMixedScript(core)
     }
 
     /// Read-only wrapper around `scoreWord` for `KeyboardMonitor`'s wave-2

@@ -1355,36 +1355,92 @@ final class KeyboardMonitor {
         return result
     }
 
+    /// Pure decision core of `normalizedLearnableCore`, extracted so
+    /// `ShortTokenTests.swift` can exercise it directly with real tokens
+    /// instead of driving a live `KeyboardMonitor` through a synthetic
+    /// CGEventTap (unavailable in this headless harness on macOS 27 beta —
+    /// same reason `ReplacementAtomicityGuardTests` reads source instead).
+    /// `isDictionaryWord` is injected rather than calling
+    /// `LanguageDetector.isDictionaryWord` directly so tests can wire a real
+    /// `LanguageDetector` OR a small closed fixture, whichever a given case
+    /// needs — identical contract either way (`LanguageDetector.isDictionaryWord`
+    /// is itself just `scoreWord(...) > 0`, no state).
+    ///
+    /// Returns the plain lowercased core to learn, or `nil` with the exact
+    /// verbose-log reason `normalizedLearnableCore` below prints (tests
+    /// assert on the reason value directly, not on log output).
+    ///
+    /// - Parameters:
+    ///   - own: the SAME keystrokes' reading in the layout they were
+    ///     actually typed on, BEFORE this Double Shift converted them.
+    ///   - ownLang: that source layout's language code.
+    static func learnableCoreDecision(
+        from text: String, lang: String, own: String, ownLang: String, resynced: Bool,
+        isDictionaryWord: (_ word: String, _ language: String) -> Bool
+    ) -> (core: String?, rejectReason: String?) {
+        guard !resynced else { return (nil, "resynced") }
+        guard let core = LanguageDetector.core(of: text)?.lowercased(), !core.isEmpty,
+              !LanguageDetector.isMixedScript(core) else {
+            return (nil, "mixedRun")
+        }
+        // Short-token fix (field data 08-10.09.2026): a single letter is
+        // still pointless to store (neither application path — instant
+        // minLength=4, boundary via `learnedHitApplies` now >=2 — can ever
+        // fire on length 1), but length 2 IS eligible now; see the
+        // `ownIsWord` guard below for why that needed its own defense
+        // first.
+        guard core.count >= 2 else { return (nil, "belowMinLen") }
+        guard !LanguageDetector.isReservedForDisambiguation(core, language: lang) else {
+            return (nil, "conflictPair")
+        }
+        // A 2-letter target core is short enough that the SAME two keys can
+        // also read as a genuine dictionary word of the layout they were
+        // typed on — «он» typed on ru, Double Shift-flipped to "jy" (its en
+        // reading), would otherwise learn "jy"→«он» and silently "correct"
+        // every future honest «он». `own`/`ownLang` is the only place that
+        // knows what the owner actually had on screen before the flip —
+        // `text`/`lang` alone (the TARGET side) can't see this. Length ≥3
+        // is unaffected — this guard runs ONLY for the newly-opened length.
+        // Also fires (conservatively) if the own side has no clean letter
+        // core at all — an ambiguous "what was on screen" is reason enough
+        // not to learn.
+        if core.count == 2 {
+            guard let ownCore = LanguageDetector.core(of: own)?.lowercased(), !ownCore.isEmpty,
+                  !isDictionaryWord(ownCore, ownLang) else {
+                return (nil, "ownIsWord")
+            }
+        }
+        return (core, nil)
+    }
+
     /// Mechanism A's write-time normalization (learning_spec.md "Механизм A
-    /// → Запись"). Returns the plain lowercased core to hand to
-    /// `LearnedWordsStore.recordManualFix`, or nil (verbose-logged with the
-    /// exact reason) when the gesture must never be learned. Never logs the
-    /// word itself — lengths/reasons only.
-    private func normalizedLearnableCore(from text: String, lang: String, resynced: Bool) -> String? {
+    /// → Запись"). Thin instance wrapper around `learnableCoreDecision`:
+    /// adds the `isLearningEnabled` gate (instance state, no pure equivalent
+    /// worth threading through) and turns a rejection into the verbose log
+    /// line. Never logs the word itself — lengths/reasons only.
+    ///
+    /// - Parameters:
+    ///   - own: the SAME keystrokes' reading in the layout they were
+    ///     actually typed on, BEFORE this Double Shift converted them — the
+    ///     callers already have this (`onScreen`/`originalWordOnly`, the
+    ///     "original" side of their own `switchUndoManager.record`/
+    ///     `handleDoubleShiftClassification` calls).
+    ///   - ownLang: that source layout's language code.
+    private func normalizedLearnableCore(from text: String, lang: String, own: String, ownLang: String, resynced: Bool) -> String? {
         guard prefsService.isLearningEnabled else {
             DebugLog.shared.log("KM", "learned: skipped reason=disabled", level: .verbose)
             return nil
         }
-        guard !resynced else {
-            DebugLog.shared.log("KM", "learned: skipped reason=resynced", level: .verbose)
-            return nil
+        let decision = Self.learnableCoreDecision(
+            from: text, lang: lang, own: own, ownLang: ownLang, resynced: resynced,
+            isDictionaryWord: { [languageDetector] word, language in
+                languageDetector.isDictionaryWord(word, language: language)
+            }
+        )
+        if let reason = decision.rejectReason {
+            DebugLog.shared.log("KM", "learned: skipped reason=\(reason)", level: .verbose)
         }
-        guard let core = LanguageDetector.core(of: text)?.lowercased(), !core.isEmpty,
-              !LanguageDetector.isMixedScript(core) else {
-            DebugLog.shared.log("KM", "learned: skipped reason=mixedRun", level: .verbose)
-            return nil
-        }
-        // Below this, neither application path (instant minLength=4,
-        // boundary len>=3) can EVER fire — pointless to occupy a cap slot.
-        guard core.count >= 3 else {
-            DebugLog.shared.log("KM", "learned: skipped reason=belowMinLen", level: .verbose)
-            return nil
-        }
-        guard !LanguageDetector.isReservedForDisambiguation(core, language: lang) else {
-            DebugLog.shared.log("KM", "learned: skipped reason=conflictPair", level: .verbose)
-            return nil
-        }
-        return core
+        return decision.core
     }
 
     /// Single dispatch point for a Double Shift gesture that just succeeded
@@ -1768,7 +1824,8 @@ final class KeyboardMonitor {
                 // ">1 core / empty" guard, which is correct: a mixed run is
                 // a gesture, not a confirmed word pair.
                 let learnableCore = self.normalizedLearnableCore(
-                    from: converted, lang: targetLayout.languageCode, resynced: resynced
+                    from: converted, lang: targetLayout.languageCode,
+                    own: onScreen, ownLang: currentLayout.languageCode, resynced: resynced
                 )
                 let positiveRecord = learnableCore.map { (core: $0, originApp: self.activeAppBundleID) }
                 self.handleDoubleShiftClassification(
@@ -1958,7 +2015,8 @@ final class KeyboardMonitor {
                 // `correctedWord` (not `runReplacement`) — lead symbols
                 // never enter the learned pair.
                 let learnableCore = self.normalizedLearnableCore(
-                    from: correctedWord, lang: targetLayout.languageCode, resynced: wasResynced
+                    from: correctedWord, lang: targetLayout.languageCode,
+                    own: originalWordOnly, ownLang: currentLayout.languageCode, resynced: wasResynced
                 )
                 let positiveRecord = learnableCore.map { (core: $0, originApp: self.activeAppBundleID) }
                 self.handleDoubleShiftClassification(
