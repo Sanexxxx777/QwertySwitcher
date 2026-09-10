@@ -32,13 +32,13 @@ if printf '%s\n' "$CODE_ONLY" | grep -qw 'ditto'; then
     fail "install.sh uses ditto — it merges and leaves orphans that invalidate the signature"
 fi
 
-grep -q 'rsync -a --delete' "$INSTALL_SCRIPT" \
+grep -q 'rsync -a --checksum --delete' "$INSTALL_SCRIPT" \
     || fail "install.sh does not update the bundle in place with a pruning rsync"
-grep -q 'rsync -a --delete "\$SOURCE_APP/" "\$DEST_APP/"' "$INSTALL_SCRIPT" \
+grep -q 'rsync -a --checksum --delete "\$SOURCE_APP/" "\$DEST_APP/"' "$INSTALL_SCRIPT" \
     || fail "rsync source/destination are missing the trailing slashes (bundle would nest inside itself)"
 
 quit_line=$(grep -n 'osascript -e' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1)
-sync_line=$(grep -n 'rsync -a --delete "\$SOURCE_APP/"' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1)
+sync_line=$(grep -n 'rsync -a --checksum --delete "\$SOURCE_APP/"' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1)
 gate_line=$(grep -n 'codesign --verify --deep --strict --verbose=2 "\$DEST_APP"' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1)
 src_gate_line=$(grep -n 'codesign --verify --deep --strict "\$SOURCE_APP"' "$INSTALL_SCRIPT" | head -1 | cut -d: -f1)
 
@@ -65,7 +65,7 @@ identity_gate_line=$(grep -n 'DEST_IDENTITY" != "\$SOURCE_IDENTITY' "$INSTALL_SC
 
 # A partial rsync leaves a half-updated bundle; `set -e` would abort before the
 # step [5/5] gate could say so.
-grep -q 'if ! rsync -a --delete' "$INSTALL_SCRIPT" \
+grep -q 'if ! rsync -a --checksum --delete' "$INSTALL_SCRIPT" \
     || fail "install.sh does not handle a failing rsync — a half-updated bundle would be left without a word"
 
 # "TCC grants kept" is a claim about the csreq still matching, not about inodes.

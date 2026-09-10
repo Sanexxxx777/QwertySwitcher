@@ -33,6 +33,7 @@ final class UpdateController: ObservableObject {
     private let userAgent: String
     private let safetySnapshotProvider: () -> (idleSeconds: TimeInterval, gameModeActive: Bool, replacing: Bool)
     private let secureInputProvider: () -> Bool
+    private let screenLockedProvider: () -> Bool
     private var checkTimer: Timer?
     private var windowRetryTimer: Timer?
     private var manualRetryTimer: Timer?
@@ -42,7 +43,8 @@ final class UpdateController: ObservableObject {
         prefsService: PreferencesService,
         installedBundle: URL = Bundle.main.bundleURL,
         safetySnapshotProvider: @escaping () -> (idleSeconds: TimeInterval, gameModeActive: Bool, replacing: Bool),
-        secureInputProvider: @escaping () -> Bool
+        secureInputProvider: @escaping () -> Bool,
+        screenLockedProvider: @escaping () -> Bool = { false }
     ) {
         self.prefsService = prefsService
         self.installedBundle = installedBundle
@@ -50,6 +52,7 @@ final class UpdateController: ObservableObject {
         self.userAgent = "QwertySwitcher/\(version)"
         self.safetySnapshotProvider = safetySnapshotProvider
         self.secureInputProvider = secureInputProvider
+        self.screenLockedProvider = screenLockedProvider
         self.status = .idle(lastCheckAt: prefsService.updatesLastCheckAt)
     }
 
@@ -207,17 +210,35 @@ final class UpdateController: ObservableObject {
             return
         }
         let snapshot = safetySnapshotProvider()
+        let secure = secureInputProvider()
+        let locked = screenLockedProvider()
         let allowed = UpdatePolicy.shouldInstallNow(
             autoInstall: prefsService.updatesAutoInstall,
-            idleSeconds: snapshot.idleSeconds, secureInput: secureInputProvider(),
-            replacing: snapshot.replacing, gameModeActive: snapshot.gameModeActive
+            idleSeconds: snapshot.idleSeconds, secureInput: secure,
+            replacing: snapshot.replacing, gameModeActive: snapshot.gameModeActive,
+            screenLocked: locked
         )
         if allowed {
             performInstall(staged: staged)
         } else {
+            logInstallDeferral(snapshot: snapshot, secure: secure, locked: locked)
             status = .readyToInstall(staged.manifest, deferred: false)
             scheduleInstallWindowRetry(staged: staged)
         }
+    }
+
+    /// Field e2e 10.09.2026: a deferred auto-install left NO trace in the log
+    /// ("check ok" and then silence for 15 minutes) — undiagnosable from
+    /// outside, exactly the class of silence the instant path once had.
+    private func logInstallDeferral(
+        snapshot: (idleSeconds: TimeInterval, gameModeActive: Bool, replacing: Bool), secure: Bool, locked: Bool
+    ) {
+        DebugLog.shared.log(
+            "UPD",
+            "install deferred: idle=\(Int(snapshot.idleSeconds))s secureInput=\(secure)"
+                + " replacing=\(snapshot.replacing) game=\(snapshot.gameModeActive) screenLocked=\(locked)",
+            level: .verbose
+        )
     }
 
     /// MAJOR fix (security review): manual "Установить" used to go straight
@@ -280,14 +301,19 @@ final class UpdateController: ObservableObject {
                 return
             }
             let snapshot = self.safetySnapshotProvider()
+            let secure = self.secureInputProvider()
+            let locked = self.screenLockedProvider()
             let allowed = UpdatePolicy.shouldInstallNow(
                 autoInstall: self.prefsService.updatesAutoInstall,
-                idleSeconds: snapshot.idleSeconds, secureInput: self.secureInputProvider(),
-                replacing: snapshot.replacing, gameModeActive: snapshot.gameModeActive
+                idleSeconds: snapshot.idleSeconds, secureInput: secure,
+                replacing: snapshot.replacing, gameModeActive: snapshot.gameModeActive,
+                screenLocked: locked
             )
             if allowed {
                 timer.invalidate()
                 self.performInstall(staged: staged)
+            } else {
+                self.logInstallDeferral(snapshot: snapshot, secure: secure, locked: locked)
             }
         }
         RunLoop.main.add(timer, forMode: .common)

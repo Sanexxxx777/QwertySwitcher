@@ -29,9 +29,16 @@ enum UpdatePolicy {
         idleSeconds: TimeInterval,
         secureInput: Bool,
         replacing: Bool,
-        gameModeActive: Bool
+        gameModeActive: Bool,
+        screenLocked: Bool = false
     ) -> Bool {
         guard autoInstall else { return false }
+        // A locked screen (field e2e 10.09.2026: loginwindow holds secure
+        // input the whole time the Mac is locked, so the plain gates below
+        // would defer for hours) is the SAFEST window there is — nobody is
+        // typing into anything. Only an in-flight replacement transaction
+        // still blocks, because that is the one thing a restart can corrupt.
+        if screenLocked { return !replacing }
         guard idleSeconds >= minIdleSecondsForAutoInstall else { return false }
         guard !secureInput, !replacing, !gameModeActive else { return false }
         return true
