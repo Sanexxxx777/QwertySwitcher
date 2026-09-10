@@ -251,24 +251,54 @@ def score_word(word, lang):
 
 
 # ============================================================================
-# Junk-метрика (16.08, принцип «мусорность прочтения = самостоятельный сигнал»).
-# POSSIBLE[lang] = все биграммы, встречающиеся хоть в одном словарном слове
-# длины >=3 (len-2 мусор словаря базу не расширяет). Swift-зеркало живёт в
-# Dictionary/WordDictionary.swift (possibleBigrams) — менять СИНХРОННО.
+# Junk/plausible-метрика (16.08 + K-свип 10.09, research — see
+# project_qwerty_bigram_threshold_sweep). ДВЕ таблицы из ОДНОГО счётчика
+# «биграмма -> сколько словарных слов длины >=3 её содержат» (len-2 мусор
+# словаря базу не расширяет):
+#   POSSIBLE[lang]  — биграмма встречается хотя бы в 1 слове (K=1, как раньше).
+#                      Используется ТОЛЬКО junk() — не ужесточать, это класс
+#                      порчи «русская опечатка -> латиница» (own-прочтение).
+#   PLAUSIBLE[lang] — биграмма встречается в >=PLAUSIBLE_MIN_WORDS словах.
+#                      Используется ТОЛЬКО clean() — цель junk-override /
+#                      own-reading гейт instant-пути (instant_junk_gate_sim.py
+#                      импортирует этот же fs.clean).
+# PLAUSIBLE_MIN_WORDS задаётся снаружи (не трогая дефолт=1=старое поведение):
+#   CLI:  python3 false_switch_sim.py --plausible-min=50
+#   env:  QSW_PLAUSIBLE_MIN_WORDS=50 python3 false_switch_sim.py
+# Swift POSSIBLE-зеркало живёт в Dictionary/WordDictionary.swift
+# (possibleBigrams) — менять СИНХРОННО. PLAUSIBLE — research-стадия, в Swift
+# пока НЕ существует (эта пара стендов измеряет K ДО переноса).
 # ============================================================================
+def _plausible_min_words():
+    for _arg in sys.argv:
+        if _arg.startswith("--plausible-min="):
+            return int(_arg.split("=", 1)[1])
+    _env = os.environ.get("QSW_PLAUSIBLE_MIN_WORDS")
+    if _env:
+        return int(_env)
+    return 1
+
+
+PLAUSIBLE_MIN_WORDS = _plausible_min_words()
+
+BIGRAM_WORD_COUNTS = {}
 POSSIBLE = {}
+PLAUSIBLE = {}
 for _lang in ("ru", "en"):
-    _p = set()
+    _counts = {}
     for _w in DICT[_lang]:
         if len(_w) >= 3:
             for _i in range(len(_w) - 1):
-                _p.add(_w[_i:_i + 2])
-    POSSIBLE[_lang] = _p
+                _bg = _w[_i:_i + 2]
+                _counts[_bg] = _counts.get(_bg, 0) + 1
+    BIGRAM_WORD_COUNTS[_lang] = _counts
+    POSSIBLE[_lang] = {bg for bg, cnt in _counts.items() if cnt >= 1}
+    PLAUSIBLE[_lang] = {bg for bg, cnt in _counts.items() if cnt >= PLAUSIBLE_MIN_WORDS}
 
 
 def junk(word, lang):
     """Мусорность прочтения: нет ни одной гласной ИЛИ есть биграмма, не
-    встречающаяся ни в одном словарном слове языка."""
+    встречающаяся ни в одном словарном слове языка (POSSIBLE, K-независимо)."""
     w = word.lower()
     if len(w) < 2:
         return False
@@ -279,12 +309,12 @@ def junk(word, lang):
 
 
 def clean(word, lang):
-    """Правдоподобие цели: есть гласная И все биграммы possible."""
+    """Правдоподобие цели: есть гласная И все биграммы PLAUSIBLE (>=K слов)."""
     w = word.lower()
     vowels = RU_VOWELS if lang == "ru" else EN_VOWELS
     if not any(c in vowels for c in w):
         return False
-    return all(w[i:i + 2] in POSSIBLE[lang] for i in range(len(w) - 1))
+    return all(w[i:i + 2] in PLAUSIBLE[lang] for i in range(len(w) - 1))
 
 
 # ============================================================================
@@ -482,8 +512,15 @@ def self_check():
     if OVERRIDE["enabled"]:
         gib = translit("эдди", RU2KEY)          # "'llb"
         r2, wl, wc, _ = detect_boundary_screen(gib, "en", context="none")
-        assert (r2, wl) == ("switchTo", "ru") and wc == "эдди", \
-            f"junk-override must fix 'эдди' (got {r2},{wl},{wc})"
+        edi_ok = (r2, wl) == ("switchTo", "ru") and wc == "эдди"
+        if PLAUSIBLE_MIN_WORDS == 1:
+            # Regression floor (K=1 = shipped behavior) — must stay a hard
+            # assert so a K=1 run is byte-for-byte the pre-sweep baseline.
+            assert edi_ok, f"junk-override must fix 'эдди' (got {r2},{wl},{wc})"
+        elif not edi_ok:
+            print(f"[self-check] NOTE: at K={PLAUSIBLE_MIN_WORDS} 'эдди' override no longer "
+                  f"fires via PLAUSIBLE (got {r2},{wl},{wc}) — expected for a stricter clean(),"
+                  f" not a regression of the K=1 floor.")
         r3, _, _, _ = detect_boundary_screen("tmp", "en", context="same")
         assert r3 == "noSwitch", "context gate must protect 'tmp' in en flow"
     print("[self-check] OK (баги locked; эдди fixed via override; tmp guarded)")

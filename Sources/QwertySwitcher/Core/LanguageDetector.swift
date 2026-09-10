@@ -20,6 +20,25 @@ final class LanguageDetector {
     var learnedWordsProvider: (_ lang: String) -> Set<String> = { _ in [] }
 
     private var previousWordLanguage: String?
+
+    /// Island feature (v0.11.0, field data 08-10.09.2026 — see CLAUDE.md
+    /// "остров"): one entry per real `detect()` outcome, freshest LAST,
+    /// capped at 3. `corrected == true` means this word was NOT typed in its
+    /// own `lang` (a correction fired); `false` means it landed in `lang`
+    /// untouched. `KeyboardMonitor.restoreIsland` reads this (via
+    /// `contextSlots`) to decide whether a single just-corrected foreign
+    /// word should snap the layout back to what the owner was actually
+    /// writing in, or whether the two words before it already read as the
+    /// start of a real run in the new language.
+    struct ContextSlot {
+        let lang: String
+        let corrected: Bool
+    }
+    private(set) var contextSlots: [ContextSlot] = []
+    private func pushContextSlot(_ slot: ContextSlot) {
+        contextSlots.append(slot)
+        if contextSlots.count > 3 { contextSlots.removeFirst(contextSlots.count - 3) }
+    }
     /// Was 15 — LARGER than the `collisionGap` below, which meant the language
     /// of the previous word alone could manufacture a "clear winner" out of a
     /// tie. Harmless while words were letters-only; once punctuation joined the
@@ -59,6 +78,19 @@ final class LanguageDetector {
         "org.alacritty", "co.zeit.hyper", "com.microsoft.VSCode",
         "com.todesktop.230313mzl4w4u92",
     ]
+
+    /// Shared with the island-restore path (`KeyboardMonitor.restoreIsland`):
+    /// same reasoning as junk-override — `ax=none` terminals can't be
+    /// resynced against the screen, so an unsolicited layout swap there is
+    /// unrecoverable in a way it isn't elsewhere. Takes the bundle id
+    /// explicitly rather than reading `currentAppBundleID` — the caller
+    /// already has its OWN cache (`KeyboardMonitor.activeAppBundleID`) and
+    /// the hot-path ban on synchronous `NSWorkspace`/AX calls applies here
+    /// exactly as it does to `isJunkOverrideBlockedByTerminal()` below.
+    static func isTerminalBundle(_ bundleID: String?) -> Bool {
+        guard let bundleID else { return false }
+        return junkOverrideTerminalBundleIDs.contains(bundleID)
+    }
 
     private static let skipPatterns: [NSRegularExpression] = {
         let patterns = [
@@ -127,7 +159,34 @@ final class LanguageDetector {
     ///   CLAUDE.md "марже" bug). Omitted only by the live-typing callers
     ///   (`processCurrentWord`/`tryInstantCorrection`), where the word is
     ///   still being typed and the active layout IS the typed layout.
+    ///
+    /// Thin wrapper around `detectResolved` — the actual scoring logic is
+    /// completely untouched (0 lines changed inside it). This layer's only
+    /// job is the island ring (`contextSlots`): `detectResolved` has ~10
+    /// internal `return .noSwitch` statements past the point where
+    /// `previousWordLanguage` is last written for a given call (native-
+    /// context lock, one-letter gate, collision gap, incumbent gap — see its
+    /// body), so a ring push inlined at each `previousWordLanguage = `
+    /// assignment would record the SCORING candidate's language even on
+    /// calls that end up `.noSwitch`, not the language the word actually
+    /// landed in. Reading the ring off the real return value instead is the
+    /// only way to get `.noSwitch → (own language, false)` /
+    /// `.switchTo → (target, true)` right in every branch.
     func detect(keystrokes: [BufferedKeystroke], typedLayout: KeyboardLayout? = nil) -> DetectionResult {
+        let ownLayoutForRing = typedLayout ?? inputSourceManager.currentLayout
+        let result = detectResolved(keystrokes: keystrokes, typedLayout: typedLayout)
+        if let ownLayoutForRing {
+            switch result {
+            case .noSwitch:
+                pushContextSlot(ContextSlot(lang: ownLayoutForRing.languageCode, corrected: false))
+            case .switchTo(let layout, _):
+                pushContextSlot(ContextSlot(lang: layout.languageCode, corrected: true))
+            }
+        }
+        return result
+    }
+
+    private func detectResolved(keystrokes: [BufferedKeystroke], typedLayout: KeyboardLayout? = nil) -> DetectionResult {
         guard let currentLayout = typedLayout ?? inputSourceManager.currentLayout else { return .noSwitch }
         let layouts = activeLayouts
         guard layouts.count >= 2 else { return .noSwitch }
@@ -473,7 +532,21 @@ final class LanguageDetector {
         }
     }
 
-    func resetContext() { previousWordLanguage = nil }
+    func resetContext() {
+        previousWordLanguage = nil
+        contextSlots.removeAll()
+    }
+
+    /// Island-restore only (`KeyboardMonitor.restoreIsland`): updates the
+    /// context bias exactly like an ordinary word landing in `lang` would,
+    /// WITHOUT touching the ring's last slot. That slot is the just-
+    /// corrected island word itself and must stay `(target, corrected:
+    /// true)` — `IslandPolicy`'s "second correction to the same target in a
+    /// row" rule depends on it still reading as a correction, not as clean
+    /// context, or a run of foreign words would restore on every single one.
+    func setContextLanguage(_ lang: String) {
+        previousWordLanguage = lang
+    }
 
     // MARK: - Multi-level scoring (Dictionary + SpellCheck + N-grams + Frequency)
 
