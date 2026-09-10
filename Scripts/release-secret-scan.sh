@@ -14,7 +14,7 @@ scan_file() {
     name=$(basename "$file")
 
     case "$name" in
-        .env|.env.*|env.local|env.local.*|*.p8|*.p12|*.key)
+        .env|.env.*|env.local|env.local.*|*.p8|*.p12|*.key|*.pem|*_ed25519*)
             echo "Secret scan blocked: credential-like file: $file" >&2
             status=1
             return

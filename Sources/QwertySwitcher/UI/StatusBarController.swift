@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Carbon
+import Combine
 
 final class StatusBarController {
     private var statusItem: NSStatusItem!
@@ -12,7 +13,9 @@ final class StatusBarController {
     private let perAppLayoutService: PerAppLayoutService
     private let timedPauseService: TimedPauseService
     private let snippetService: SnippetService
+    private let updateController: UpdateController
     private let autoStartService = AutoStartService()
+    private var updateStatusCancellable: AnyCancellable?
     private var mainWindow: NSWindow?
     private var exceptionsWindow: NSWindow?
     private var aboutWindow: NSWindow?
@@ -28,7 +31,8 @@ final class StatusBarController {
          inputSourceManager: InputSourceManager,
          perAppLayoutService: PerAppLayoutService,
          timedPauseService: TimedPauseService,
-         snippetService: SnippetService) {
+         snippetService: SnippetService,
+         updateController: UpdateController) {
         self.statsService = statsService
         self.prefsService = prefsService
         self.exceptionsService = exceptionsService
@@ -37,7 +41,10 @@ final class StatusBarController {
         self.perAppLayoutService = perAppLayoutService
         self.timedPauseService = timedPauseService
         self.snippetService = snippetService
+        self.updateController = updateController
         setupStatusItem()
+        updateStatusCancellable = updateController.$status
+            .sink { [weak self] _ in self?.refreshMenu() }
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(refreshMenu),
@@ -270,6 +277,22 @@ final class StatusBarController {
 
         menu.addItem(NSMenuItem.separator())
 
+        let checkUpdatesItem = NSMenuItem(title: "Проверить обновления…",
+                                          action: #selector(checkForUpdates), keyEquivalent: "")
+        checkUpdatesItem.target = self
+        menu.addItem(checkUpdatesItem)
+
+        if let manifest = updateController.availableManifest, updateController.canOfferInstallButton {
+            let installItem = NSMenuItem(
+                title: "Доступно обновление \(manifest.version) — установить",
+                action: #selector(installUpdateFromMenu), keyEquivalent: ""
+            )
+            installItem.target = self
+            menu.addItem(installItem)
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
         let quitItem = NSMenuItem(title: "Выйти", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
@@ -303,7 +326,8 @@ final class StatusBarController {
                 perAppLayoutService: perAppLayoutService,
                 snippetService: snippetService,
                 learnedWordsStore: keyboardMonitor.learnedWordsStore
-            )
+            ),
+            updateController: updateController
         )
         vm.onOpenAbout = { [weak self] in self?.openAbout() }
         vm.onOpenExceptions = { [weak self] in self?.openExceptions() }
@@ -466,6 +490,14 @@ final class StatusBarController {
 
     @objc private func openPermissions() {
         onOpenPermissions?()
+    }
+
+    @objc private func checkForUpdates() {
+        updateController.checkNow()
+    }
+
+    @objc private func installUpdateFromMenu() {
+        updateController.installAvailableUpdate()
     }
 
     @objc private func quit() {

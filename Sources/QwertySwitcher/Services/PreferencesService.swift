@@ -127,4 +127,60 @@ final class PreferencesService {
         set { defaults.set(newValue.rawValue, forKey: keyPrefix + "themePreference") }
     }
 
+    // MARK: - Updates (opt-in auto-updater, wave W1-B)
+
+    static let defaultUpdateFeedURL = "https://shulgin.is-a.dev/store/downloads/qwertyswitcher/appcast.json"
+
+    /// Master switch: once a day, fetch one JSON from the feed URL. Off by
+    /// default — see the onboarding prompt in `AppDelegate`.
+    var updatesAutoCheck: Bool {
+        get { defaults.object(forKey: keyPrefix + "updates.autoCheck") as? Bool ?? false }
+        set { defaults.set(newValue, forKey: keyPrefix + "updates.autoCheck") }
+    }
+
+    /// Install a staged update without asking, once it's safe to (see
+    /// `UpdatePolicy.shouldInstallNow`). Off by default and only reachable
+    /// from the UI while `updatesAutoCheck` is on.
+    var updatesAutoInstall: Bool {
+        get { defaults.object(forKey: keyPrefix + "updates.autoInstall") as? Bool ?? false }
+        set { defaults.set(newValue, forKey: keyPrefix + "updates.autoInstall") }
+    }
+
+    /// Set only on a SUCCESSFUL check (feed reachable, signature verified) —
+    /// a failed check updates `updatesLastFailureAt` instead, so the 6h
+    /// failure backoff isn't hidden behind the 24h success cadence.
+    var updatesLastCheckAt: Date? {
+        get { defaults.object(forKey: keyPrefix + "updates.lastCheckAt") as? Date }
+        set { defaults.set(newValue, forKey: keyPrefix + "updates.lastCheckAt") }
+    }
+
+    var updatesLastFailureAt: Date? {
+        get { defaults.object(forKey: keyPrefix + "updates.lastFailureAt") as? Date }
+        set { defaults.set(newValue, forKey: keyPrefix + "updates.lastFailureAt") }
+    }
+
+    /// Anti-rollback floor: the highest `CFBundleVersion` this Mac has ever
+    /// successfully started, written by `UpdateStartupGuard` on normal
+    /// launch. `UpdatePolicy.evaluate` refuses to offer a signed manifest
+    /// whose `build` is below this, even if it's above the CURRENTLY
+    /// installed build (a stale feed rollback).
+    var updatesLastSeenBuild: Int {
+        get { defaults.object(forKey: keyPrefix + "updates.lastSeenBuild") as? Int ?? 0 }
+        set { defaults.set(newValue, forKey: keyPrefix + "updates.lastSeenBuild") }
+    }
+
+    /// Whether the one-time "Проверять обновления автоматически?" alert has
+    /// already been shown (see `AppDelegate`).
+    var updatesPromptSeen: Bool {
+        get { defaults.object(forKey: keyPrefix + "updates.promptSeen") as? Bool ?? false }
+        set { defaults.set(newValue, forKey: keyPrefix + "updates.promptSeen") }
+    }
+
+    /// Override for the feed URL — `UpdatePolicy.isAcceptableFeedURL` only
+    /// accepts `https://` or `http://127.0.0.1` / `http://localhost` (local
+    /// e2e testing), so this can never be pointed at an arbitrary http host.
+    var updatesFeedURL: String {
+        get { defaults.string(forKey: keyPrefix + "updates.feedURL") ?? Self.defaultUpdateFeedURL }
+        set { defaults.set(newValue, forKey: keyPrefix + "updates.feedURL") }
+    }
 }

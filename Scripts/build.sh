@@ -106,6 +106,13 @@ if [ -d "$PROJECT_DIR/Resources/Fonts" ]; then
     cp "$PROJECT_DIR/Resources/Fonts/"*.ttf "$APP_BUNDLE/Contents/Resources/Fonts/" 2>/dev/null || true
 fi
 
+# The updater's install helper (UpdateInstallerMode) runs a COPY of this
+# script from inside the staged bundle it downloaded — it has to be sealed
+# into Contents/Resources BEFORE signing, or the printed resource digest
+# won't match and `codesign --verify --deep --strict` fails.
+cp "$PROJECT_DIR/Scripts/install.sh" "$APP_BUNDLE/Contents/Resources/install.sh"
+chmod +x "$APP_BUNDLE/Contents/Resources/install.sh"
+
 bash "$PROJECT_DIR/Scripts/release-secret-scan.sh" "$APP_BUNDLE"
 
 
