@@ -87,6 +87,11 @@ final class DiagnosticsExportService {
             "verboseLog: \(prefs.isVerboseLogEnabled)",
             "updatesAutoCheck: \(prefs.updatesAutoCheck)",
             "updatesAutoInstall: \(prefs.updatesAutoInstall)",
+            "updatesFeedURL: \(prefs.updatesFeedURL)",
+            "updatesLastCheckAt: \(prefs.updatesLastCheckAt.map(String.init(describing:)) ?? "never")",
+            "updatesLastFailureAt: \(prefs.updatesLastFailureAt.map(String.init(describing:)) ?? "none")",
+            "updatesLastSeenBuild: \(prefs.updatesLastSeenBuild)",
+            "updatesPromptSeen: \(prefs.updatesPromptSeen)",
         ]
         try lines.joined(separator: "\n").write(
             to: directory.appendingPathComponent("system.txt"), atomically: true, encoding: .utf8

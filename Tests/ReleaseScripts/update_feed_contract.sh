@@ -72,4 +72,32 @@ if printf '%s\n' "$CODE_ONLY" | grep -Ev '^[[:space:]]*echo' | grep -qE 'git pus
     fail "release.sh executes git push / gh release create instead of only printing them for the owner"
 fi
 
+# MAJOR fix (security review): release.sh must verify the appcast it just
+# signed against the SAME public key the app itself trusts — extracted from
+# UpdateKeyRing.swift, not a second hardcoded literal that could drift out
+# of sync (e.g. k1/k2 swapped by mistake, discovered only when every client
+# reports badSignature).
+printf '%s\n' "$CODE_ONLY" | grep -q 'UpdateKeyRing.swift' \
+    || fail "release.sh does not extract the verification key from UpdateKeyRing.swift"
+printf '%s\n' "$CODE_ONLY" | grep -q 'sign-update.swift" verify' \
+    || fail "release.sh does not run a verify step after signing"
+
+verify_line=$(grep -n 'sign-update.swift" verify' "$RELEASE_SCRIPT" | head -1 | cut -d: -f1 || true)
+sign_line=$(grep -n 'sign-update.swift" sign' "$RELEASE_SCRIPT" | head -1 | cut -d: -f1 || true)
+[ -n "$verify_line" ] && [ -n "$sign_line" ] && [ "$verify_line" -gt "$sign_line" ] \
+    || fail "release.sh's verify step does not run after the sign step"
+
+# Functionally prove the extraction actually works against the real
+# UpdateKeyRing.swift and the real embedded k1/k2 (not just that the grep
+# commands exist): the SAME extraction release.sh uses, run here directly,
+# must yield a 32-byte raw Ed25519 public key for both keyIds.
+KEYRING_SOURCE="$PROJECT_DIR/Sources/QwertySwitcher/Services/Updates/UpdateKeyRing.swift"
+[ -f "$KEYRING_SOURCE" ] || fail "UpdateKeyRing.swift is missing"
+for key_id in k1 k2; do
+    extracted=$(grep -o "\"$key_id\": *\"[A-Za-z0-9+/=]*\"" "$KEYRING_SOURCE" | head -1 | sed -E 's/.*"([A-Za-z0-9+\/=]+)"$/\1/')
+    [ -n "$extracted" ] || fail "could not extract a public key for $key_id from UpdateKeyRing.swift"
+    decoded_len=$(printf '%s' "$extracted" | base64 -d 2>/dev/null | wc -c | tr -d ' ')
+    [ "$decoded_len" = "32" ] || fail "$key_id in UpdateKeyRing.swift does not decode to a 32-byte raw Ed25519 key"
+done
+
 echo "PASS: sign-update.swift signs/verifies correctly and rejects tampering; release.sh stays a local, non-publishing script"

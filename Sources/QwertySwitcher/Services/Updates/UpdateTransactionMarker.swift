@@ -7,10 +7,44 @@ import Foundation
 /// (`UpdateStartupGuard`), and how a second `--install-update` invocation
 /// avoids racing an already-running one (`UpdateInstallerMode`).
 struct UpdateTransactionMarker: Codable, Equatable {
+    /// `.syncing` — the helper is still copying files or about to. `.launching`
+    /// — the sync (and its post-sync verification) already succeeded and the
+    /// helper is about to `open()` the target; a fresh launch racing this
+    /// marker should proceed normally rather than treat it as "still live"
+    /// (CRITICAL fix, security review: the marker used to only ever get
+    /// removed in a `defer` at `run()`'s return, which fires AFTER `open()`
+    /// — a new process starting in that window saw a live marker and either
+    /// quietly exited over a healthy launch, or raced the helper's own
+    /// rollback). Old markers with no `phase` key decode as `.syncing` —
+    /// fail closed.
+    enum Phase: String, Codable { case syncing, launching }
+
     let helperPid: Int32
     let timestampEpoch: TimeInterval
     let target: String
     let stage: String
+    var phase: Phase
+
+    init(helperPid: Int32, timestampEpoch: TimeInterval, target: String, stage: String, phase: Phase = .syncing) {
+        self.helperPid = helperPid
+        self.timestampEpoch = timestampEpoch
+        self.target = target
+        self.stage = stage
+        self.phase = phase
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case helperPid, timestampEpoch, target, stage, phase
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        helperPid = try container.decode(Int32.self, forKey: .helperPid)
+        timestampEpoch = try container.decode(TimeInterval.self, forKey: .timestampEpoch)
+        target = try container.decode(String.self, forKey: .target)
+        stage = try container.decode(String.self, forKey: .stage)
+        phase = try container.decodeIfPresent(Phase.self, forKey: .phase) ?? .syncing
+    }
 
     static let liveWindow: TimeInterval = 5 * 60
 
@@ -30,9 +64,10 @@ struct UpdateTransactionMarker: Codable, Equatable {
     }
 
     /// Pure: whether this marker still describes an install that should be
-    /// treated as "in progress". `pidIsAlive` is injected since `kill(pid,
-    /// 0)` isn't something a unit test can fake for an arbitrary pid.
+    /// treated as "in progress" and block a competing launch/transaction.
+    /// `pidIsAlive` is injected since `kill(pid, 0)` isn't something a unit
+    /// test can fake for an arbitrary pid.
     func isLive(now: TimeInterval, pidIsAlive: (Int32) -> Bool) -> Bool {
-        now - timestampEpoch < Self.liveWindow && pidIsAlive(helperPid)
+        phase == .syncing && now - timestampEpoch < Self.liveWindow && pidIsAlive(helperPid)
     }
 }

@@ -10,6 +10,12 @@ enum UpdateTargetGuard {
     }
 
     static func canAutoInstall(target: URL, fileManager: FileManager = .default) -> Bool {
+        // MINOR fix (security review): the helper's own `install.sh` call
+        // always targets a bundle literally named "Qwerty Switcher.app"
+        // (hardcoded, same as `install.sh` itself) — a renamed installed
+        // copy would make it create a SECOND bundle next to the real one
+        // instead of updating it. Refuse before ever staging anything.
+        guard target.lastPathComponent == "Qwerty Switcher.app" else { return false }
         guard fileManager.isWritableFile(atPath: target.deletingLastPathComponent().path) else { return false }
         guard !fileManager.fileExists(atPath: brokenMarkerURL().path) else { return false }
         return true

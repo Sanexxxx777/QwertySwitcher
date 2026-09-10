@@ -22,6 +22,21 @@ if bash "$SCANNER" "$TEMP_DIR/bundle" >/dev/null 2>&1; then
     exit 1
 fi
 
+# MAJOR fix (security review, update-feed signing keys): a 44-char base64
+# token (raw 32-byte Ed25519 key shape) on the same line as private/secret.
+printf 'let privateKey = "wNhEr2ENSrWFn3RSbBtRXV7/slD/YL+JU5P77oSZO8o="\n' > "$TEMP_DIR/leaked_private_key.txt"
+if bash "$SCANNER" "$TEMP_DIR/leaked_private_key.txt" >/dev/null 2>&1; then
+    echo "FAIL: scanner accepted a private-key-shaped base64 token next to 'private'"
+    exit 1
+fi
+
+# Negative fixture — this is the EXACT shape of our own legitimately embedded
+# public keys (UpdateKeyRing.swift's `"k1": "<44 chars>"`); it must NOT be
+# blocked, since it never mentions private/secret on the same line.
+printf '"k1": "wNhEr2ENSrWFn3RSbBtRXV7/slD/YL+JU5P77oSZO8o=",\n' > "$TEMP_DIR/embedded_public_key.txt"
+bash "$SCANNER" "$TEMP_DIR/embedded_public_key.txt" >/dev/null 2>&1 \
+    || { echo "FAIL: scanner false-positived on a legitimately embedded PUBLIC key"; exit 1; }
+
 grep -q 'release-secret-scan.sh.*PROJECT_DIR/Resources' "$PROJECT_DIR/Scripts/build.sh" || {
     echo "FAIL: app build does not scan source resources"
     exit 1

@@ -13,8 +13,13 @@ final class UpdateController: ObservableObject {
         case available(UpdateManifest)
         case downloading(UpdateManifest)
         case readyToInstall(UpdateManifest, deferred: Bool)
+        /// A MANUAL "Установить" click hit a transient safety gate
+        /// (secure input / mid-replacement) — retrying every few seconds
+        /// until it's safe, capped at 5 minutes.
+        case installPendingSafeWindow(UpdateManifest)
         case installing
-        case feedStale(checkedAt: Date)
+        case feedStale(validUntil: Date, checkedAt: Date)
+        case systemTooOld(manifest: UpdateManifest, checkedAt: Date)
         case feedInvalid
         case identityMismatch
         case cannotInstallHere
@@ -30,6 +35,7 @@ final class UpdateController: ObservableObject {
     private let secureInputProvider: () -> Bool
     private var checkTimer: Timer?
     private var windowRetryTimer: Timer?
+    private var manualRetryTimer: Timer?
     private var pendingStagedUpdate: UpdateStager.StagedUpdate?
 
     init(
@@ -45,6 +51,18 @@ final class UpdateController: ObservableObject {
         self.safetySnapshotProvider = safetySnapshotProvider
         self.secureInputProvider = secureInputProvider
         self.status = .idle(lastCheckAt: prefsService.updatesLastCheckAt)
+    }
+
+    /// Maps the (richer) UI status down to the coarse activity buckets
+    /// `UpdatePolicy.canStartNewCheck` reasons about — kept as a pure,
+    /// separately-testable function rather than inlining the switch.
+    private var activityState: UpdatePolicy.ActivityState {
+        switch status {
+        case .checking: return .checking
+        case .downloading: return .downloading
+        case .installing, .installPendingSafeWindow: return .installing
+        default: return .idle
+        }
     }
 
     // MARK: - Scheduling
@@ -72,8 +90,18 @@ final class UpdateController: ObservableObject {
 
     /// `userInitiated` bypasses the 24h cadence gate (spec: manual "Проверить
     /// сейчас" works even with the toggle off) — it does NOT bypass the
-    /// install-safety gates, only the schedule.
+    /// install-safety gates, only the schedule. MAJOR fix (security review):
+    /// this used to unconditionally set `.checking` even while a check or an
+    /// install was already in flight — the 24h timer and a manual click
+    /// could both start a `stage()` at once, and `.checking` would stomp a
+    /// live `.downloading`/`.installing` status. Now gated by
+    /// `UpdatePolicy.canStartNewCheck`; a manual click during one is a
+    /// logged no-op instead of a second race.
     func checkNow(userInitiated: Bool = true) {
+        guard UpdatePolicy.canStartNewCheck(current: activityState) else {
+            DebugLog.shared.log("UPD", "check already in progress — ignoring \(userInitiated ? "manual" : "scheduled") request")
+            return
+        }
         status = .checking
         let client = UpdateFeedClient(feedURLProvider: { [prefsService] in prefsService.updatesFeedURL }, userAgent: userAgent)
         client.fetchManifest { [weak self] result in
@@ -81,12 +109,19 @@ final class UpdateController: ObservableObject {
         }
     }
 
-    /// Manual "Установить" — explicit user action, so it stages and installs
-    /// right away rather than waiting for the idle/game-mode window that
-    /// only gates the SILENT automatic path.
+    /// Manual "Установить" — explicit user action. Works from BOTH `.available`
+    /// (stage first, then install) and `.readyToInstall` (already staged by
+    /// the automatic path but not installed yet, e.g. auto-install is off).
     func installAvailableUpdate() {
-        guard case .available(let manifest) = status else { return }
-        maybeStageAndInstall(manifest: manifest, userInitiated: true)
+        switch status {
+        case .available(let manifest):
+            maybeStageAndInstall(manifest: manifest, userInitiated: true)
+        case .readyToInstall:
+            guard let staged = pendingStagedUpdate else { return }
+            attemptManualInstall(staged: staged)
+        default:
+            break
+        }
     }
 
     // MARK: - Feed handling
@@ -104,6 +139,11 @@ final class UpdateController: ObservableObject {
             }
         case .success(let manifest):
             prefsService.updatesLastCheckAt = now
+            // MINOR fix (security review): a successful check used to leave
+            // a stale `updatesLastFailureAt` behind — `UpdatePolicy.shouldCheck`
+            // would then honor a 6h backoff against a failure that has long
+            // since been superseded by a working check.
+            prefsService.updatesLastFailureAt = nil
             let installedBuild = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String).flatMap(Int.init) ?? 0
             let outcome = UpdatePolicy.evaluate(
                 manifest: manifest, installedBuild: installedBuild,
@@ -112,10 +152,13 @@ final class UpdateController: ObservableObject {
             )
             DebugLog.shared.log("UPD", "check ok: build=\(manifest.build) outcome=\(outcome)")
             switch outcome {
-            case .upToDate, .systemTooOld:
+            case .upToDate:
                 status = .upToDate(checkedAt: now)
-            case .feedStale:
-                status = .feedStale(checkedAt: now)
+            case .systemTooOld(let manifest):
+                status = .systemTooOld(manifest: manifest, checkedAt: now)
+            case .feedStale(let manifest):
+                let validUntil = UpdatePolicy.parseISO8601(manifest.validUntil) ?? now
+                status = .feedStale(validUntil: validUntil, checkedAt: now)
             case .available(let manifest):
                 status = .available(manifest)
                 maybeStageAndInstall(manifest: manifest, userInitiated: false)
@@ -156,7 +199,7 @@ final class UpdateController: ObservableObject {
 
     private func decideInstallTiming(staged: UpdateStager.StagedUpdate, userInitiated: Bool) {
         if userInitiated {
-            performInstall(staged: staged)
+            attemptManualInstall(staged: staged)
             return
         }
         guard prefsService.updatesAutoInstall else {
@@ -175,6 +218,50 @@ final class UpdateController: ObservableObject {
             status = .readyToInstall(staged.manifest, deferred: false)
             scheduleInstallWindowRetry(staged: staged)
         }
+    }
+
+    /// MAJOR fix (security review): manual "Установить" used to go straight
+    /// to `performInstall`, bypassing `replacing`/secure-input entirely —
+    /// terminating the app mid-replacement is exactly the "text erased and
+    /// never retyped" failure `TextReplacer`'s atomicity guard exists to
+    /// avoid. Idle time and Game Mode are deliberately NOT required here —
+    /// those only keep the SILENT automatic path unsurprising, not an
+    /// explicit user click.
+    private func attemptManualInstall(staged: UpdateStager.StagedUpdate) {
+        let allowed = UpdatePolicy.shouldInstallManuallyNow(
+            secureInput: secureInputProvider(), replacing: safetySnapshotProvider().replacing
+        )
+        if allowed {
+            performInstall(staged: staged)
+        } else {
+            status = .installPendingSafeWindow(staged.manifest)
+            scheduleManualInstallRetry(staged: staged)
+        }
+    }
+
+    private func scheduleManualInstallRetry(staged: UpdateStager.StagedUpdate) {
+        manualRetryTimer?.invalidate()
+        let startedAt = Date()
+        let deadline: TimeInterval = 5 * 60
+        let timer = Timer(timeInterval: 3, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            guard self.pendingStagedUpdate != nil else { timer.invalidate(); return }
+            let allowed = UpdatePolicy.shouldInstallManuallyNow(
+                secureInput: self.secureInputProvider(), replacing: self.safetySnapshotProvider().replacing
+            )
+            if allowed {
+                timer.invalidate()
+                self.performInstall(staged: staged)
+                return
+            }
+            if Date().timeIntervalSince(startedAt) >= deadline {
+                timer.invalidate()
+                self.status = .readyToInstall(staged.manifest, deferred: false)
+                DebugLog.shared.log("UPD", "manual install could not find a safe window within 5 minutes")
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        manualRetryTimer = timer
     }
 
     private func scheduleInstallWindowRetry(staged: UpdateStager.StagedUpdate) {
@@ -240,12 +327,19 @@ final class UpdateController: ObservableObject {
         case .downloading:
             return "Загружаю…"
         case .readyToInstall(_, let deferred):
+            if !prefsService.updatesAutoInstall {
+                return "Готово к установке"
+            }
             return deferred ? "Установится при следующем запуске" : "Установится, когда вы перестанете печатать"
+        case .installPendingSafeWindow:
+            return "Установится через несколько секунд"
         case .installing:
             return "Устанавливаю…"
-        case .feedStale(let checkedAt):
-            let days = Calendar.current.dateComponents([.day], from: checkedAt, to: Date()).day ?? 0
-            return "Фид устарел (проверено \(days) дн. назад)"
+        case .feedStale(let validUntil, _):
+            let days = max(0, Calendar.current.dateComponents([.day], from: validUntil, to: Date()).day ?? 0)
+            return "Фид устарел (истёк \(days) дн. назад)"
+        case .systemTooOld(let manifest, _):
+            return "Есть \(manifest.version), нужна macOS ≥ \(manifest.minSystemVersion)"
         case .feedInvalid:
             return "Фид не прошёл проверку"
         case .identityMismatch:
@@ -257,15 +351,22 @@ final class UpdateController: ObservableObject {
         }
     }
 
+    /// MAJOR fix (security review): used to be true only for `.available` —
+    /// once auto-check staged an update with auto-install OFF, status moved
+    /// to `.readyToInstall` and NEITHER the window row nor the status-bar
+    /// menu ever offered a way to actually install it, while the text
+    /// claimed installation was imminent.
     var canOfferInstallButton: Bool {
-        if case .available = status { return true }
-        return false
+        switch status {
+        case .available, .readyToInstall: return true
+        default: return false
+        }
     }
 
     var availableManifest: UpdateManifest? {
         switch status {
         case .available(let manifest), .downloading(let manifest): return manifest
-        case .readyToInstall(let manifest, _): return manifest
+        case .readyToInstall(let manifest, _), .installPendingSafeWindow(let manifest): return manifest
         default: return nil
         }
     }

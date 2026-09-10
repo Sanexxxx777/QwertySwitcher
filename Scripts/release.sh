@@ -32,7 +32,7 @@ if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
 fi
 
 # ── 1. Universal build + DMG (make-dmg.sh already signs + secret-scans) ──
-echo "[1/7] Building universal .app and DMG..."
+echo "[1/8] Building universal .app and DMG..."
 ./Scripts/make-dmg.sh
 
 VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$PROJECT_DIR/Resources/Info.plist")
@@ -45,7 +45,7 @@ ZIP_PATH="$PROJECT_DIR/build/QwertySwitcher-$VERSION.zip"
 [ -f "$DMG_PATH" ]   || { echo "✗ $DMG_PATH not found after make-dmg.sh"; exit 3; }
 
 # ── 2. Update-feed archive ──
-echo "[2/7] Packaging update archive..."
+echo "[2/8] Packaging update archive..."
 rm -f "$ZIP_PATH"
 (cd "$PROJECT_DIR/build" && ditto -c -k --keepParent "Qwerty Switcher.app" "$(basename "$ZIP_PATH")")
 
@@ -54,7 +54,7 @@ SHA256=$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}')
 echo "  zip: $ZIP_PATH ($SIZE bytes, sha256 $SHA256)"
 
 # ── 3. Manifest ──
-echo "[3/7] Building manifest..."
+echo "[3/8] Building manifest..."
 PUBLISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 VALID_UNTIL=$(date -u -v+180d +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
     || date -u -d "+180 days" +"%Y-%m-%dT%H:%M:%SZ")
@@ -91,25 +91,48 @@ PY
 echo "  manifest: $MANIFEST_PATH"
 
 # ── 4. Sign ──
-echo "[4/7] Signing with $KEY_ID..."
+echo "[4/8] Signing with $KEY_ID..."
 [ -f "$KEY_PATH" ] || { echo "✗ private key not found: $KEY_PATH"; exit 4; }
 APPCAST_PATH="$PROJECT_DIR/build/appcast.json"
 swift "$PROJECT_DIR/Scripts/sign-update.swift" sign \
     --key "$KEY_PATH" --key-id "$KEY_ID" --manifest "$MANIFEST_PATH" --out "$APPCAST_PATH"
 
-# ── 5. Secret scan (bundle again, and the downloads folder before publish) ──
-echo "[5/7] Secret scan..."
+# ── 4.5. Verify against the key ACTUALLY EMBEDDED in the app (MAJOR fix,
+#    security review: signing with the wrong key — e.g. k1/k2 swapped by
+#    mistake — used to only be caught by a real client's badSignature much
+#    later). The public key is extracted straight from UpdateKeyRing.swift
+#    with grep, not duplicated as a separate literal here, so this can never
+#    drift out of sync with what the app itself trusts. ──
+echo "[4.5/8] Verifying appcast against UpdateKeyRing.swift's embedded $KEY_ID..."
+KEYRING_SOURCE="$PROJECT_DIR/Sources/QwertySwitcher/Services/Updates/UpdateKeyRing.swift"
+[ -f "$KEYRING_SOURCE" ] || { echo "✗ $KEYRING_SOURCE not found"; exit 5; }
+EMBEDDED_PUBLIC_KEY=$(grep -o "\"$KEY_ID\": *\"[A-Za-z0-9+/=]*\"" "$KEYRING_SOURCE" \
+    | head -1 | sed -E 's/.*"([A-Za-z0-9+\/=]+)"$/\1/')
+[ -n "$EMBEDDED_PUBLIC_KEY" ] || { echo "✗ could not find a public key for $KEY_ID in UpdateKeyRing.swift"; exit 5; }
+swift "$PROJECT_DIR/Scripts/sign-update.swift" verify --public "$EMBEDDED_PUBLIC_KEY" --appcast "$APPCAST_PATH" \
+    || { echo "✗ appcast does not verify against the $KEY_ID key embedded in the app — aborting release"; exit 5; }
+
+# ── 5. Secret scan (bundle, source tree, and the downloads folder before publish) ──
+echo "[5/8] Secret scan..."
 bash "$PROJECT_DIR/Scripts/release-secret-scan.sh" "$APP_BUNDLE"
+bash "$PROJECT_DIR/Scripts/release-secret-scan.sh" "$PROJECT_DIR/Sources"
 if [ -d "$DOWNLOADS_DIR" ]; then
     bash "$PROJECT_DIR/Scripts/release-secret-scan.sh" "$DOWNLOADS_DIR"
 fi
 
 # ── 6. Publish into the store checkout ──
-echo "[6/7] Copying to $DOWNLOADS_DIR ..."
+echo "[6/8] Copying to $DOWNLOADS_DIR ..."
 if [ -d "$STORE_DIR" ]; then
     mkdir -p "$FEED_DIR"
-    find "$DOWNLOADS_DIR" -maxdepth 1 -name 'QwertySwitcher-*.dmg' ! -name "QwertySwitcher-$VERSION.dmg" -exec rm -f {} \;
-    find "$DOWNLOADS_DIR" -maxdepth 1 -name 'QwertySwitcher-*.zip' ! -name "QwertySwitcher-$VERSION.zip" -exec rm -f {} \;
+    # Keep the version being published AND the immediately-previous one (a
+    # rollback from the store page must stay possible) — only delete
+    # anything OLDER than that. `sort -rn` by mtime, `tail -n +2` skips the
+    # most-recently-modified OTHER version (kept), deleting the rest.
+    for ext in dmg zip; do
+        find "$DOWNLOADS_DIR" -maxdepth 1 -name "QwertySwitcher-*.${ext}" ! -name "QwertySwitcher-$VERSION.${ext}" \
+            -exec stat -f '%m %N' {} \; 2>/dev/null | sort -rn | tail -n +2 | cut -d' ' -f2- \
+            | while IFS= read -r old; do rm -f "$old"; done
+    done
     cp "$DMG_PATH" "$DOWNLOADS_DIR/"
     cp "$ZIP_PATH" "$DOWNLOADS_DIR/"
     cp "$APPCAST_PATH" "$FEED_DIR/appcast.json"
@@ -127,7 +150,7 @@ else
 fi
 
 # ── 7. Owner commands — PRINTED, never run from here ──
-echo "[7/7] Done. Nothing was pushed or released — run these yourself:"
+echo "[8/8] Done. Nothing was pushed or released — run these yourself:"
 echo ""
 echo "  cd \"$STORE_DIR\" && git add -A && git commit -m \"Qwerty Switcher $VERSION\" && git push"
 echo "  cd \"$PROJECT_DIR\" && git add -A && git commit -m \"Release $VERSION (build $BUILD)\" && git push"

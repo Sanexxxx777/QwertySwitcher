@@ -62,6 +62,25 @@ enum UpdateInstallerMode {
     static func run(stage: URL, target: URL, parentPid: Int32, log: HelperLog = HelperLog()) -> Int32 {
         log.write("=== install-update stage=\(stage.path) target=\(target.path) parentPid=\(parentPid) ===")
 
+        // Never create a SECOND install location: install.sh's own dest is
+        // computed from `target`'s parent directory + a hardcoded bundle
+        // name, so a renamed target would make it build a sibling instead of
+        // updating in place.
+        guard target.lastPathComponent == "Qwerty Switcher.app" else {
+            log.write("refusing: target bundle name is not 'Qwerty Switcher.app' (\(target.lastPathComponent)) — would create a second copy")
+            return 11
+        }
+
+        // `--parent-pid 0` means "don't wait" — legitimate only from the
+        // contract's own throwaway invocations. In production the launcher
+        // always passes its real, positive pid; accepting 0 there would skip
+        // waiting for the outgoing app to quit AND skip killing stragglers,
+        // installing straight over a process that might still be running.
+        guard parentPid > 0 || isTestMode else {
+            log.write("refusing: --parent-pid 0 is only accepted under QSW_UPDATE_HELPER_TEST_MODE=1")
+            return 12
+        }
+
         let markerURL = UpdateTransactionMarker.markerURL()
         if let existing = UpdateTransactionMarker.read(at: markerURL),
            existing.stage != stage.path,
@@ -146,6 +165,15 @@ enum UpdateInstallerMode {
             return rollback(stage: stage, target: target, log: log)
         }
 
+        // CRITICAL fix (security review): the sync is confirmed good — clear
+        // the transaction marker NOW, before anything that could start a new
+        // process that reads it (the `open()` call below, or — in test mode
+        // — this early return). The end-of-function `defer` remains a safety
+        // net, but it used to be the ONLY place this happened, and it only
+        // fires on RETURN — i.e. AFTER `open()` had already spawned a new
+        // instance that could see a still-live marker.
+        finishTransaction(markerURL: markerURL, log: log)
+
         if isTestMode {
             log.write("test mode — skipping launch confirmation")
             log.write("install complete")
@@ -212,11 +240,30 @@ enum UpdateInstallerMode {
         open(target)
     }
 
+    /// Single choke point for every `/usr/bin/open` call this file makes
+    /// (success path, early-refusal path, rollback path) — clearing the
+    /// transaction marker here as the FIRST action means every one of them
+    /// is covered, not just the ones that happened to remember to call
+    /// `finishTransaction` themselves.
     private static func open(_ target: URL) {
+        finishTransaction(markerURL: UpdateTransactionMarker.markerURL(), log: HelperLog())
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         process.arguments = [target.path]
         try? process.run()
+    }
+
+    /// Marks the transaction marker `.launching` (in case removal itself
+    /// races or fails) and then removes it — a fresh launch racing this
+    /// exact moment sees either no marker, or one that no longer reads as
+    /// "live" (`UpdateTransactionMarker.isLive` requires `phase == .syncing`).
+    private static func finishTransaction(markerURL: URL, log: HelperLog) {
+        if var marker = UpdateTransactionMarker.read(at: markerURL) {
+            marker.phase = .launching
+            try? marker.write(to: markerURL)
+        }
+        try? FileManager.default.removeItem(at: markerURL)
+        log.write("transaction marker cleared")
     }
 
     private static func waitForBundleProcess(target: URL, timeout: TimeInterval) -> Bool {

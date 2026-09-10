@@ -17,6 +17,7 @@ final class UpdateStager {
         case identityMismatch(installed: String, staged: String)
         case bundleIdentifierMismatch
         case buildMismatch
+        case sizeMismatch
         case stageBundleMissing
     }
 
@@ -100,6 +101,10 @@ final class UpdateStager {
             completion(.failure(.tooLarge))
             return
         }
+        guard data.count == manifest.size else {
+            completion(.failure(.sizeMismatch))
+            return
+        }
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         guard digest == manifest.sha256.lowercased() else {
             completion(.failure(.checksumMismatch))
@@ -156,7 +161,16 @@ final class UpdateStager {
 
         let stagedIdentity = DesignatedRequirement.signingIdentity(fromDesignatedRequirement: designatedRequirement(of: appBundle))
         let installedIdentity = DesignatedRequirement.signingIdentity(fromDesignatedRequirement: designatedRequirement(of: installedBundle))
-        guard stagedIdentity == installedIdentity else {
+        // MAJOR fix (security review): comparing the two REDUCED strings for
+        // equality alone lets "adhoc" == "adhoc" through — but "adhoc" means
+        // a cdhash-based DR that changes on EVERY rebuild, so two ad-hoc
+        // builds reading as "the same identity" is exactly backwards: the
+        // stored TCC csreq would stop matching the moment this installs,
+        // even though this gate just approved it. Untrusted, unreproducible
+        // identities are refused outright, matching == not being enough.
+        guard stagedIdentity == installedIdentity,
+              stagedIdentity != "adhoc", stagedIdentity != "unsigned"
+        else {
             completion(.failure(.identityMismatch(installed: installedIdentity, staged: stagedIdentity)))
             return
         }
@@ -205,12 +219,23 @@ final class UpdateStager {
         return Self.evaluateUnpackedEntries(entries, maxFiles: maxUnpackedFiles, maxBytes: maxUnpackedBytes)
     }
 
+    /// MINOR fix (security review): the old check compared raw
+    /// `standardizedFileURL` paths with a bare `hasPrefix` — a symlink into
+    /// `<root>SIBLING/...` would pass (no path-boundary separator), and
+    /// `standardizedFileURL` doesn't resolve symlinks in the PARENT chain
+    /// (e.g. macOS's own `/tmp` → `/private/tmp`), so `root` and the
+    /// symlink's target could disagree on what "the same directory" even
+    /// looks like. Both sides now go through `resolvingSymlinksInPath()` and
+    /// the containment check requires an exact match or a `/`-terminated
+    /// prefix.
     private func isSymlinkContained(_ url: URL, root: URL) -> Bool {
         guard let destination = try? fileManager.destinationOfSymbolicLink(atPath: url.path) else { return false }
-        let resolvedPath = destination.hasPrefix("/")
+        let rawResolvedPath = destination.hasPrefix("/")
             ? destination
-            : url.deletingLastPathComponent().appendingPathComponent(destination).standardizedFileURL.path
-        return resolvedPath.hasPrefix(root.standardizedFileURL.path)
+            : url.deletingLastPathComponent().appendingPathComponent(destination).path
+        let realResolved = URL(fileURLWithPath: rawResolvedPath).resolvingSymlinksInPath().path
+        let realRoot = root.resolvingSymlinksInPath().path
+        return realResolved == realRoot || realResolved.hasPrefix(realRoot + "/")
     }
 
     private func runCodesignVerify(_ bundle: URL) -> Bool {
@@ -249,7 +274,15 @@ final class UpdateStager {
         process.arguments = ["-rd", "com.apple.quarantine", bundle.path]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        try? process.run()
-        process.waitUntilExit()
+        do {
+            // MINOR fix (security review): `try? process.run()` swallowed a
+            // launch failure and fell straight into `waitUntilExit()` on a
+            // process that never started — `Process` traps in that state.
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            // Best-effort only: a failed quarantine removal doesn't block
+            // the install, it just means Gatekeeper may prompt once.
+        }
     }
 }

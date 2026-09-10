@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Darwin
 
 /// Wave W1-B: opt-in auto-updater + "Собрать отчёт". Covers manifest/appcast
 /// parsing, signature verification, anti-rollback, policy branches, limits,
@@ -10,11 +11,18 @@ enum UpdatesTests {
         manifestParsing()
         signatureVerification()
         versionOrdering()
+        staleOutcomesCarryManifest()
         policyChecks()
+        manualInstallGate()
+        checkConcurrencyGate()
         limits()
         designatedRequirementParser()
         reportFilter()
         feedURLOverride()
+        transactionMarkerPhase()
+        lastSeenBuildFloor()
+        startupStageCleanup()
+        targetGuardBundleName()
         structuralGuards()
     }
 
@@ -180,6 +188,36 @@ enum UpdatesTests {
         }
     }
 
+    /// MAJOR fix (security review, items 10/11): `.feedStale`/`.systemTooOld`
+    /// used to carry no payload at all, so the UI could not report how long
+    /// ago the feed expired or which version/macOS floor was being withheld
+    /// — it silently fell back to generic "up to date" wording.
+    private static func staleOutcomesCarryManifest() {
+        TestRunner.section("Updates — .feedStale/.systemTooOld carry the manifest that triggered them")
+
+        let now = Date()
+        let macOS13 = OperatingSystemVersion(majorVersion: 13, minorVersion: 0, patchVersion: 0)
+
+        let expired = try! JSONDecoder().decode(UpdateManifest.self, from: fixtureManifestJSON(build: 77, validUntil: "2000-01-01T00:00:00Z"))
+        switch UpdatePolicy.evaluate(manifest: expired, installedBuild: 1, lastSeenBuild: 0, currentSystemVersion: macOS13, now: now) {
+        case .feedStale(let m): TestRunner.assertEqual(m.build, 77, ".feedStale carries the manifest that expired")
+        default: TestRunner.assertTrue(false, "expected .feedStale(manifest)")
+        }
+
+        let macOS14 = OperatingSystemVersion(majorVersion: 14, minorVersion: 0, patchVersion: 0)
+        let tooNew = try! JSONDecoder().decode(
+            UpdateManifest.self,
+            from: try! JSONEncoder().encode(UpdateManifest(
+                version: "0.13.0", build: 88, minSystemVersion: "99.0", archiveURL: "https://example.com/x.zip",
+                size: 1, sha256: "aa", publishedAt: "2026-01-01T00:00:00Z", validUntil: "2099-01-01T00:00:00Z", notes: ""
+            ))
+        )
+        switch UpdatePolicy.evaluate(manifest: tooNew, installedBuild: 1, lastSeenBuild: 0, currentSystemVersion: macOS14, now: now) {
+        case .systemTooOld(let m): TestRunner.assertEqual(m.build, 88, ".systemTooOld carries the manifest that needs a newer macOS")
+        default: TestRunner.assertTrue(false, "expected .systemTooOld(manifest)")
+        }
+    }
+
     // MARK: - Policy (shouldCheck / shouldInstallNow)
 
     private static func policyChecks() {
@@ -234,6 +272,58 @@ enum UpdatesTests {
         TestRunner.assertTrue(
             !UpdatePolicy.shouldInstallNow(autoInstall: true, idleSeconds: 200, secureInput: false, replacing: false, gameModeActive: true),
             "install refused while Game Mode is active"
+        )
+    }
+
+    /// MAJOR fix (security review, item 6): manual "Установить" used to
+    /// bypass `replacing`/secure-input entirely — this is the gate that now
+    /// stands between a click and `performInstall`. Idle time and Game Mode
+    /// are deliberately absent: those only keep the SILENT automatic path
+    /// unsurprising, not an explicit user action.
+    private static func manualInstallGate() {
+        TestRunner.section("Updates — UpdatePolicy.shouldInstallManuallyNow")
+
+        TestRunner.assertTrue(
+            UpdatePolicy.shouldInstallManuallyNow(secureInput: false, replacing: false),
+            "manual install allowed with nothing blocking"
+        )
+        TestRunner.assertTrue(
+            !UpdatePolicy.shouldInstallManuallyNow(secureInput: true, replacing: false),
+            "manual install refused during secure input"
+        )
+        TestRunner.assertTrue(
+            !UpdatePolicy.shouldInstallManuallyNow(secureInput: false, replacing: true),
+            "manual install refused mid-replacement"
+        )
+        TestRunner.assertTrue(
+            !UpdatePolicy.shouldInstallManuallyNow(secureInput: true, replacing: true),
+            "manual install refused when both block"
+        )
+    }
+
+    /// MAJOR fix (security review, item 8): the 24h timer and a manual click
+    /// used to both fire `.checking`/`stage()` unconditionally — a scheduled
+    /// tick could stomp an in-flight `.downloading`/`.installing`, or the two
+    /// could race a second `stage()` call. `canStartNewCheck` is the single
+    /// gate both `UpdateController.checkNow` call sites go through now.
+    private static func checkConcurrencyGate() {
+        TestRunner.section("Updates — UpdatePolicy.canStartNewCheck")
+
+        TestRunner.assertTrue(
+            UpdatePolicy.canStartNewCheck(current: .idle),
+            "a new check may start while idle"
+        )
+        TestRunner.assertTrue(
+            !UpdatePolicy.canStartNewCheck(current: .checking),
+            "a new check may not start while already checking"
+        )
+        TestRunner.assertTrue(
+            !UpdatePolicy.canStartNewCheck(current: .downloading),
+            "a new check may not start while downloading/staging"
+        )
+        TestRunner.assertTrue(
+            !UpdatePolicy.canStartNewCheck(current: .installing),
+            "a new check may not start while installing"
         )
     }
 
@@ -358,6 +448,171 @@ enum UpdatesTests {
         TestRunner.assertTrue(
             !UpdatePolicy.isAcceptableFeedURL("not a url"),
             "unparseable strings are rejected"
+        )
+    }
+
+    // MARK: - Transaction marker phase (CRITICAL fix, item 1)
+
+    private static func transactionMarkerPhase() {
+        TestRunner.section("Updates — UpdateTransactionMarker.phase (marker cleared before relaunch)")
+
+        let now = Date().timeIntervalSince1970
+        let syncingMarker = UpdateTransactionMarker(helperPid: 1, timestampEpoch: now, target: "/t", stage: "/s", phase: .syncing)
+        TestRunner.assertTrue(
+            syncingMarker.isLive(now: now, pidIsAlive: { _ in true }),
+            "a fresh .syncing marker with a live pid is live"
+        )
+
+        let launchingMarker = UpdateTransactionMarker(helperPid: 1, timestampEpoch: now, target: "/t", stage: "/s", phase: .launching)
+        TestRunner.assertTrue(
+            !launchingMarker.isLive(now: now, pidIsAlive: { _ in true }),
+            "a .launching marker is never live, even with a fresh timestamp and a live pid — the sync already succeeded, a racing launch should proceed"
+        )
+
+        // Old markers written before `phase` existed decode with no `phase`
+        // key at all — must default to .syncing (fail closed), not silently
+        // read as "already launching" and stop blocking a race it should
+        // still block.
+        let legacyJSON = Data("""
+        {"helperPid":1,"timestampEpoch":\(now),"target":"/t","stage":"/s"}
+        """.utf8)
+        let legacyMarker = try? JSONDecoder().decode(UpdateTransactionMarker.self, from: legacyJSON)
+        TestRunner.assertEqual(legacyMarker?.phase, .syncing, "a marker with no phase key decodes as .syncing (fail closed)")
+
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("qsw-marker-test-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try? launchingMarker.write(to: tempURL)
+        let reread = UpdateTransactionMarker.read(at: tempURL)
+        TestRunner.assertEqual(reread?.phase, .launching, "phase survives a write/read round trip")
+    }
+
+    // MARK: - Startup guard: anti-rollback floor + stage cleanup (CRITICAL fixes, items 2/4)
+
+    private static func lastSeenBuildFloor() {
+        TestRunner.section("Updates — UpdateStartupGuard anti-rollback floor uses max(), never lowers")
+
+        let suite = "qsw-test-lastseen-floor-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            TestRunner.skip("could not create isolated UserDefaults suite for lastSeenBuildFloor")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let prefs = PreferencesService(defaults: defaults)
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("qsw-updates-floor-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        setenv("QSW_UPDATES_ROOT_DIR", root.path, 1)
+        defer { unsetenv("QSW_UPDATES_ROOT_DIR") }
+
+        let currentBuild = 500 // fixed, injected test value — see onNormalLaunchStarted's doc
+
+        prefs.updatesLastSeenBuild = currentBuild + 1000
+        UpdateStartupGuard.onNormalLaunchStarted(prefs: prefs, currentBuild: currentBuild)
+        TestRunner.assertEqual(
+            prefs.updatesLastSeenBuild, currentBuild + 1000,
+            "a launch of an OLDER build never lowers the anti-rollback floor"
+        )
+
+        prefs.updatesLastSeenBuild = currentBuild - 1
+        UpdateStartupGuard.onNormalLaunchStarted(prefs: prefs, currentBuild: currentBuild)
+        TestRunner.assertEqual(
+            prefs.updatesLastSeenBuild, currentBuild,
+            "a launch of a NEWER build still raises the floor to match"
+        )
+    }
+
+    private static func startupStageCleanup() {
+        TestRunner.section("Updates — UpdateStartupGuard.onNormalLaunchStarted cleans old stages, never an in-flight one")
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("qsw-updates-cleanup-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        setenv("QSW_UPDATES_ROOT_DIR", root.path, 1)
+        defer { unsetenv("QSW_UPDATES_ROOT_DIR") }
+
+        let currentBuild = 500 // fixed, injected test value — see onNormalLaunchStarted's doc
+
+        func makeStage(name: String, ageSeconds: TimeInterval, withBackup: Bool, stagedBuild: Int?) -> URL {
+            let stage = root.appendingPathComponent(name, isDirectory: true)
+            try? FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true)
+            if withBackup {
+                try? FileManager.default.createDirectory(
+                    at: stage.appendingPathComponent("backup"), withIntermediateDirectories: true
+                )
+            }
+            if let stagedBuild {
+                let contents = stage.appendingPathComponent("Qwerty Switcher.app/Contents", isDirectory: true)
+                try? FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+                let plist: [String: Any] = [
+                    "CFBundleVersion": String(stagedBuild), "CFBundleIdentifier": AppIdentity.bundleIdentifier,
+                ]
+                (plist as NSDictionary).write(to: contents.appendingPathComponent("Info.plist"), atomically: true)
+            }
+            try? FileManager.default.setAttributes(
+                [.creationDate: Date().addingTimeInterval(-ageSeconds)], ofItemAtPath: stage.path
+            )
+            return stage
+        }
+
+        let freshWithBackup = makeStage(name: "fresh", ageSeconds: 60, withBackup: true, stagedBuild: currentBuild)
+        let oldNoBackup = makeStage(name: "old-no-backup", ageSeconds: 2 * 3600, withBackup: false, stagedBuild: nil)
+        let oldMatchingBuild = makeStage(name: "old-matching", ageSeconds: 2 * 3600, withBackup: true, stagedBuild: currentBuild)
+        let oldMismatchedBuild = makeStage(
+            name: "old-mismatched", ageSeconds: 2 * 3600, withBackup: true, stagedBuild: currentBuild + 999
+        )
+        let protectedStage = makeStage(
+            name: "protected", ageSeconds: 2 * 3600, withBackup: true, stagedBuild: currentBuild + 999
+        )
+        let markerURL = root.appendingPathComponent(".transaction")
+        let marker = UpdateTransactionMarker(
+            helperPid: 1, timestampEpoch: Date().timeIntervalSince1970, target: "/nonexistent", stage: protectedStage.path
+        )
+        try? marker.write(to: markerURL)
+
+        let suite = "qsw-test-cleanup-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            TestRunner.skip("could not create isolated UserDefaults suite for startupStageCleanup")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let prefs = PreferencesService(defaults: defaults)
+
+        UpdateStartupGuard.onNormalLaunchStarted(prefs: prefs, currentBuild: currentBuild)
+
+        TestRunner.assertTrue(
+            FileManager.default.fileExists(atPath: freshWithBackup.path),
+            "a stage younger than 1h survives cleanup regardless of backup/build"
+        )
+        TestRunner.assertTrue(
+            !FileManager.default.fileExists(atPath: oldNoBackup.path),
+            "an old stage with no backup is removed"
+        )
+        TestRunner.assertTrue(
+            !FileManager.default.fileExists(atPath: oldMatchingBuild.path),
+            "an old stage whose staged build matches the now-running build is removed, backup included"
+        )
+        TestRunner.assertTrue(
+            FileManager.default.fileExists(atPath: oldMismatchedBuild.path),
+            "an old stage whose staged build does NOT match the running build is left alone"
+        )
+        TestRunner.assertTrue(
+            FileManager.default.fileExists(atPath: protectedStage.path),
+            "a stage named by a still-present transaction marker is never touched, regardless of age — CRITICAL fix: its helper may still be mid-launch-confirmation or mid-rollback"
+        )
+        TestRunner.assertTrue(
+            FileManager.default.fileExists(atPath: markerURL.path),
+            "cleanup does not remove the .transaction marker file itself"
+        )
+    }
+
+    private static func targetGuardBundleName() {
+        TestRunner.section("Updates — UpdateTargetGuard rejects a renamed target bundle")
+
+        let renamed = URL(fileURLWithPath: "/tmp/Not Qwerty Switcher.app")
+        TestRunner.assertTrue(
+            !UpdateTargetGuard.canAutoInstall(target: renamed),
+            "a target not literally named 'Qwerty Switcher.app' is never auto-installable — install.sh's --dest is a parent directory, the bundle name inside it is hardcoded"
         )
     }
 

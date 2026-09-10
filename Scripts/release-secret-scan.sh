@@ -36,6 +36,17 @@ scan_file() {
     if LC_ALL=C grep -Eiq '(^|[[:space:]])(APPLE_APP_SPECIFIC_PASSWORD|SPARKLE_PRIVATE_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|GITHUB_TOKEN|TELEGRAM_BOT_TOKEN|CRYPTOBOT_TOKEN|QSW_ADMIN_TOKEN|PRIVATE_KEY)[[:space:]]*[:=][[:space:]]*[^[:space:]#]+' "$file"; then
         echo "Secret scan blocked: credential assignment: $file" >&2
         status=1
+        return
+    fi
+
+    # A 44-character base64 token (the exact shape of a raw 32-byte Ed25519
+    # key, padded) on the SAME LINE as "private"/"secret" — same-line only,
+    # deliberately, so this does NOT false-positive on our own legitimately
+    # embedded PUBLIC keys (UpdateKeyRing.swift's `"k1": "<44 chars>"` lines
+    # never mention "private"/"secret").
+    if LC_ALL=C grep -Ei '[A-Za-z0-9+/]{43}=([^=]|$)' "$file" | LC_ALL=C grep -Eiq '(private|secret)'; then
+        echo "Secret scan blocked: possible embedded private-key-shaped base64: $file" >&2
+        status=1
     fi
 }
 
