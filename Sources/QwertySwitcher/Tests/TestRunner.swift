@@ -6127,21 +6127,28 @@ enum InstantLearningBypassTests {
             { layout in inputSources.convertKeystrokes(strokes, toLayout: layout) }
         }
 
-        // Empty Set: byte-for-byte the ordinary path — junkGate silences the
-        // flagship "сдуфк" case exactly like the pre-wave-2 corpus expects.
+        // Empty Set = the ordinary path. Until 0.11.0 junkGate silenced the
+        // flagship "сдуфк" case here (its own reading passed the one-table
+        // `isClean`), so "clear" could only ever fire through the learned
+        // bypass. Since 0.11.0 `isClean` reads the PLAUSIBLE table (bigram in
+        // ≥8 dictionary words): "фк" occurs in 6 ru words, the own reading is
+        // no longer "clean", the gate stays open and "clear" wins on ordinary
+        // scoring with NO learned entry at all — the recall gain the K=8
+        // stand measured (4/15 → 11/15 field words fixed instantly).
         let ordinary = analyzer.evaluate(
             keystrokes: clearStrokes, currentLayout: ruLayout, otherLayouts: [enLayout],
             convert: convert(clearStrokes), learnedActive: []
         )
-        TestRunner.assertNil(ordinary.result, "empty learnedActive: 'сдуфк' stays silent — byte-for-byte the pre-wave-2 corpus behavior")
+        TestRunner.assertEqual(ordinary.result?.correctedWord, "clear", "0.11.0 (plausible bigrams K=8): 'сдуфк' fires 'clear' on the ordinary scored path, no learned entry needed")
+        TestRunner.assertTrue(ordinary.result?.wasLearned == false, "ordinary fire is NOT flagged wasLearned")
 
-        // Fires THROUGH whatever silenced the ordinary call above (junkGate
-        // here) once "clear" is an active learned entry — the flagship case.
+        // The learned bypass still stands BEFORE the junk gate and still
+        // fires the same word, flagged as learned — the two paths agree.
         let learned = analyzer.evaluate(
             keystrokes: clearStrokes, currentLayout: ruLayout, otherLayouts: [enLayout],
             convert: convert(clearStrokes), learnedActive: ["clear"]
         )
-        TestRunner.assertTrue(ordinary.silence != nil, "sanity: the ordinary path really was silenced by some gate")
+        TestRunner.assertNil(ordinary.silence, "0.11.0: the ordinary path is no longer silenced for 'сдуфк'")
         TestRunner.assertEqual(learned.result?.correctedWord, "clear", "learned bypass fires 'сдуфк' → clear through the ordinary gate")
         TestRunner.assertTrue(learned.result?.wasLearned == true, "fired result is flagged wasLearned")
 
@@ -6193,7 +6200,7 @@ enum InstantLearningBypassTests {
             keystrokes: clearStrokes, currentLayout: ruLayout, otherLayouts: [enLayout],
             convert: convert(clearStrokes), learnedActive: store.activeKeys(lang: "en")
         )
-        TestRunner.assertNil(count1Result.result, "count==1 (not yet promoted) never reaches the bypass via the real store")
+        TestRunner.assertTrue(count1Result.result?.wasLearned != true, "count==1 (not yet promoted) never reaches the bypass via the real store — a fire here is the ordinary scored path (0.11.0), never the learned one")
     }
 }
 
@@ -6492,7 +6499,7 @@ enum LearningReplayChainTests {
             keystrokes: strokes, currentLayout: ruLayout, otherLayouts: [enLayout],
             convert: convert, learnedActive: store.activeKeys(lang: "en")
         )
-        TestRunner.assertNil(before.result, "before any DS confirmation, instant stays silent")
+        TestRunner.assertTrue(before.result?.wasLearned != true, "before any DS confirmation the learned bypass cannot fire (0.11.0: the ordinary scored path may — see InstantLearningBypassTests)")
 
         // Owner confirms via Double Shift twice ("сдуфк"+DS ×2).
         TestRunner.assertEqual(
@@ -6522,7 +6529,7 @@ enum LearningReplayChainTests {
             keystrokes: strokes, currentLayout: ruLayout, otherLayouts: [enLayout],
             convert: convert, learnedActive: store.activeKeys(lang: "en")
         )
-        TestRunner.assertNil(after.result, "after revert, the fourth occurrence no longer fires")
+        TestRunner.assertTrue(after.result?.wasLearned != true, "after revert the learned bypass is gone; at the analyzer level the ordinary scored path may still fire (0.11.0) — the KeyboardMonitor exception check asserted next is what blocks the fourth occurrence")
         TestRunner.assertTrue(exceptions.isAutoLearned("сдуфк"), "the exception is in place for the KeyboardMonitor-level exception check too")
     }
 }

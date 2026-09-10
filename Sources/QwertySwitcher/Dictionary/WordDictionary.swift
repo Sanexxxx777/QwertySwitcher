@@ -13,14 +13,74 @@ import AppKit
 final class WordDictionary {
     private var bloomFilters: [String: BloomFilter] = [:]
     private var sortedWords: [String: [String]] = [:]
-    /// All bigrams occurring in any bundled word of length >=3, per language —
-    /// junk-override's "is this letter pair even possible" check
-    /// (`JunkMeter`, `LanguageDetector`). Built alongside `sortedWords` in the
-    /// same background pass (len-2 dictionary garbage — see `twoLetterWords`
-    /// in LanguageDetector — is excluded so it can't widen the possible set).
-    /// Python mirror: Scripts/research/false_switch_sim.py `POSSIBLE` — keep
-    /// both in sync.
-    private var bigramSets: [String: Set<String>] = [:]
+    /// TWO tables per language, both derived from the SAME per-bigram "in how
+    /// many bundled words of length >=3 does this pair occur" counter (see
+    /// `buildBigramTables`) — one threshold does not fit both sides of
+    /// `JunkMeter`. Field data 08-10.09.2026: a single "occurs in >=1 word"
+    /// table let `yjds` ("новы" typed on en) pass `isClean` as a plausible
+    /// English target (its bigrams `yj`/`jd` each occur in a handful of real
+    /// words — `yj` in 10, `jd` in 7 — but never look like ordinary English),
+    /// silencing 1372 of 1444 instant junk-gate checks over 1.5 days.
+    /// Raising the bar helps the CLEAN/plausible side (a target must look
+    /// MORE like a real word to win) but must NOT also raise it for the
+    /// JUNK/possible side (`isJunk` on the OWN reading, junk-override's
+    /// class of "Russian typo → Latin garbage" — a stricter possible-table
+    /// makes `isJunk` fire MORE often on genuine typos, the opposite of
+    /// safer) — hence two tables, not one raised threshold.
+    /// - `possibleBigrams` — count >= 1 (byte-for-byte the old single table):
+    ///   `junk-override`'s own-reading `isJunk` gate.
+    /// - `plausibleBigrams` — count >= `plausibleMinWords`: every gate that
+    ///   asks "does this look enough like a real word to stay SILENT/win as
+    ///   a target" (`isClean` on a junk-override target, the instant-path
+    ///   junk-gate, Mechanism C's `isCleanReading`).
+    /// Len-2 dictionary garbage (see `twoLetterWords` in LanguageDetector) is
+    /// excluded from BOTH so it can't widen either set. Python mirror:
+    /// Scripts/research/false_switch_sim.py `POSSIBLE`/`PLAUSIBLE` — keep
+    /// all three (this file + the two tables) in sync.
+    private var possibleBigramSets: [String: Set<String>] = [:]
+    private var plausibleBigramSets: [String: Set<String>] = [:]
+
+    /// Minimum number of distinct len>=3 bundled words a bigram must occur in
+    /// to count as "plausible" rather than merely "possible" — calibrated
+    /// against `Scripts/research/false_switch_sim.py` (`PLAUSIBLE_MIN_WORDS`,
+    /// keep both in sync): K=8 clears every gate the stand measures (0 FP on
+    /// the honest corpora, ≥85% suppression of the false ru→en/en→ru instant
+    /// fires in both directions, boundary metrics — false switches, nonling,
+    /// dict-ru recall, OOV-en recall — unchanged from the K=1/single-table
+    /// baseline) while K=13+ starts failing suppression. Tied to the CURRENT
+    /// bundled dictionaries' composition (`Resources/Dictionaries/*.txt`) —
+    /// re-run the stand and re-pick K if the word lists change materially.
+    static let plausibleMinWords = 8
+
+    /// Pure bigram-table builder, factored out of `loadSortedWordsAsync` so
+    /// `BigramTablesTests.swift` can exercise it directly on a small, closed
+    /// word list instead of the full ~700K-word bundled dictionaries. Counts
+    /// how many DISTINCT qualifying words (length >=3) contain each bigram
+    /// — not raw occurrences, so a bigram repeated within one word (e.g.
+    /// "ss" in "assess") still counts that word once — then derives both
+    /// tables from the same counter. `minWords: 1` reproduces the old
+    /// single-table `possible` set byte-for-byte (both returned sets are
+    /// then identical).
+    static func buildBigramTables(words: [String], minWords: Int) -> (possible: Set<String>, plausible: Set<String>) {
+        var wordCountByBigram: [String: Int] = [:]
+        for word in words where word.count >= 3 {
+            let chars = Array(word)
+            var bigramsInThisWord = Set<String>()
+            for i in 0..<(chars.count - 1) {
+                bigramsInThisWord.insert(String(chars[i...i + 1]))
+            }
+            for bigram in bigramsInThisWord {
+                wordCountByBigram[bigram, default: 0] += 1
+            }
+        }
+        var possible = Set<String>()
+        var plausible = Set<String>()
+        for (bigram, count) in wordCountByBigram {
+            possible.insert(bigram)
+            if count >= minWords { plausible.insert(bigram) }
+        }
+        return (possible, plausible)
+    }
     private let sortedWordsLock = NSLock()
     private let sortedWordsGroup = DispatchGroup()
     private let spellChecker = NSSpellChecker.shared
@@ -105,7 +165,17 @@ final class WordDictionary {
     func possibleBigrams(language: String) -> Set<String>? {
         sortedWordsLock.lock()
         defer { sortedWordsLock.unlock() }
-        return bigramSets[language]
+        return possibleBigramSets[language]
+    }
+
+    /// Same nil-while-loading contract as `possibleBigrams` above — the two
+    /// tables are published together under the same lock (see
+    /// `loadSortedWordsAsync`), so they are never nil/non-nil out of step
+    /// with each other for a given language.
+    func plausibleBigrams(language: String) -> Set<String>? {
+        sortedWordsLock.lock()
+        defer { sortedWordsLock.unlock() }
+        return plausibleBigramSets[language]
     }
 
     /// Exact membership in the bundled word list — binary search over the same
@@ -188,16 +258,11 @@ final class WordDictionary {
                 guard let source = self.loadWordListData(named: fileName) else { continue }
                 let words = self.parseWordList(source.data)
                 let sorted = words.sorted()
-                var bigrams = Set<String>()
-                for word in words where word.count >= 3 {
-                    let chars = Array(word)
-                    for i in 0..<(chars.count - 1) {
-                        bigrams.insert(String(chars[i...i + 1]))
-                    }
-                }
+                let tables = Self.buildBigramTables(words: words, minWords: Self.plausibleMinWords)
                 self.sortedWordsLock.lock()
                 self.sortedWords[lang] = sorted
-                self.bigramSets[lang] = bigrams
+                self.possibleBigramSets[lang] = tables.possible
+                self.plausibleBigramSets[lang] = tables.plausible
                 self.sortedWordsLock.unlock()
             }
         }

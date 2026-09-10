@@ -103,6 +103,12 @@ if [ -d "$PROJECT_DIR/Resources/Fonts" ]; then
     cp "$PROJECT_DIR/Resources/Fonts/"*.ttf "$APP_BUNDLE/Contents/Resources/Fonts/" 2>/dev/null || true
 fi
 
+# The in-app updater (0.11.0) installs the next version by running a COPY of
+# this very installer taken from the staged bundle's Resources — it must be
+# sealed into every distributed bundle BEFORE signing, exactly as build.sh
+# does. Without this line self-update fails on every copy installed from DMG.
+cp "$PROJECT_DIR/Scripts/install.sh" "$APP_BUNDLE/Contents/Resources/install.sh"
+chmod +x "$APP_BUNDLE/Contents/Resources/install.sh"
 bash "$PROJECT_DIR/Scripts/release-secret-scan.sh" "$APP_BUNDLE"
 
 

@@ -202,3 +202,21 @@ if [ -n "$sign_line" ]; then
 fi
 
 echo "PASS: build.sh seals Scripts/install.sh into Contents/Resources before signing"
+
+# ── 4. make-dmg.sh seals install.sh too (0.11.0) ───────────────────────────
+# The DMG is how every real user (owner's partner, mother) got the app: a
+# bundle built by make-dmg.sh without the sealed installer would fail its
+# first self-update just like a build.sh one would.
+DMG_SCRIPT="$PROJECT_DIR/Scripts/make-dmg.sh"
+[ -f "$DMG_SCRIPT" ] || fail "Scripts/make-dmg.sh is missing"
+DMG_CODE_ONLY="$(grep -v '^[[:space:]]*#' "$DMG_SCRIPT")"
+grep -q 'cp .*Scripts/install.sh.*Contents/Resources/install.sh' <<<"$DMG_CODE_ONLY" \
+    || fail "make-dmg.sh does not copy Scripts/install.sh into Contents/Resources/install.sh"
+dmg_copy_line=$(grep -n 'cp .*Scripts/install.sh.*Contents/Resources/install.sh' "$DMG_SCRIPT" | head -1 | cut -d: -f1 || true)
+dmg_sign_line=$(grep -n '\[4/6\] Code signing' "$DMG_SCRIPT" | head -1 | cut -d: -f1 || true)
+[ -n "$dmg_copy_line" ] || fail "could not locate the install.sh copy step in make-dmg.sh"
+if [ -n "$dmg_sign_line" ]; then
+    [ "$dmg_copy_line" -lt "$dmg_sign_line" ] \
+        || fail "make-dmg.sh copies install.sh into the bundle AFTER signing — the seal would not cover it"
+fi
+echo "PASS: make-dmg.sh seals Scripts/install.sh into Contents/Resources before signing"

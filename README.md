@@ -91,9 +91,8 @@ Code signing, notarization and the App Store distribution path (blocked today
 by `CGEventTap` being incompatible with the App Sandbox) are documented in
 [`docs/SIGNING.md`](docs/SIGNING.md).
 
-The KeyRay comparison is documented as a static-only clean-room capsule in
-[`docs/KEYRAY_CLEANROOM.md`](docs/KEYRAY_CLEANROOM.md). The voice-input decision
-and release gates are in [`docs/VOICE_SPIKE.md`](docs/VOICE_SPIKE.md).
+The voice-input decision and release gates are in
+[`docs/VOICE_SPIKE.md`](docs/VOICE_SPIKE.md).
 
 ## Privacy
 

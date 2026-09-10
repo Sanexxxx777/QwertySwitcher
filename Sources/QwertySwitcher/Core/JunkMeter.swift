@@ -9,6 +9,17 @@ import Foundation
 ///
 /// Honest Python port and corpus-verified numbers:
 /// Scripts/research/false_switch_sim.py `junk`/`clean` — keep both in sync.
+///
+/// ⚠️`possibleBigrams: Set<String>` below is a plain injected Set — this
+/// module has no idea which of `WordDictionary`'s two tables a caller
+/// passed (`possibleBigrams(language:)`, count>=1, "not impossible") or
+/// `plausibleBigrams(language:)`, count>=`plausibleMinWords`, "looks like a
+/// real word"). The parameter name is NOT renamed to match (two call
+/// shapes, one signature, by design — see each call site in
+/// `LanguageDetector`/`InstantCorrectionAnalyzer` for which table it hands
+/// in and why): `isJunk` on an OWN/typo reading always wants `possible`,
+/// `isClean` on anything the caller is about to trust/silence-on always
+/// wants `plausible`.
 enum JunkMeter {
     private static let ruVowels: Set<Character> = Set("аеёиоуыэюя")
     private static let enVowels: Set<Character> = Set("aeiouy")
