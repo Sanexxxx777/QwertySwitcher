@@ -99,6 +99,22 @@ enum UpdatePolicy {
         return .available(manifest)
     }
 
+    /// Authenticity and schema validity are separate gates. In particular,
+    /// an invalid expiry must not silently become an unexpired release.
+    static func isValidManifest(_ manifest: UpdateManifest) -> Bool {
+        guard manifest.build > 0, manifest.size > 0, manifest.size <= 40_000_000,
+              !manifest.version.isEmpty, manifest.version.utf8.count <= 64,
+              manifest.notes.utf8.count <= 65_536,
+              manifest.sha256.range(of: "^[a-fA-F0-9]{64}$", options: .regularExpression) != nil,
+              manifest.minSystemVersion.range(of: "^[0-9]{1,3}(\\.[0-9]{1,3}){0,2}$", options: .regularExpression) != nil,
+              isAcceptableFeedURL(manifest.archiveURL),
+              let url = URL(string: manifest.archiveURL), url.user == nil, url.password == nil,
+              let published = parseISO8601(manifest.publishedAt),
+              let expires = parseISO8601(manifest.validUntil), expires > published
+        else { return false }
+        return true
+    }
+
     /// "13.0" / "13" / "13.0.1" style version strings, compared component-wise.
     static func systemVersionSatisfies(minimum: String, current: OperatingSystemVersion) -> Bool {
         let parts = minimum.split(separator: ".").compactMap { Int($0) }

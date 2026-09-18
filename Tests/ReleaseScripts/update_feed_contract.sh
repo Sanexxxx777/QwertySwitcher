@@ -101,3 +101,30 @@ for key_id in k1 k2; do
 done
 
 echo "PASS: sign-update.swift signs/verifies correctly and rejects tampering; release.sh stays a local, non-publishing script"
+
+# Replay the real publish block against a disposable store. The signed
+# archive URL must map to the file this block actually publishes.
+mkdir -p "$WORK/store/downloads"
+printf old > "$WORK/store/downloads/QwertySwitcher-0.1.dmg"
+printf old > "$WORK/store/downloads/QwertySwitcher-0.2.dmg"
+printf 'fixture archive' > "$WORK/QwertySwitcher-99.1.zip"
+printf 'fixture dmg' > "$WORK/QwertySwitcher-99.1.dmg"
+printf '{"fixture":true}' > "$WORK/publish-appcast.json"
+python3 - "$RELEASE_SCRIPT" "$WORK/publish.sh" <<'PYTEST'
+from pathlib import Path
+import sys
+s = Path(sys.argv[1]).read_text()
+a = s.index('if [ -d "$STORE_DIR" ]; then')
+b = s.index('# ── 7.', a)
+Path(sys.argv[2]).write_text('set -euo pipefail\n' + s[a:b])
+PYTEST
+STORE_DIR="$WORK/store" DOWNLOADS_DIR="$WORK/store/downloads" \
+FEED_DIR="$WORK/store/downloads/qwertyswitcher" VERSION=99.1 \
+DMG_PATH="$WORK/QwertySwitcher-99.1.dmg" ZIP_PATH="$WORK/QwertySwitcher-99.1.zip" \
+APPCAST_PATH="$WORK/publish-appcast.json" bash "$WORK/publish.sh"
+cmp "$WORK/QwertySwitcher-99.1.zip" "$WORK/store/downloads/qwertyswitcher/QwertySwitcher-99.1.zip" \
+    || fail "published archive is missing at the signed feed URL path"
+echo "PASS: published archive matches the feed URL directory"
+
+[ -f "$WORK/store/downloads/QwertySwitcher-0.1.dmg" ] && [ -f "$WORK/store/downloads/QwertySwitcher-0.2.dmg" ] \
+    || fail "release packaging must preserve older published artifacts"

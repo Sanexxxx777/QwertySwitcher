@@ -38,7 +38,13 @@ final class DebugLog {
     /// in the environment (see `defaultLogsDirectory`).
     init(directory: URL? = nil) {
         let logsDir = directory ?? Self.defaultLogsDirectory()
-        try? fm.createDirectory(at: logsDir, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: logsDir, withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: 0o700])
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: logsDir.path)
+        for name in ["debug.log", "debug.1.log", "update.log"] {
+            try? fm.setAttributes([.posixPermissions: 0o600],
+                                  ofItemAtPath: logsDir.appendingPathComponent(name).path)
+        }
         url = logsDir.appendingPathComponent("debug.log")
         rotatedURL = logsDir.appendingPathComponent("debug.1.log")
 
@@ -76,6 +82,9 @@ final class DebugLog {
     /// Compact log line: `HH:mm:ss.SSS [MOD] event`. `.verbose` events are
     /// dropped before ever reaching the write queue when verbose logging is off.
     func log(_ module: String, _ event: String, level: DebugLogLevel = .normal) {
+        // Historical per-character traces can reconstruct typed text. Keep
+        // this sink guard as well as removing their hot-path producer.
+        guard !event.contains("key kc=") else { return }
         if level == .verbose && !isVerboseEnabled { return }
         queue.async { [weak self] in
             self?.write(module: module, event: event)
@@ -105,7 +114,7 @@ final class DebugLog {
         guard let data = line.data(using: .utf8) else { return }
 
         if !fm.fileExists(atPath: url.path) {
-            try? data.write(to: url)
+            fm.createFile(atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600])
             return
         }
 

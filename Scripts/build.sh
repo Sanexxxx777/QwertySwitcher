@@ -126,18 +126,8 @@ if [ "$MODE" = "dev" ]; then
     AVAILABLE=$(security find-identity -p codesigning 2>/dev/null | grep -F "$SIGN_IDENTITY" | head -1 || true)
 fi
 if [ -z "$AVAILABLE" ]; then
-    case "$MODE" in
-        dev)
-            echo "  ⚠ '$SIGN_IDENTITY' not found in Keychain."
-            echo "    Run once:  ./Scripts/setup-signing.sh"
-            echo "    Falling back to ad-hoc (TCC permissions will reset on each rebuild)."
-            codesign --force --deep --sign - "$APP_BUNDLE"
-            ;;
-        developerid|appstore)
-            echo "  ✗ '$SIGN_IDENTITY' not found — install your Apple certificate first."
-            echo "    For $MODE you need a paid Apple Developer Program account."
-            exit 3 ;;
-    esac
+    echo "Signing identity '$SIGN_IDENTITY' is unavailable; refusing an ad-hoc replacement."
+    exit 3
 else
     echo "  using: $AVAILABLE"
     # Hardened Runtime (required for notarization + App Store)

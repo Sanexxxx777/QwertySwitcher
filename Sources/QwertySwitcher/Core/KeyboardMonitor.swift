@@ -688,7 +688,7 @@ final class KeyboardMonitor {
         }
 
         hotkeyManager?.markKeyPressed()
-        perAppLayoutService.rememberCurrentLayout()
+        perAppLayoutService.rememberCurrentLayout(bundleID: activeAppBundleID)
 
         // Secure fields are never buffered, including while auto-switch is off.
         if secureInputDetector.isSecureInput {
@@ -815,14 +815,7 @@ final class KeyboardMonitor {
             // incident) excludes digits/`/`/`-`/`=`/ambiguous-letter runs —
             // those are URLs, paths, tokens, passwords, never game evidence.
             if runKeystrokes.count == 32, InputBuffer.isGameControlRun(runKeystrokes) { gameMode.note(.longRun) }
-            // Field-debugging trace ("Подробный лог"): which keystroke stopped
-            // growing the run. buf is pre-append for the letter path below.
-            DebugLog.shared.log(
-                "KM",
-                "key kc=\(keycode) run=\(runKeystrokes.count)"
-                    + " buf=\(buffer.currentWord().count) lead=\(pendingLeadingSymbols.count)",
-                level: .verbose
-            )
+
         }
 
         // Context-aware punctuation: e.g. `.` `,` `;` `'` produce real letters in

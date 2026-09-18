@@ -22,6 +22,10 @@ final class HotkeyManager {
     private var shiftDownTime: CFAbsoluteTime = 0
     private var anyKeyBetweenShifts = false
     private var anyModifierWithShift = false
+    // Commit a bare L+R gesture only after both keys are released. Typing
+    // can arrive after the second Shift-down (field log 18.09.2026).
+    private var pendingSplitShift = false
+    private let actionScheduler: ((String, @escaping () -> Void) -> Void)?
 
     // L+R Shift combo — 21.08.2026 field incident: the combo fired on a
     // lone Shift press hours after the last real one, silently disabling
@@ -57,7 +61,8 @@ final class HotkeyManager {
          textReplacer: TextReplacer, statsService: StatisticsService,
          prefsService: PreferencesService,
          exceptionsService: ExceptionsService = ExceptionsService(),
-         gameMode: GameModeState = .shared) {
+         gameMode: GameModeState = .shared,
+         actionScheduler: ((String, @escaping () -> Void) -> Void)? = nil) {
         self.inputSourceManager = inputSourceManager
         self.languageDetector = languageDetector
         self.textReplacer = textReplacer
@@ -65,6 +70,7 @@ final class HotkeyManager {
         self.prefsService = prefsService
         self.exceptionsService = exceptionsService
         self.gameMode = gameMode
+        self.actionScheduler = actionScheduler
     }
 
     /// The ONE direct call to the per-app-profile check in this file (the
@@ -99,9 +105,16 @@ final class HotkeyManager {
     }
 
     func handleFlagsChanged(_ event: CGEvent) {
-        let flags = event.flags
-        let keycode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        handleFlagsChanged(
+            keycode: UInt16(event.getIntegerValueField(.keyboardEventKeycode)),
+            flags: event.flags
+        )
+    }
 
+    // Scalar event seam lets tests replay physical-event order without
+    // creating synthetic CGEvents or changing the user's input source.
+    func handleFlagsChanged(keycode: UInt16, flags: CGEventFlags,
+                            now: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()) {
         let shiftPressed = flags.contains(.maskShift)
 
         let hadShiftHeld = shiftState.anyDown
@@ -109,20 +122,34 @@ final class HotkeyManager {
             keycode: keycode, aggregateShiftPressed: shiftPressed
         )
         logShiftTransition(keycode: keycode, transition: shiftTransition, flags: flags)
-        if shiftTransition == .suppressedRelease { return }
+        let otherModifierEvent = keycode != 56 && keycode != 60
+        if otherModifierEvent || Self.modifierDisqualifiesShiftTap(flags) {
+            pendingSplitShift = false
+        }
+        if shiftTransition == .suppressedRelease {
+            if !shiftPressed {
+                let shouldToggle = pendingSplitShift
+                pendingSplitShift = false
+                if shouldToggle && prefsService.isSplitShiftEnabled && !hotkeysBlocked() {
+                    scheduleAction(branch: "toggleAutoSwitch") { [weak self] in
+                        self?.handleLeftRightShift()
+                    }
+                }
+            }
+            return
+        }
 
         // Only track "modifier appeared WHILE a shift is held" — otherwise a
         // stray Option-down 10 seconds earlier would permanently poison the
         // next shift-tap detection until a second shift happens to reset it.
         if hadShiftHeld
-            && (flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)) {
+            && (otherModifierEvent || Self.modifierDisqualifiesShiftTap(flags)) {
             anyModifierWithShift = true
         }
 
         // CapsLock as layout switcher (keycode 57)
         let isCapsLock = keycode == 57
         if isCapsLock {
-            let now = CFAbsoluteTimeGetCurrent()
             if prefsService.isCapsLockSwitchEnabled,
                now - lastCapsLockEventTime > 0.15 {
                 lastCapsLockEventTime = now
@@ -134,7 +161,7 @@ final class HotkeyManager {
         // Track Shift down/up
         if shiftTransition == .down {
             let wasAlreadyHeld = hadShiftHeld
-            shiftDownTime = CFAbsoluteTimeGetCurrent()
+            shiftDownTime = now
             // Clean slate for this shift-cycle. Without this, a stray Option/Cmd
             // press that happened before the shift (not concurrent) would have
             // left these flags set and poisoned the tap detection.
@@ -152,8 +179,14 @@ final class HotkeyManager {
         // Left+Right Shift combo — toggle auto-switch
         if shiftState.bothDown && prefsService.isSplitShiftEnabled
             && !hotkeysBlocked() {
-            let comboLatency = CFAbsoluteTimeGetCurrent() - firstComboShiftTime
+            let comboLatency = now - firstComboShiftTime
             guard comboLatency <= comboWindow else {
+                // Rejected chord releases must not become a Double Shift.
+                pendingSplitShift = false
+                pendingSingleShift?.cancel()
+                pendingSingleShift = nil
+                shiftTapResolver.cancel()
+                shiftDownTime = 0
                 // The model thinks both keys are held, but the first one went
                 // down too long ago to be a real two-hand tap — almost
                 // certainly a stuck flag from an earlier missed keyUp (field
@@ -173,14 +206,8 @@ final class HotkeyManager {
             pendingSingleShift?.cancel()
             pendingSingleShift = nil
             shiftTapResolver.cancel()
-            // Off the tap callback, like the single/double shift branches: the
-            // toggle plays a sound (first NSSound load hits the disk) and posts
-            // a notification that drives SwiftUI, and doing that inline cost
-            // 55ms inside the callback (log 07:37:18) — repeated overruns make
-            // macOS disable the tap and the user loses keystrokes.
-            scheduleAction(branch: "toggleAutoSwitch") { [weak self] in
-                self?.handleLeftRightShift()
-            }
+            pendingSplitShift = !anyKeyBetweenShifts && !anyModifierWithShift
+            DebugLog.shared.log("HK", "combo: waiting for release clean=\(pendingSplitShift)", level: .verbose)
             shiftState.suppressComboReleases()
             anyKeyBetweenShifts = false
             anyModifierWithShift = false
@@ -194,7 +221,7 @@ final class HotkeyManager {
 
         // Shift released
         if shiftTransition == .up {
-            let holdDuration = CFAbsoluteTimeGetCurrent() - shiftDownTime
+            let holdDuration = now - shiftDownTime
             let wasTap = holdDuration < maxShiftHoldForTap
                 && !anyKeyBetweenShifts
                 && !anyModifierWithShift
@@ -236,6 +263,7 @@ final class HotkeyManager {
     }
 
     func markKeyPressed() {
+        pendingSplitShift = false
         anyKeyBetweenShifts = true
         // If a key was pressed, the pending single shift was a real Shift usage, cancel it
         pendingSingleShift?.cancel()
@@ -256,6 +284,10 @@ final class HotkeyManager {
     /// observable instead of silently reproducing the original bug
     /// (task: "защита от повторения").
     private func scheduleAction(branch: String, _ action: @escaping () -> Void) {
+        if let actionScheduler {
+            actionScheduler(branch, action)
+            return
+        }
         DispatchQueue.main.async { [actionWarnThreshold] in
             let start = CFAbsoluteTimeGetCurrent()
             action()

@@ -336,8 +336,11 @@ final class HelperLog {
     init() {
         let dir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs/QwertySwitcher", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
         url = dir.appendingPathComponent("update.log")
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     func write(_ line: String) {
@@ -351,7 +354,8 @@ final class HelperLog {
             _ = try? handle.seekToEnd()
             try? handle.write(contentsOf: data)
         } else {
-            try? data.write(to: url)
+            FileManager.default.createFile(atPath: url.path, contents: data,
+                                           attributes: [.posixPermissions: 0o600])
         }
     }
 }
@@ -360,6 +364,11 @@ final class HelperLog {
 /// used both to clear stragglers before the sync and to confirm the new
 /// build actually launched after it.
 enum ProcessBundleScanner {
+    static func containsExecutable(_ path: String, bundlePath: String) -> Bool {
+        let root = URL(fileURLWithPath: bundlePath).standardizedFileURL.path
+        return path.hasPrefix(root + "/")
+    }
+
     static func pids(insideBundlePath bundlePath: String) -> [Int32] {
         let bufferSize = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
         guard bufferSize > 0 else { return [] }
@@ -376,7 +385,7 @@ enum ProcessBundleScanner {
             let len = proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count))
             guard len > 0 else { continue }
             let path = String(cString: pathBuffer)
-            if path.hasPrefix(bundlePath) { matches.append(pid) }
+            if containsExecutable(path, bundlePath: bundlePath) { matches.append(pid) }
         }
         return matches
     }
