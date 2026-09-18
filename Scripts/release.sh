@@ -11,7 +11,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-STORE_DIR="$HOME/Projects/web/store"
+STORE_DIR="${QSW_STORE_DIR:-$HOME/Projects/web/store}"
 DOWNLOADS_DIR="$STORE_DIR/downloads"
 FEED_DIR="$DOWNLOADS_DIR/qwertyswitcher"
 
@@ -124,17 +124,10 @@ fi
 echo "[6/8] Copying to $DOWNLOADS_DIR ..."
 if [ -d "$STORE_DIR" ]; then
     mkdir -p "$FEED_DIR"
-    # Keep the version being published AND the immediately-previous one (a
-    # rollback from the store page must stay possible) — only delete
-    # anything OLDER than that. `sort -rn` by mtime, `tail -n +2` skips the
-    # most-recently-modified OTHER version (kept), deleting the rest.
-    for ext in dmg zip; do
-        find "$DOWNLOADS_DIR" -maxdepth 1 -name "QwertySwitcher-*.${ext}" ! -name "QwertySwitcher-$VERSION.${ext}" \
-            -exec stat -f '%m %N' {} \; 2>/dev/null | sort -rn | tail -n +2 | cut -d' ' -f2- \
-            | while IFS= read -r old; do rm -f "$old"; done
-    done
+    # Preserve existing releases and pinned download links. Artifact
+    # retirement is a separate, explicitly authorized maintenance operation.
     cp "$DMG_PATH" "$DOWNLOADS_DIR/"
-    cp "$ZIP_PATH" "$DOWNLOADS_DIR/"
+    cp "$ZIP_PATH" "$FEED_DIR/"
     cp "$APPCAST_PATH" "$FEED_DIR/appcast.json"
 
     for page in "$STORE_DIR/index.html" "$STORE_DIR/en/index.html"; do

@@ -71,10 +71,6 @@ final class StatusBarController {
             name: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String),
             object: nil
         )
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(autoSwitchStateChanged),
-            name: .autoSwitchToggled, object: nil
-        )
     }
 
     private func updateStatusIcon() {
@@ -193,11 +189,6 @@ final class StatusBarController {
     }
 
     @objc private func layoutChanged() {
-        updateStatusIcon()
-        rebuildMenu()
-    }
-
-    @objc private func autoSwitchStateChanged() {
         updateStatusIcon()
         rebuildMenu()
     }

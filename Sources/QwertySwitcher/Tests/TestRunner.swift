@@ -18,6 +18,20 @@ enum TestRunner {
     }
 
     static func run() -> Int {
+        if CommandLine.arguments.contains("--test-release-safety") {
+            DebugLogTests.run()
+            UpdatesTests.run()
+            print("Release safety: \(passed) passed, \(failed) failed, \(skipped) skipped")
+            return failed == 0 ? 0 : 1
+        }
+        if CommandLine.arguments.contains("--test-hotkeys") {
+            ShiftStateTests.run()
+            ShiftTapResolverTests.run()
+            ShiftTapModifierDisqualifierTests.run()
+            ComboWindowGuardTests.run()
+            print("Hotkeys: \(passed) passed, \(failed) failed, \(skipped) skipped")
+            return failed == 0 ? 0 : 1
+        }
         print("=== Qwerty Switcher test suite ===")
         // See InputSourceManager's `layoutSwitchingIsSimulated` doc — real
         // layout switching during a --test run is an explicit, rare opt-in
@@ -2556,6 +2570,15 @@ enum DebugLogTests {
             "verbose-level events are written once verbose logging is turned on"
         )
 
+        levelLog.log("KM", "key kc=44 run=7 buf=6 lead=0", level: .verbose)
+        levelLog.waitForPendingWrites()
+        TestRunner.assertTrue(!levelLog.currentContents.contains("key kc="),
+                              "raw typing keycodes never reach disk even in verbose mode")
+        let directoryMode = (try? FileManager.default.attributesOfItem(atPath: levelDir.path))?[.posixPermissions] as? Int
+        let fileMode = (try? FileManager.default.attributesOfItem(atPath: levelLog.fileURL.path))?[.posixPermissions] as? Int
+        TestRunner.assertEqual(directoryMode, 0o700, "diagnostic directory is owner-only")
+        TestRunner.assertEqual(fileMode, 0o600, "diagnostic file is owner-only")
+
         // (b) rotation preserves content instead of truncating it
         let rotateDir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("qsw-debuglog-rotate-\(UUID().uuidString)", isDirectory: true)
@@ -4672,73 +4695,73 @@ enum DoubleShiftSelectionGuardTests {
     }
 }
 
-/// Field incident 21.08.2026: `ShiftStateTracker` has no ground truth for
-/// which physical Shift key is actually down — one missed keyUp (secure
-/// input, a Cmd+Tab/Space switch swallowing the release) latches its model,
-/// and the next SOLO Shift tap then reads as "both held", silently disabling
-/// auto-switch for up to 2.5h (debug.log 15:31→18:03) with no user action at
-/// all. `HotkeyManager` can't be driven through the real CGEventTap in a
-/// headless test (constructing one pulls in `TextReplacer`/`SoundService`
-/// that would post real events or play audio) — pinned structurally, same
-/// precedent as `ReplacementAtomicityGuardTests`.
+/// Replays the hotkey handler itself, with only action dispatch intercepted.
+/// No CGEvents, sounds, real preference changes, or layout switches are needed.
 enum ComboWindowGuardTests {
     static func run() {
-        TestRunner.section("L+R Shift combo — a stuck model can't silently toggle auto-switch")
+        TestRunner.section("L+R Shift — only a completed bare gesture toggles auto-switch")
+        let suite = "QwertySwitcher.ComboReplay.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let prefs = PreferencesService(defaults: defaults)
+        prefs.isSplitShiftEnabled = true
+        let sources = InputSourceManager()
+        let detector = LanguageDetector(dictionary: WordDictionary(), inputSourceManager: sources, prefsService: prefs)
+        let replacer = TextReplacer(inputSourceManager: sources)
+        let exceptions = ExceptionsService(defaults: defaults)
+        let gameMode = GameModeState(defaults: defaults)
 
-        let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent("Core/HotkeyManager.swift")
-        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
-            TestRunner.skip("HotkeyManager.swift not readable from \(source.path)")
-            return
+        enum Event {
+            case flags(UInt16, CGEventFlags, Double)
+            case key
+            case disableShortcut
         }
-
-        // The anchor time must be captured on the FIRST shift's down, inside
-        // `if !wasAlreadyHeld` — not unconditionally on every `.down` — or the
-        // second shift's own press overwrites it right before the combo check
-        // reads it, and the window check below always sees dt≈0.
-        guard let notAlreadyHeld = text.range(of: "if !wasAlreadyHeld {") else {
-            TestRunner.assertTrue(false, "`!wasAlreadyHeld` branch not found — test needs updating")
-            return
+        let downL = Event.flags(56, .maskShift, 100)
+        let downR = Event.flags(60, .maskShift, 100.05)
+        let upR = Event.flags(60, .maskShift, 100.15)
+        let upL = Event.flags(56, [], 100.17)
+        let cases: [(String, [Event], Int)] = [
+            ("both down alone does not toggle early", [downL, downR], 0),
+            ("clean chord toggles once on final release", [downL, downR, upR, upL], 1),
+            ("reverse release order", [downL, downR, .flags(56, .maskShift, 100.15), .flags(60, [], 100.17)], 1),
+            ("reverse press order", [.flags(60, .maskShift, 100), .flags(56, .maskShift, 100.05), upR, upL], 1),
+            ("field: key before second Shift", [downL, .key, downR, upR, upL], 0),
+            ("field: key after second Shift", [downL, downR, .key, upR, upL], 0),
+            ("key between releases", [downL, downR, upR, .key, upL], 0),
+            ("command held before Shift", [.flags(56, [.maskShift, .maskCommand], 100), downR, upR, upL], 0),
+            ("Caps Lock during chord", [downL, downR, .flags(57, [.maskShift, .maskAlphaShift], 100.06), upR, upL], 0),
+            ("Option during chord", [downL, downR, .flags(58, [.maskShift, .maskAlternate], 100.06), upR, upL], 0),
+            ("Control during chord", [downL, downR, .flags(59, [.maskShift, .maskControl], 100.06), upR, upL], 0),
+            ("modifier during chord", [downL, downR, .flags(55, [.maskShift, .maskCommand], 100.06), .flags(55, .maskShift, 100.07), upR, upL], 0),
+            ("stale first Shift cannot toggle", [downL, .flags(60, .maskShift, 102), .flags(60, .maskShift, 102.1), .flags(56, [], 102.2)], 0),
+            ("disabled before release", [downL, downR, .disableShortcut, upR, upL], 0),
+            ("typing does not poison next clean chord", [downL, downR, .key, upR, upL, .flags(56, .maskShift, 101), .flags(60, .maskShift, 101.05), .flags(60, .maskShift, 101.15), .flags(56, [], 101.17)], 1),
+        ]
+        for (name, events, expectedToggles) in cases {
+            prefs.isAutoSwitchEnabled = true
+            prefs.isSplitShiftEnabled = true
+            var actions: [String] = []
+            let manager = HotkeyManager(
+                inputSourceManager: sources, languageDetector: detector,
+                textReplacer: replacer, statsService: StatisticsService(),
+                prefsService: prefs, exceptionsService: exceptions, gameMode: gameMode,
+                actionScheduler: { branch, _ in
+                    actions.append(branch)
+                    if branch == "toggleAutoSwitch" { prefs.isAutoSwitchEnabled.toggle() }
+                }
+            )
+            for event in events {
+                switch event {
+                case .flags(let code, let flags, let now):
+                    manager.handleFlagsChanged(keycode: code, flags: flags, now: now)
+                case .key: manager.markKeyPressed()
+                case .disableShortcut: prefs.isSplitShiftEnabled = false
+                }
+            }
+            TestRunner.assertEqual(actions.filter { $0 == "toggleAutoSwitch" }.count, expectedToggles, name)
+            TestRunner.assertEqual(prefs.isAutoSwitchEnabled, expectedToggles % 2 == 0, "\(name): preference")
+            TestRunner.assertTrue(!actions.contains("doubleShift"), "\(name): no ghost Double Shift")
         }
-        let afterBranch = String(text[notAlreadyHeld.upperBound...])
-        let branchBody = afterBranch.range(of: "\n            }").map { String(afterBranch[..<$0.lowerBound]) }
-            ?? afterBranch
-        TestRunner.assertTrue(
-            branchBody.contains("firstComboShiftTime = shiftDownTime"),
-            "the combo anchor time is captured only on the FIRST shift's down transition"
-        )
-
-        // The combo must reject a stale anchor BEFORE doing anything
-        // observable (toggling the preference, playing a sound, posting the
-        // notification) — a guard that returns early, not a check that only
-        // logs.
-        guard let comboBranch = text.range(of: "if shiftState.bothDown && prefsService.isSplitShiftEnabled") else {
-            TestRunner.assertTrue(false, "L+R combo branch not found — test needs updating")
-            return
-        }
-        let comboBody = String(text[comboBranch.upperBound...])
-        guard let guardRange = comboBody.range(of: "guard comboLatency <= comboWindow else {"),
-              let toggleRange = comboBody.range(of: "scheduleAction(branch: \"toggleAutoSwitch\")") else {
-            TestRunner.assertTrue(false, "combo window guard or toggle call not found — test needs updating")
-            return
-        }
-        TestRunner.assertTrue(
-            guardRange.lowerBound < toggleRange.lowerBound,
-            "the window guard runs BEFORE the toggle — a stale combo never fires it"
-        )
-        let rejectionBody = String(comboBody[guardRange.upperBound..<toggleRange.lowerBound])
-        TestRunner.assertTrue(
-            rejectionBody.contains("return"),
-            "a stale combo returns without toggling auto-switch"
-        )
-        TestRunner.assertTrue(
-            !rejectionBody.contains("shiftState.suppressComboReleases()"),
-            "a rejected combo leaves shiftState untouched"
-                + " (resetting it here would risk swallowing the next genuine press"
-                + " of whichever key was actually stuck as a phantom release)"
-        )
     }
 }
 

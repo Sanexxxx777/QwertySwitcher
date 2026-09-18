@@ -9,6 +9,8 @@ import Darwin
 enum UpdatesTests {
     static func run() {
         manifestParsing()
+        manifestValidation()
+        processBundleBoundary()
         signatureVerification()
         versionOrdering()
         staleOutcomesCarryManifest()
@@ -25,6 +27,40 @@ enum UpdatesTests {
         startupStageCleanup()
         targetGuardBundleName()
         structuralGuards()
+    }
+
+    private static func manifestValidation() {
+        TestRunner.section("Updates — reject malformed signed release metadata")
+        let original = try! JSONSerialization.jsonObject(with: fixtureManifestJSON()) as! [String: Any]
+        let valid = try! JSONDecoder().decode(UpdateManifest.self, from: fixtureManifestJSON())
+        TestRunner.assertTrue(UpdatePolicy.isValidManifest(valid), "well-formed manifest passes")
+        let badValues: [(String, Any)] = [
+            ("validUntil", "not a date"), ("publishedAt", "not a date"),
+            ("validUntil", "2020-01-01T00:00:00Z"),
+            ("minSystemVersion", "13.bad"), ("minSystemVersion", ""),
+            ("size", -1), ("size", 40_000_001), ("build", 0),
+            ("sha256", "aa"), ("sha256", String(repeating: "z", count: 64)),
+            ("archiveURL", "file:///tmp/update.zip"),
+            ("archiveURL", "http://example.com/update.zip"),
+            ("archiveURL", "https://user:password@example.com/update.zip"),
+        ]
+        for (field, value) in badValues {
+            var input = original
+            input[field] = value
+            let data = try! JSONSerialization.data(withJSONObject: input)
+            let manifest = try! JSONDecoder().decode(UpdateManifest.self, from: data)
+            TestRunner.assertTrue(!UpdatePolicy.isValidManifest(manifest), "invalid \(field) is rejected")
+        }
+    }
+
+    private static func processBundleBoundary() {
+        TestRunner.section("Updater — process scan respects the bundle path boundary")
+        let root = "/Applications/Qwerty Switcher.app"
+        TestRunner.assertTrue(ProcessBundleScanner.containsExecutable(root + "/Contents/MacOS/QwertySwitcher", bundlePath: root),
+                              "actual bundle executable matches")
+        TestRunner.assertTrue(!ProcessBundleScanner.containsExecutable(root + "-backup/Contents/MacOS/QwertySwitcher", bundlePath: root),
+                              "similarly named sibling must never be terminated")
+        TestRunner.assertTrue(!ProcessBundleScanner.containsExecutable(root, bundlePath: root), "bundle directory is not an executable inside it")
     }
 
     // MARK: - Manifest / appcast parsing

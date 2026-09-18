@@ -174,7 +174,9 @@ fi
 echo "[3/5] Stopping the running copy (if any)..."
 running_pids() {
     # Own pid / parent excluded so the script never matches itself.
-    pgrep -f "$DEST_APP/Contents/MacOS/$BINARY_NAME" 2>/dev/null \
+    local executable_pattern
+    executable_pattern=$(printf '%s' "$DEST_APP/Contents/MacOS/$BINARY_NAME" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
+    pgrep -f "^${executable_pattern}([[:space:]]|$)" 2>/dev/null \
         | while read -r pid; do
             [ "$pid" = "$$" ] && continue
             [ "$pid" = "$PPID" ] && continue

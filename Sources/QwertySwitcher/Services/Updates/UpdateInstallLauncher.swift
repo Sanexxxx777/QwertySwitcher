@@ -26,11 +26,13 @@ enum UpdateInstallLauncher {
             let markerURL = UpdateTransactionMarker.markerURL()
             let logURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("Logs/QwertySwitcher/update.log")
-            try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
             if !FileManager.default.fileExists(atPath: logURL.path) {
-                FileManager.default.createFile(atPath: logURL.path, contents: nil)
+                FileManager.default.createFile(atPath: logURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
             }
-            let logFD = open(logURL.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logURL.path)
+            let logFD = open(logURL.path, O_WRONLY | O_APPEND | O_CREAT, 0o600)
 
             let helperBinary = staged.appBundle.appendingPathComponent("Contents/MacOS/QwertySwitcher").path
             let helperArguments = [

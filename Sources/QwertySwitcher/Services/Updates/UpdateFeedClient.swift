@@ -25,7 +25,7 @@ final class UpdateFeedClient {
             completion(.failure(.badFeedURL))
             return
         }
-        let client = UpdateHTTPClient(userAgent: userAgent)
+        let client = UpdateHTTPClient(maxBytes: 262_144, userAgent: userAgent)
         client.fetch(url) { result in
             switch result {
             case .failure(let error):

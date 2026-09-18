@@ -13,6 +13,7 @@ enum UpdateManifestVerifier {
         case malformedKey
         case badSignature
         case malformedManifestJSON
+        case invalidManifest
     }
 
     static func verify(_ appcast: UpdateAppcast) -> Result<UpdateManifest, VerificationError> {
@@ -37,6 +38,9 @@ enum UpdateManifestVerifier {
         }
         guard let manifest = try? JSONDecoder().decode(UpdateManifest.self, from: manifestBytes) else {
             return .failure(.malformedManifestJSON)
+        }
+        guard UpdatePolicy.isValidManifest(manifest) else {
+            return .failure(.invalidManifest)
         }
         return .success(manifest)
     }

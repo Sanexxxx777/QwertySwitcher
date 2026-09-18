@@ -62,17 +62,17 @@ final class PerAppLayoutService {
     private var lastRememberedLayout: String?
 
     /// Called when user types — remember current layout (deduplicated)
-    func rememberCurrentLayout() {
+    func rememberCurrentLayout(bundleID: String?) {
         guard isEnabled else { return }
-        guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+        guard let bundleID,
               let layoutID = inputSourceManager.currentLayout?.id else { return }
+        // The event tap supplies its activation cache; no AppKit IPC per key.
+        if bundleID == lastRememberedApp && layoutID == lastRememberedLayout { return }
         let activeIDs = Set(
             inputSourceManager.resolvedActiveLayouts(preferredIDs: prefsService.activeLayoutIDs)
                 .map(\.id)
         )
         guard activeIDs.contains(layoutID) else { return }
-        // Only write if changed
-        if bundleID == lastRememberedApp && layoutID == lastRememberedLayout { return }
         lastRememberedApp = bundleID
         lastRememberedLayout = layoutID
         var mem = remembered

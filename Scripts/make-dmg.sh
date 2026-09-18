@@ -122,9 +122,8 @@ if [ "$MODE" = "developerid" ]; then
 else
     AVAILABLE=$(security find-identity -p codesigning 2>/dev/null | grep -F "$SIGN_IDENTITY" | head -1 || true)
     if [ -z "$AVAILABLE" ]; then
-        echo "  ⚠ '$SIGN_IDENTITY' not found. Run ./Scripts/setup-signing.sh first."
-        echo "  Falling back to ad-hoc (DMG will work but Gatekeeper will be stricter)."
-        codesign --force --deep --sign - "$APP_BUNDLE"
+        echo "Signing identity '$SIGN_IDENTITY' is unavailable; refusing an ad-hoc release."
+        exit 3
     else
         codesign --force --deep --options runtime \
             --entitlements "$ENTITLEMENTS" \

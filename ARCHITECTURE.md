@@ -18,12 +18,11 @@
 | Хранение | `UserDefaults`, локальный Bloom-кэш и локальный debug log |
 | Дистрибуция | self-signed beta, Developer ID DMG, отдельная App Store sandbox-ветка |
 
-⚠️Снято в 0.10.0: приложение бесплатное, сетевых вызовов нет.
-
-Телеметрии нет. Единственный сетевой клиент — лицензионная проверка; она отправляет
-стабильный идентификатор Mac и версию приложения, но не набираемый текст. Слова не
-пишутся в debug log; текст сохраняется только в явно управляемых пользователем
-исключениях, автообученных парах и текстовых шаблонах.
+Since 0.10.0 the app is free and has no licensing or device-identity traffic.
+Opt-in updates fetch an Ed25519-signed manifest, then verify archive size,
+SHA-256, bundle signature, signing identity, and build before installation.
+Typing analysis remains local. Logs contain decision metadata, not character
+keycodes; diagnostic files are owner-only.
 
 ## Основные компоненты
 
@@ -103,10 +102,10 @@ Enter/Tab/Esc не запускают замену, потому что в ме�
 | Комбинация | Действие |
 |---|---|
 | Single Shift | Сменить выбранную раскладку |
-| Double Shift (окно 450 мс) | Конвертировать текущее/последнее слово; повторно — Undo |
-| Left + Right Shift | Включить или выключить автопереключение |
+| Double Shift (окно 600 мс) | Конвертировать текущее/последнее слово; повторно — Undo |
+| Left + Right Shift | Toggle on final release; typing or another modifier cancels the gesture |
 | Caps Lock | Сменить раскладку, если функция включена |
-| Cmd + Shift + V | Вставить plain text с безопасным восстановлением clipboard |
+| Cmd + Option + Shift + V | Вставить plain text с безопасным восстановлением clipboard |
 | Cmd + Option + Z | Отменить последнюю коррекцию |
 
 Undo не имеет таймера, но инвалидируется следующим физическим редактированием,
@@ -114,14 +113,15 @@ Undo не имеет таймера, но инвалидируется след�
 
 ## Secure Input и privacy
 
-`IsSecureEventInputEnabled()` и AX-role/subrole проверяются до буферизации.
-Положительный результат кэшируется на 500 мс; отрицательный не кэшируется, чтобы
-активация password field не скрывалась fail-open окном. При отсутствии системных
-разрешений event tap не запускается и health state сообщает причину.
+`IsSecureEventInputEnabled()` is checked synchronously before buffering.
+Supplementary AX role/subrole detection is refreshed asynchronously with a
+500 ms cache to keep IPC out of the event-tap callback. AX-only secure fields
+therefore have a detection delay; this is not a guarantee about every custom
+password widget. Missing system permissions prevent the event tap from starting.
 
-`PrivacyInfo.xcprivacy` объявляет доступ к `UserDefaults`, file metadata и связанный
-с аккаунтом device ID для лицензирования. Tracking выключен. Release-скрипты перед
-упаковкой блокируют env/private-key файлы и credential-like assignments.
+`PrivacyInfo.xcprivacy` declares UserDefaults and file-timestamp access, with
+no collected data or tracking. Release scripts scan for credentials, require
+a signing identity, and verify the update-feed signature before publication.
 
 ## Сборка и проверка
 

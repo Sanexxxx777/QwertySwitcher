@@ -15,7 +15,7 @@ you (see Privacy below). Free and offline since 0.10.0 — no license/trial.
 
 ## How it works
 
-- **`CGEventTap`** (`.listenOnly`, session tap with an HID-level fallback)
+- **`CGEventTap`** (`.defaultTap`, session tap with an HID-level fallback)
   intercepts every keydown / flags-changed event system-wide — the same
   low-level mechanism used by hotkey managers and accessibility tools.
 - Each candidate word is scored against every installed keyboard layout by a
@@ -48,9 +48,9 @@ Full pipeline, scoring formula and file layout: [`ARCHITECTURE.md`](ARCHITECTURE
 |---|---|
 | Single Shift (tap) | Switch to the next layout |
 | Double Shift (tap × 2, < 600 ms) | Convert the last typed word |
-| Left+Right Shift | Toggle auto-switching on/off |
+| Left+Right Shift (bare chord, release both) | Toggle auto-switching on/off; typing cancels the gesture |
 | CapsLock | Switch layout |
-| Cmd+Shift+V | Paste without formatting |
+| Cmd+Option+Shift+V | Paste without formatting |
 | Cmd+Option+Z | Undo last correction |
 
 ## Stack
@@ -105,6 +105,8 @@ a single JSON manifest from shulgin.is-a.dev and sends nothing about you (no
 identifier, no telemetry). Installing an update stays a separate, manual
 opt-in toggle. See [`docs/SIGNING.md`](docs/SIGNING.md) for how that manifest
 is signed and verified before anything is installed.
+
+Diagnostic logs contain decision metadata, never character keycodes, even in verbose mode. Log files are owner-only.
 
 `PrivacyService` audits `UserDefaults` on launch for anything that looks like
 it could be leaking typed text.
