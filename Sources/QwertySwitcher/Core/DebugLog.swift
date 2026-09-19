@@ -82,9 +82,6 @@ final class DebugLog {
     /// Compact log line: `HH:mm:ss.SSS [MOD] event`. `.verbose` events are
     /// dropped before ever reaching the write queue when verbose logging is off.
     func log(_ module: String, _ event: String, level: DebugLogLevel = .normal) {
-        // Historical per-character traces can reconstruct typed text. Keep
-        // this sink guard as well as removing their hot-path producer.
-        guard !event.contains("key kc=") else { return }
         if level == .verbose && !isVerboseEnabled { return }
         queue.async { [weak self] in
             self?.write(module: module, event: event)

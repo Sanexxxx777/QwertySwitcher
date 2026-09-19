@@ -815,7 +815,22 @@ final class KeyboardMonitor {
             // incident) excludes digits/`/`/`-`/`=`/ambiguous-letter runs —
             // those are URLs, paths, tokens, passwords, never game evidence.
             if runKeystrokes.count == 32, InputBuffer.isGameControlRun(runKeystrokes) { gameMode.note(.longRun) }
-
+            // Field-debugging trace ("Подробный лог"): which keystroke stopped
+            // growing the run. buf is pre-append for the letter path below.
+            // Restored 19.09.2026 on the owner's decision: 0.11.1 dropped it
+            // for privacy and took word-level field analysis down with it —
+            // without these lines a verbose log cannot answer "was that
+            // correction a real word or junk", which is the one question the
+            // log exists for. The log stays owner-only on disk (0700/0600)
+            // and the exported report still strips these lines
+            // (`DiagnosticsExportService.filterReportLog`), so nothing typed
+            // leaves this Mac.
+            DebugLog.shared.log(
+                "KM",
+                "key kc=\(keycode) run=\(runKeystrokes.count)"
+                    + " buf=\(buffer.currentWord().count) lead=\(pendingLeadingSymbols.count)",
+                level: .verbose
+            )
         }
 
         // Context-aware punctuation: e.g. `.` `,` `;` `'` produce real letters in
@@ -1612,12 +1627,15 @@ final class KeyboardMonitor {
     /// already complete). Never touches text; only ever switches the active
     /// input source, exactly like an ordinary manual switch.
     ///
-    /// `path` is `"boundary"` (word-boundary auto-correction, queue was
-    /// already empty), `"deferred"` (an instant correction's boundary
-    /// arrived later — queue-non-empty or punctuation deferred it once
-    /// already) or `"ds"` (Double Shift). Logged, not branched on, except
-    /// for the ring-inclusion question below.
-    private func restoreIsland(path: String) {
+    /// `path` is `"boundary"` (word-boundary auto-correction), `"deferred"`
+    /// (an instant correction's boundary arrived later — punctuation or a
+    /// live replacement deferred it once already) or `"ds"` (Double Shift).
+    /// Logged, not branched on, except for the ring-inclusion question below.
+    ///
+    /// `queuedReplay` is how many of the owner's keystrokes are waiting in
+    /// `pendingUserEvents` to be replayed right after this — traced only, so
+    /// the field log shows whether the restore beat them to the field.
+    private func restoreIsland(path: String, queuedReplay: Int = 0) {
         guard let target = pendingIslandTarget else {
             DebugLog.shared.log("KM", "island: skipped reason=noContext path=\(path)", level: .verbose)
             pendingIslandRestore = false
@@ -1670,7 +1688,19 @@ final class KeyboardMonitor {
             DebugLog.shared.log("KM", "island: skipped reason=noLayout path=\(path) lang=\(restoreLang)", level: .verbose)
             return
         }
-        guard languageDetector.inputSourceManager.switchTo(layout) else {
+        // Fast, fire-and-forget `switchTo` everywhere except the one case
+        // that cannot tolerate a lagging input source: keystrokes already
+        // queued for replay. Those are posted by `finishReplacement()`
+        // microseconds from here and render in whatever layout is live at
+        // delivery, so there the switch is verified before we let them out.
+        // That branch only ever runs from the replacement completion (its own
+        // `DispatchQueue.main.async` block), never from inside the CGEventTap
+        // callback — which is why the no-sleeping-in-the-hot-path rule that
+        // governs every other call still holds, unchanged.
+        let switched = queuedReplay > 0
+            ? languageDetector.inputSourceManager.switchToAndVerify(layout)
+            : languageDetector.inputSourceManager.switchTo(layout)
+        guard switched else {
             DebugLog.shared.log("KM", "island: switch failed reason=switchFailed path=\(path) lang=\(restoreLang)")
             return
         }
@@ -1678,7 +1708,9 @@ final class KeyboardMonitor {
         // wipes `buffer`/`runKeystrokes` for it (RC-3, see its doc comment).
         languageDetector.setContextLanguage(restoreLang)
         DebugLog.shared.log(
-            "KM", "island: restored \(restoreLang)←\(target) path=\(path) ctx=[\(ctxDescription)]"
+            "KM",
+            "island: restored \(restoreLang)←\(target) path=\(path)"
+                + " ctx=[\(ctxDescription)] queued=\(queuedReplay)"
         )
     }
 
@@ -2254,17 +2286,30 @@ final class KeyboardMonitor {
                     // Island: `languageDetector.detect` ran synchronously
                     // above (before this completion), so the ring already
                     // carries this word's own `(target, corrected: true)`
-                    // entry. The word is fully committed now — restore
-                    // immediately if the queue is clear, otherwise defer to
-                    // `handleWordBoundary` the same way instant correction does.
+                    // entry. The word is fully committed now — restore here,
+                    // whether or not the replay queue is empty.
+                    //
+                    // Field 18–19.09.2026: this used to defer to
+                    // `handleWordBoundary` whenever the queue was non-empty,
+                    // which killed the feature on this path — 8 of 8
+                    // `queueNonEmpty path=boundary` skips, not one of them
+                    // ever rescued. The deferred retry only runs at the NEXT
+                    // word boundary, a whole word later, and that word was
+                    // typed in the layout the island was supposed to undo —
+                    // so it gets corrected too and `secondInRun` refuses.
+                    // Restoring now is the entire point: the queue holds the
+                    // owner's OWN keystrokes, captured before `handleEvent`
+                    // ever saw them (`queueIfReplacementActive`) and replayed
+                    // by `finishReplacement()` right below — they belong to
+                    // the next, context-language word and must render in the
+                    // restored layout. Nothing already in flight can be
+                    // disturbed by the switch: the corrected word went out as
+                    // literal Unicode (`TextReplacer.typeStringFast`,
+                    // virtualKey 0), so no pending character's rendering
+                    // depends on the active input source.
                     self.pendingIslandTarget = layout.languageCode
                     self.pendingIslandRingIncludesTarget = true
-                    if self.pendingUserEvents.isEmpty {
-                        self.restoreIsland(path: "boundary")
-                    } else {
-                        self.pendingIslandRestore = true
-                        DebugLog.shared.log("KM", "island: skipped reason=queueNonEmpty path=boundary", level: .verbose)
-                    }
+                    self.restoreIsland(path: "boundary", queuedReplay: self.pendingUserEvents.items.count)
                 case .layoutSwitchFailed:
                     // Layout switch failed → nothing was retyped, the word is
                     // still on screen in `sourceLayout` exactly as typed — so

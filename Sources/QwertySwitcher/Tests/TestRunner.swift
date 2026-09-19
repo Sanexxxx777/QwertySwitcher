@@ -83,6 +83,7 @@ enum TestRunner {
         MarzheDoubleShiftRegressionTests.run()
         TwoLetterWordScoringTests.run()
         NativeContextIncumbentAndOneLetterTests.run()
+        OwnerAbbreviationRegressionTests.run()
         ConflictPairDisambiguationTests.run()
         JunkOverrideDetectionTests.run()
         JunkMeterTests.run()
@@ -1622,6 +1623,68 @@ enum TwoLetterWordScoringTests {
     }
 }
 
+/// Field 18.09.2026, twice in one session: «нфт» (NFT, written in Russian
+/// inside a Russian sentence) was boundary-corrected to the English «yan» —
+/// a Scrabble-list entry in `en_US.txt` that no owner of this app will ever
+/// type. The owner confirmed it as a false correction on 19.09. The word has
+/// no vowel, so it scores 0 on the Russian side and any dictionary hit on the
+/// English side wins; the fix is to teach the Russian dictionary the
+/// abbreviation, which is what the owner actually writes.
+enum OwnerAbbreviationRegressionTests {
+    static func run() {
+        TestRunner.section("Owner abbreviations — «нфт» is not corrected to «yan»")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the abbreviation fixture")
+            return
+        }
+
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let prefs = PreferencesService()
+        let detector = LanguageDetector(dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs)
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse)!,
+            typedLayout: ruLayout
+        ) // primes previousWordLanguage = "ru", exactly as in the field log
+
+        guard let nftStrokes = InstantCorrectionFixtures.keystrokes(for: "нфт", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "«нфт»: RU fixture layout can type every character")
+            return
+        }
+        switch detector.detect(keystrokes: nftStrokes, typedLayout: ruLayout) {
+        case .switchTo(_, let word):
+            TestRunner.assertTrue(false, "«нфт» under ru-context must stay noSwitch — got «\(word)»")
+        case .noSwitch:
+            TestRunner.assertTrue(true, "«нфт» under ru-context stays noSwitch")
+        }
+
+        // The other direction must not regress: a genuinely English word
+        // typed on the Russian layout in the same ru context is still fixed.
+        detector.resetContext()
+        _ = detector.detect(
+            keystrokes: InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse)!,
+            typedLayout: ruLayout
+        )
+        guard let modelStrokes = InstantCorrectionFixtures.keystrokes(for: "ьщвуд", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "«ьщвуд» (model): RU fixture layout can type every character")
+            return
+        }
+        switch detector.detect(keystrokes: modelStrokes, typedLayout: ruLayout) {
+        case .switchTo(let layout, let word):
+            TestRunner.assertEqual(layout.languageCode, "en", "«ьщвуд» still corrects to English")
+            TestRunner.assertEqual(word, "model", "«ьщвуд» corrects to «model»")
+        case .noSwitch:
+            TestRunner.assertTrue(false, "«ьщвуд» must still be corrected to «model» — the ru-side fix must not blunt real corrections")
+        }
+    }
+}
+
 /// Diagnosis (false_switch_sim.py corpus sweep, 15.08.2026): the boundary
 /// scorer's `incumbentGap` moat is a fixed number of points and can be
 /// outrun by frequency+bigram bonuses on the other side ("руку" a real
@@ -2570,10 +2633,22 @@ enum DebugLogTests {
             "verbose-level events are written once verbose logging is turned on"
         )
 
+        // Owner's decision 19.09.2026 (field acceptance): the verbose log is a
+        // diagnostic tool for us, and without the per-key trace it cannot
+        // answer whether a correction hit a real word or junk. So the trace
+        // IS written in verbose mode — the protection is that the file is
+        // owner-only (asserted right below) and that the exported report
+        // strips these lines (`DiagnosticsExportService` suite).
         levelLog.log("KM", "key kc=44 run=7 buf=6 lead=0", level: .verbose)
         levelLog.waitForPendingWrites()
-        TestRunner.assertTrue(!levelLog.currentContents.contains("key kc="),
-                              "raw typing keycodes never reach disk even in verbose mode")
+        TestRunner.assertTrue(levelLog.currentContents.contains("key kc="),
+                              "verbose mode writes the per-key trace — the log's whole diagnostic value")
+        UserDefaults.standard.set(false, forKey: verboseKey)
+        levelLog.log("KM", "key kc=45 run=8 buf=7 lead=0", level: .verbose)
+        levelLog.waitForPendingWrites()
+        TestRunner.assertTrue(!levelLog.currentContents.contains("key kc=45"),
+                              "with verbose logging off the per-key trace is dropped like any other verbose event")
+        UserDefaults.standard.set(true, forKey: verboseKey)
         let directoryMode = (try? FileManager.default.attributesOfItem(atPath: levelDir.path))?[.posixPermissions] as? Int
         let fileMode = (try? FileManager.default.attributesOfItem(atPath: levelLog.fileURL.path))?[.posixPermissions] as? Int
         TestRunner.assertEqual(directoryMode, 0o700, "diagnostic directory is owner-only")
