@@ -6828,6 +6828,19 @@ enum GameModeStateTests {
             )
         }
 
+        // терминал по поведению в GAME не входит (поле 20.09.2026: «рррр» в Ghostty)
+        do {
+            let clock = GameModeTestClock(t0)
+            let (state, suite) = freshState(now: { clock.date })
+            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            state.noteActivation(bundleID: "com.mitchellh.ghostty", infoDictionary: nil, bundlePath: nil)
+            state.note(.heldKeys)
+            state.note(.longRun)
+            TestRunner.assertTrue(
+                !state.isActive(bundleID: "com.mitchellh.ghostty"), "a terminal never enters GAME on behavioral clues"
+            )
+        }
+
         // выход по 2 прозаическим словам за 30с (порог снижен 4→2, 08.09.2026)
         do {
             let clock = GameModeTestClock(t0)

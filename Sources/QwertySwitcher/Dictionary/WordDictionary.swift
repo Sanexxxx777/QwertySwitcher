@@ -95,7 +95,13 @@ final class WordDictionary {
     /// `isPrefixOfBundledWord` just answers "not confirmed yet" until the
     /// index is ready. Tests that need a deterministic result right after
     /// `init` should call this first.
-    func waitUntilPrefixIndexReady(timeout: TimeInterval = 5) {
+    ///
+    /// 60 s, not 5: the index builds at `.utility` QoS, and on a busy Mac
+    /// (20.09.2026, load ≈6) the Russian half missed a 5 s budget — «омск»
+    /// then read as "no prefix hit" and a learned-bypass test failed for a
+    /// reason that had nothing to do with its subject. Returns as soon as the
+    /// index is ready, so the generous ceiling costs nothing when it is.
+    func waitUntilPrefixIndexReady(timeout: TimeInterval = 60) {
         _ = sortedWordsGroup.wait(timeout: .now() + timeout)
     }
 

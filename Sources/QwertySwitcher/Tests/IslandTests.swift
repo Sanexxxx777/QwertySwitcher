@@ -203,28 +203,18 @@ enum IslandStructuralGuardTests {
         guard let kmText = readSource("Core/KeyboardMonitor.swift") else { return }
 
         // (a)+(boundary): `processCurrentWord`'s .success restores
-        // UNCONDITIONALLY — 19.09.2026, after the field acceptance measured
-        // the old queue-empty guard killing the boundary path outright (8 of
-        // 8 `queueNonEmpty path=boundary` skips, none rescued by the deferred
-        // retry). The queued keystrokes are the owner's next word and must be
-        // replayed into the restored layout, so the restore has to happen
-        // BEFORE `finishReplacement()` drains them — pinned here because
-        // reintroducing a queue guard silently disables the feature again.
+        // immediately only when the replay queue is already empty.
         if let funcStart = kmText.range(of: "private func processCurrentWord("),
            let nextFunc = kmText.range(of: "\n    @discardableResult\n    private func applyYoficator(") {
             let scoped = String(kmText[funcStart.upperBound..<nextFunc.lowerBound])
-            if let call = scoped.range(of: "self.restoreIsland(path: \"boundary\", queuedReplay:"),
-               let finish = scoped.range(of: "self.finishReplacement()") {
+            if let emptyCheck = scoped.range(of: "if self.pendingUserEvents.isEmpty {"),
+               let call = scoped.range(of: "self.restoreIsland(path: \"boundary\")") {
                 TestRunner.assertTrue(
-                    call.lowerBound < finish.lowerBound,
-                    "processCurrentWord: restoreIsland(\"boundary\") runs before finishReplacement() replays the queued keystrokes"
-                )
-                TestRunner.assertTrue(
-                    !scoped.contains("reason=queueNonEmpty path=boundary"),
-                    "processCurrentWord: the boundary restore is never gated on an empty replay queue again"
+                    emptyCheck.lowerBound < call.lowerBound,
+                    "processCurrentWord: restoreIsland(\"boundary\") fires only inside the pendingUserEvents.isEmpty branch"
                 )
             } else {
-                TestRunner.assertTrue(false, "processCurrentWord: restoreIsland(\"boundary\") call or finishReplacement() not found — test needs updating")
+                TestRunner.assertTrue(false, "processCurrentWord: queue-empty guard or restoreIsland(\"boundary\") call not found — test needs updating")
             }
         } else {
             TestRunner.assertTrue(false, "processCurrentWord not found — test needs updating")
@@ -299,13 +289,9 @@ enum IslandStructuralGuardTests {
         }
 
         // (e): restoreIsland switches the layout via the plain, fast
-        // `switchTo`. The single exception (19.09.2026) is the branch with
-        // keystrokes already queued for replay: those are posted a few
-        // microseconds later and would render in a lagging input source, and
-        // that branch runs from the replacement completion's own main-queue
-        // block, never from inside the CGEventTap callback — so the
-        // no-sleeping-in-the-hot-path rule is untouched.
-        if let funcStart = kmText.range(of: "private func restoreIsland(path: String, queuedReplay: Int = 0) {"),
+        // `switchTo` — never `switchToAndVerify` (3×8ms of sleep in a path
+        // that can run from inside a CGEventTap completion callback).
+        if let funcStart = kmText.range(of: "private func restoreIsland(path: String) {"),
            let nextFunc = kmText.range(of: "\n    /// Double Shift on a run the dictionary cannot judge") {
             let scoped = String(kmText[funcStart.upperBound..<nextFunc.lowerBound])
             TestRunner.assertTrue(
@@ -313,16 +299,9 @@ enum IslandStructuralGuardTests {
                 "restoreIsland calls switchTo to change the active layout"
             )
             TestRunner.assertTrue(
-                scoped.contains("queuedReplay > 0\n            ? languageDetector.inputSourceManager.switchToAndVerify(layout)"),
-                "restoreIsland verifies the switch ONLY when keystrokes are queued for replay — the off-tap completion path"
+                !scoped.contains("switchToAndVerify("),
+                "restoreIsland never calls switchToAndVerify (hot-path — no sleeping verification loop)"
             )
-            if let verify = scoped.range(of: "switchToAndVerify("),
-               let guardRange = scoped.range(of: "queuedReplay > 0") {
-                TestRunner.assertTrue(
-                    guardRange.lowerBound < verify.lowerBound,
-                    "restoreIsland: the verifying switch is reachable only behind the queuedReplay guard"
-                )
-            }
         } else {
             TestRunner.assertTrue(false, "restoreIsland not found — test needs updating")
         }
