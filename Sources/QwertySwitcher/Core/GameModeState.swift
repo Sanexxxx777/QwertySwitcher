@@ -233,8 +233,14 @@ final class GameModeState {
     /// always enough to (re)enter GAME — from UNKNOWN (first-time
     /// recognition) or from TYPING (hysteresis, spec §5). Any clue also
     /// resets the prose-exit counter, whether or not it changed the mode.
+    ///
+    /// A terminal never enters GAME on behavior: a held key there is vim/shell
+    /// navigation or an emphatic «рррр», not a game control. Field 20.09.2026:
+    /// four autorepeats of one letter in Ghostty silenced auto-correction for
+    /// 4.5 minutes, until the owner's second Double Shift released it.
     func note(_ evidence: Evidence) {
         guard let bundleID = currentAppBundleID, !deniedSet.contains(bundleID) else { return }
+        guard !LanguageDetector.isTerminalBundle(bundleID) else { return }
         var state = states[bundleID] ?? BundleState()
         state.proseWordCount = 0
         state.proseWindowStart = nil
