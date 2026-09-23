@@ -1539,4 +1539,50 @@ enum CallbackDurationThresholdTests {
         )
     }
 }
+
+
+enum TapAgeInterpretationTests {
+    static func run() {
+        TestRunner.section("KeyboardMonitor.chooseTimestampInterpretation — pure decision (Plan 006 Step 5)")
+        TestRunner.assertEqual(
+            KeyboardMonitor.chooseTimestampInterpretation(
+                probesA: [0.5, 1, 2, 3, 4], probesB: [50_000, 60_000, 70_000, 80_000, 90_000]
+            ),
+            .a,
+            "all 5 A-probes plausible (0…1000ms) → A, even though B is implausible"
+        )
+        TestRunner.assertEqual(
+            KeyboardMonitor.chooseTimestampInterpretation(
+                probesA: [50_000, 60_000, 70_000, 80_000, 90_000], probesB: [0.5, 1, 2, 3, 4]
+            ),
+            .b,
+            "A implausible, all 5 B-probes plausible → B"
+        )
+        TestRunner.assertEqual(
+            KeyboardMonitor.chooseTimestampInterpretation(
+                probesA: [50_000, 60_000, 70_000, 80_000, 90_000],
+                probesB: [50_000, 60_000, 70_000, 80_000, 90_000]
+            ),
+            .none,
+            "neither interpretation is plausible on all 5 probes → none, check disabled"
+        )
+        TestRunner.assertEqual(
+            KeyboardMonitor.chooseTimestampInterpretation(
+                probesA: [0.5, 1, 2, 3, 90_000], probesB: [0.5, 1, 2, 3, 4]
+            ),
+            .b,
+            "one A-probe out of range fails A entirely, even with 4 of 5 plausible — B wins on merit"
+        )
+        TestRunner.assertEqual(
+            KeyboardMonitor.chooseTimestampInterpretation(probesA: [], probesB: []),
+            .none,
+            "no probes yet is never plausible"
+        )
+        TestRunner.assertEqual(
+            KeyboardMonitor.chooseTimestampInterpretation(probesA: [0, 1, 2, 3, 1000], probesB: [50_000]),
+            .a,
+            "0 and 1000ms are inclusive boundaries of the plausible window"
+        )
+    }
+}
 #endif
