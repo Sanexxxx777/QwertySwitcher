@@ -45,6 +45,12 @@
 # leaves the signature valid.
 set -euo pipefail
 
+# This script swaps a bundle holding Accessibility/Input Monitoring
+# permissions — it must not resolve codesign/rsync/pgrep/osascript/xattr/stat
+# through whatever PATH it happened to inherit, which could point at a
+# look-alike tool.
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PRODUCT_NAME="Qwerty Switcher"
 BINARY_NAME="QwertySwitcher"
