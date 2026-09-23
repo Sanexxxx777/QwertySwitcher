@@ -1,15 +1,15 @@
 import Foundation
-import AppKit
 
-/// Dictionary uses BloomFilter (834KB) as primary + NSSpellChecker as confirmation.
+/// Dictionary uses BloomFilter (834KB) as primary membership check.
 /// No Set<String> in memory for membership checks — saves ~60MB RAM.
 ///
 /// `sortedWords` is the one exception: instant (mid-word) correction needs a
-/// reliable PREFIX check (bloom filters can't do that, and NSSpellChecker's
-/// completions/spellcheck are unreliable for short unrecognized tokens — e.g.
-/// it accepts "fdef"/"zzzz" as correctly-spelled English). It is built on a
-/// background queue after `init` returns so it never delays app startup or
-/// blocks the event tap, and read behind a lock (~11MB combined for en+ru).
+/// reliable PREFIX check (bloom filters can't do that, and macOS's system
+/// spellchecker is unreliable for short unrecognized tokens — e.g. it
+/// accepts "fdef"/"zzzz" as correctly-spelled English, which is why this
+/// class no longer calls it at all). It is built on a background queue
+/// after `init` returns so it never delays app startup or blocks the event
+/// tap, and read behind a lock (~11MB combined for en+ru).
 final class WordDictionary {
     private var bloomFilters: [String: BloomFilter] = [:]
     private var sortedWords: [String: [String]] = [:]
@@ -83,7 +83,9 @@ final class WordDictionary {
     }
     private let sortedWordsLock = NSLock()
     private let sortedWordsGroup = DispatchGroup()
-    private let spellChecker = NSSpellChecker.shared
+    /// Captured at construction so `loadSortedWordsAsync` can log how long
+    /// the background prefix index took to build, measured from `init`.
+    private let createdAt = Date()
 
     init() {
         loadDictionaries()
@@ -109,37 +111,6 @@ final class WordDictionary {
     func mightContain(_ word: String, language: String) -> Bool {
         guard let bloom = bloomFilters[language] else { return false }
         return bloom.contains(word)
-    }
-
-    /// Exact check via BloomFilter + SpellChecker confirmation
-    /// BloomFilter has ~1% false positive, SpellChecker confirms
-    ///
-    /// ⚠️NOT safe to call from the CGEventTap callback / any per-keystroke hot
-    /// path — `isSpellCheckerValid` below can block for 100+ms (macOS
-    /// spell-checking IPC). `LanguageDetector`/`InstantCorrectionAnalyzer`
-    /// use `mightContain` (bloom-only) instead for exactly this reason (see
-    /// CLAUDE.md perf audit). Kept here for any future non-hot-path caller.
-    func contains(_ word: String, language: String) -> Bool {
-        guard mightContain(word, language: language) else { return false }
-        // Confirm with system spell checker (eliminates false positives)
-        return isSpellCheckerValid(word, language: language)
-    }
-
-    /// Independent system-dictionary fallback for words absent from our
-    /// bundle. ⚠️Calls `NSSpellChecker.checkSpelling` synchronously — see the
-    /// hot-path warning on `contains` above, same caller restriction applies.
-    func isSpellCheckerValid(_ word: String, language: String) -> Bool {
-        let lang: String
-        switch language {
-        case "ru": lang = "ru"
-        case "en": lang = "en"
-        default: return false
-        }
-        let range = spellChecker.checkSpelling(
-            of: word, startingAt: 0, language: lang,
-            wrap: false, inSpellDocumentWithTag: 0, wordCount: nil
-        )
-        return range.location == NSNotFound
     }
 
     /// Whether `prefix` is the start of at least one word in our own bundled
@@ -259,18 +230,27 @@ final class WordDictionary {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             defer { group.leave() }
             guard let self else { return }
+            var wordCounts: [String: Int] = [:]
             for lang in ["en", "ru"] {
                 let fileName = lang == "en" ? "en_US" : "ru_RU"
                 guard let source = self.loadWordListData(named: fileName) else { continue }
-                let words = self.parseWordList(source.data)
-                let sorted = words.sorted()
+                let words = self.parseSortedWordList(source.data)
                 let tables = Self.buildBigramTables(words: words, minWords: Self.plausibleMinWords)
                 self.sortedWordsLock.lock()
-                self.sortedWords[lang] = sorted
+                self.sortedWords[lang] = words
                 self.possibleBigramSets[lang] = tables.possible
                 self.plausibleBigramSets[lang] = tables.plausible
                 self.sortedWordsLock.unlock()
+                wordCounts[lang] = words.count
             }
+            // Counts only, never the words — matches the rest of this log's
+            // privacy contract. Answers "how long is the app Bloom-only?",
+            // the question the field had no data for before this line.
+            let elapsedMs = Int(Date().timeIntervalSince(self.createdAt) * 1000)
+            DebugLog.shared.log(
+                "DICT",
+                "index ready ms=\(elapsedMs) en=\(wordCounts["en"] ?? 0) ru=\(wordCounts["ru"] ?? 0)"
+            )
         }
     }
 
@@ -294,6 +274,23 @@ final class WordDictionary {
         return content.split(separator: "\n").compactMap { line in
             let word = String(line).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             return word.count >= 2 ? word : nil
+        }
+    }
+
+    /// Cheaper parse for `loadSortedWordsAsync`'s own copy of the bundled
+    /// word lists only. `DictionaryIndexTests` proves both `en_US.txt` and
+    /// `ru_RU.txt` are already trimmed, lowercased, de-duplicated and in
+    /// Swift `<` sorted order — so `parseWordList`'s per-line trim+lowercase
+    /// and the runtime `.sorted()` that used to follow it are both no-ops on
+    /// these specific files, and this skips them (same `count >= 2` filter).
+    /// `loadDictionaries`'s Bloom-filter path is untouched — it keeps
+    /// calling `parseWordList` — bloom construction is not the per-launch
+    /// cost this guard is about. A future dictionary edit that breaks either
+    /// assumption turns `DictionaryIndexTests` red, not this silently wrong.
+    private func parseSortedWordList(_ data: Data) -> [String] {
+        guard let content = String(data: data, encoding: .utf8) else { return [] }
+        return content.split(separator: "\n").compactMap { line in
+            line.count >= 2 ? String(line) : nil
         }
     }
 
