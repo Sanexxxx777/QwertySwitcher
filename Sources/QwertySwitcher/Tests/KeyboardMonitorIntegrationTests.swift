@@ -1058,7 +1058,7 @@ enum KeyboardMonitorIntegrationTests {
 
         // --- Plan 012 (23.09.2026): smart case judges the sentence end by
         // the symbol that lands ON SCREEN, not the source-layout one a
-        // conversion re-renders — field report «Напишите, Как разберетесь»
+        // conversion re-renders — field report of the «привет, Как …» shape
         // (a RU "," typed via an EN "?" keystroke was fed to the tracker as
         // "?", arming a false capitalization on the next word).
         //
