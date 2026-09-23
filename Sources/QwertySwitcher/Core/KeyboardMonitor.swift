@@ -1142,6 +1142,10 @@ final class KeyboardMonitor {
     ) -> Bool {
         guard !isPaused, let trigger,
               let layout = languageDetector.inputSourceManager.currentLayout else { return false }
+        guard !inPostReplacementCooldown else {
+            DebugLog.shared.log("KM", "snippet skipped: post-replacement cooldown", level: .verbose)
+            return false
+        }
         let typed = languageDetector.inputSourceManager.convertKeystrokes(keystrokes, toLayout: layout)
         guard let replacement = snippetService.replacement(for: typed), replacement != typed else {
             return false
@@ -1166,8 +1170,10 @@ final class KeyboardMonitor {
                     "expanded triggerLen=\(typed.count) replacementLen=\(replacement.count)"
                 )
             case .layoutSwitchFailed:
+                self.pendingUserEvents.replaceFront(with: triggerEvent.asOurs)
                 DebugLog.shared.log("SNIPPET", "expansion aborted: layout verification failed")
             case .cancelled:
+                self.pendingUserEvents.replaceFront(with: triggerEvent.asOurs)
                 DebugLog.shared.log("SNIPPET", "expansion cancelled: editing context changed")
             }
             self.finishReplacement()
@@ -1182,6 +1188,10 @@ final class KeyboardMonitor {
     ) -> Bool {
         guard !isPaused, let trigger,
               let layout = languageDetector.inputSourceManager.currentLayout else { return false }
+        guard !inPostReplacementCooldown else {
+            DebugLog.shared.log("KM", "smart case skipped: post-replacement cooldown", level: .verbose)
+            return false
+        }
         let typed = languageDetector.inputSourceManager.convertKeystrokes(keystrokes, toLayout: layout)
         guard !exceptionsService.isWordExcepted(typed),
               let replacement = SmartCaseNormalizer.normalized(
@@ -1206,8 +1216,10 @@ final class KeyboardMonitor {
                     "SMARTCASE", "normalized len=\(typed.count) sentenceStart=\(capitalizeSentenceStart)"
                 )
             case .layoutSwitchFailed:
+                self.pendingUserEvents.replaceFront(with: triggerEvent.asOurs)
                 DebugLog.shared.log("SMARTCASE", "normalization aborted: layout verification failed")
             case .cancelled:
+                self.pendingUserEvents.replaceFront(with: triggerEvent.asOurs)
                 DebugLog.shared.log("SMARTCASE", "normalization cancelled: editing context changed")
             }
             self.finishReplacement()
@@ -1364,12 +1376,33 @@ final class KeyboardMonitor {
                 self.pendingIslandRestore = true
             case .layoutSwitchFailed:
                 self.instantCorrectionGate.reset()
+                self.pendingUserEvents.replaceFront(with: triggerEvent.asOurs)
                 DebugLog.shared.log("KM", "instant correction aborted: layout switch verification failed")
             case .cancelled:
+                // Same reset as .layoutSwitchFailed above — markCorrected()
+                // above ran unconditionally before this async call started,
+                // so a cancelled attempt must undo it too, or the word's own
+                // boundary silently skips ("skip boundary correction:
+                // already instant-corrected") a correction that never
+                // actually happened (plan 004, defect 2).
+                self.instantCorrectionGate.reset()
+                self.pendingUserEvents.replaceFront(with: triggerEvent.asOurs)
                 DebugLog.shared.log("KM", "instant correction cancelled: editing context changed")
             }
             self.finishReplacement()
         }
+    }
+
+    /// True during the brief settling window `finishReplacement` opens after
+    /// EVERY replacement (auto or manual — see its own comment). Read by the
+    /// three automatic features `canFireAutoCorrection` below does NOT cover
+    /// (`applySmartCase`, `applyYoficator`, `expandSnippet`): a key replayed
+    /// out of the pause queue can complete a LATER word's own boundary
+    /// before the settling window closes, and none of these three had a
+    /// cooldown check of their own — a replayed burst could launch one of
+    /// them mid-burst (plan 004, defect 1).
+    private var inPostReplacementCooldown: Bool {
+        CFAbsoluteTimeGetCurrent() < autoCorrectionCooldownUntil
     }
 
     /// Shared circuit-breaker gate for the two fully-automatic correction
@@ -2362,8 +2395,10 @@ final class KeyboardMonitor {
                     if let trigger {
                         self.lastCompletedWord = (keystrokes, trigger, sourceLayout, leadingSymbols, triggerKeystroke)
                     }
+                    self.pendingUserEvents.replaceFront(with: triggerEvent.asOurs)
                     DebugLog.shared.log("KM", "correction aborted: layout switch verification failed")
                 case .cancelled:
+                    self.pendingUserEvents.replaceFront(with: triggerEvent.asOurs)
                     DebugLog.shared.log("KM", "correction cancelled: editing context changed")
                 }
                 self.finishReplacement()
@@ -2374,6 +2409,10 @@ final class KeyboardMonitor {
 
     @discardableResult
     private func applyYoficator(keystrokes: [BufferedKeystroke], trigger: String?) -> Bool {
+        guard !inPostReplacementCooldown else {
+            DebugLog.shared.log("KM", "yoficator skipped: post-replacement cooldown", level: .verbose)
+            return false
+        }
         guard let currentLayout = languageDetector.currentRussianLayout() else { return false }
         let word = languageDetector.inputSourceManager.convertKeystrokes(keystrokes, toLayout: currentLayout)
         if let yo = yoficatorService.yoficate(word), yo != word {
