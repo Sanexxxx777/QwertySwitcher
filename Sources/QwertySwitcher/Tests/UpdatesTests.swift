@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 import CryptoKit
 import Darwin
@@ -747,3 +748,4 @@ enum UpdatesTests {
             .joined(separator: "\n")
     }
 }
+#endif

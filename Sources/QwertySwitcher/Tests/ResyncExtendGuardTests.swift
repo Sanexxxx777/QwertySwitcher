@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 
 /// Field 10.09.2026, the only `net≠0` in 1.5 days of verbose log (07:37:34):
@@ -54,3 +55,4 @@ enum ResyncExtendGuardTests {
         )
     }
 }
+#endif

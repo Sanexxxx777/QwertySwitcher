@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 
 /// Field facts 07–08.09.2026 (owner's verbose-log capture) drove two
@@ -201,3 +202,4 @@ private enum DetectorExactnessFixtures {
         return result
     }
 }
+#endif

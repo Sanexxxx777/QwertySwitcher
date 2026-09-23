@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 import CoreGraphics
 import CryptoKit
@@ -7169,3 +7170,4 @@ enum AuthorLinksViewTests {
         )
     }
 }
+#endif
