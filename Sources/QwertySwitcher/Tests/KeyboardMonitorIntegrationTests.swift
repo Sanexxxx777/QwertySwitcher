@@ -1009,6 +1009,11 @@ enum HeldKeysGameModeGateTests {
         defer { environment.restore() }
 
         func harness() -> KeyboardMonitorHarness {
+            // Each call must start every block in the same, known layout —
+            // `inputSources` is shared across this suite's `do` blocks, and
+            // an earlier block's correction leaves it switched (simulated
+            // layout persists on the instance, see InputSourceManager).
+            inputSources.switchTo(enLayout)
             let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
             h.prefs.isAutoSwitchEnabled = true
             h.prefs.isInstantCorrectionEnabled = true
@@ -1135,6 +1140,11 @@ enum BackspaceResetsInstantGateTests {
         defer { environment.restore() }
 
         func harness() -> KeyboardMonitorHarness {
+            // Each call must start every block in the same, known layout —
+            // `inputSources` is shared across this suite's `do` blocks, and
+            // an earlier block's correction leaves it switched (simulated
+            // layout persists on the instance, see InputSourceManager).
+            inputSources.switchTo(enLayout)
             let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
             h.prefs.isAutoSwitchEnabled = true
             h.prefs.isInstantCorrectionEnabled = true
@@ -1232,6 +1242,10 @@ enum DoubleShiftInapplicableLogTests {
             h.type(strokes)
             guard h.monitor.swapLastWordInBuffer() else { return nil } // 1st DS: .recorded
 
+            // The 1st Double Shift above switched the layout to its target
+            // (EN, for a ru-typed word) — re-arm ru before the "fresh retype"
+            // or these keystrokes render as if typed on the wrong layout.
+            inputSources.switchTo(ruLayout)
             h.type(strokes) // fresh retype — same direction, not a toggle
             DebugLog.shared.waitForPendingWrites()
             let before = DebugLog.shared.currentContents

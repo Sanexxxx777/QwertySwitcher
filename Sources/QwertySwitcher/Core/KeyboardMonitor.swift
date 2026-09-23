@@ -820,9 +820,15 @@ final class KeyboardMonitor {
         if InputBuffer.isWordBoundary(keycode) {
             // Captured before the reset right below — `handleWordBoundary`
             // needs "did THIS word have any held-key autorepeats" for the
-            // game-mode prose-exit signal (spec §5), and by the time it runs
-            // the counter has already been zeroed for the NEXT word.
-            let wordHadHeldKeys = wordAutorepeatCount > 0
+            // game-mode prose-exit signal (spec §5) and the actual count for
+            // `processCurrentWord`'s own held-keys gate (bug: that gate used
+            // to read `self.wordAutorepeatCount` directly, which by the time
+            // it ran had already been zeroed right here for the NEXT word —
+            // the gate could never fire on this path), and by the time
+            // either runs the counter has already been zeroed for the NEXT
+            // word.
+            let autorepeatCountAtBoundary = wordAutorepeatCount
+            let wordHadHeldKeys = autorepeatCountAtBoundary > 0
             runKeystrokes.removeAll()
             wordAutorepeatCount = 0
             let correctable = InputBuffer.isCorrectableBoundary(keycode)
@@ -832,6 +838,7 @@ final class KeyboardMonitor {
                 keepForManualSwitch: correctable,
                 triggerEvent: event,
                 wordHadHeldKeys: wordHadHeldKeys,
+                wordAutorepeatCount: autorepeatCountAtBoundary,
                 proseBoundary: true
             )
             return
@@ -892,11 +899,17 @@ final class KeyboardMonitor {
             } ?? InputBuffer.punctuationChar(
                 keycode: keycode, languageCode: currentLang, flags: flags
             ) ?? ""
+            // Captured before the reset right below, same reason as the
+            // word-boundary branch above — and reset here too so a punctuation
+            // close doesn't leak this word's autorepeat count into the next one.
+            let autorepeatCountAtBoundary = wordAutorepeatCount
+            wordAutorepeatCount = 0
             handleWordBoundary(
                 trailing: punctChar,
                 canAutoCorrect: canAutoCorrect,
                 keepForManualSwitch: true,
-                triggerEvent: event
+                triggerEvent: event,
+                wordAutorepeatCount: autorepeatCountAtBoundary
             )
             return
         }
@@ -967,12 +980,18 @@ final class KeyboardMonitor {
             let digit = languageDetector.inputSourceManager.trailingCharacter(
                 keycode: keycode, flags: flags
             ) ?? ""
+            // Same capture-then-reset as the punctuation branch above — a
+            // digit boundary must not leak this word's autorepeat count
+            // into the next one either.
+            let autorepeatCountAtBoundary = wordAutorepeatCount
+            wordAutorepeatCount = 0
             handleWordBoundary(
                 trailing: digit,
                 canAutoCorrect: canAutoCorrect,
                 keepForManualSwitch: true,
                 triggerEvent: event,
-                triggerKeystroke: BufferedKeystroke(keycode: keycode, flags: flags)
+                triggerKeystroke: BufferedKeystroke(keycode: keycode, flags: flags),
+                wordAutorepeatCount: autorepeatCountAtBoundary
             )
         } else {
             logContextWipe("navigation-key-\(keycode)")
@@ -993,7 +1012,7 @@ final class KeyboardMonitor {
     private func handleWordBoundary(
         trailing: String?, canAutoCorrect: Bool, keepForManualSwitch: Bool, triggerEvent: KeyEventSnapshot,
         triggerKeystroke: BufferedKeystroke? = nil, wordHadHeldKeys: Bool = false,
-        proseBoundary: Bool = false
+        wordAutorepeatCount: Int = 0, proseBoundary: Bool = false
     ) {
         let captured = buffer.currentWord()
         // Read before `pendingLeadingSymbols` is cleared below.
@@ -1021,7 +1040,8 @@ final class KeyboardMonitor {
             && learned == nil
             && !captured.isEmpty
             && processCurrentWord(
-                trigger: trailing, triggerKeystroke: triggerKeystroke, triggerEvent: triggerEvent
+                trigger: trailing, triggerKeystroke: triggerKeystroke, triggerEvent: triggerEvent,
+                wordAutorepeatCount: wordAutorepeatCount
             )
         let smartCaseStarted = !snippetStarted
             && !languageReplacementStarted
@@ -2114,9 +2134,13 @@ final class KeyboardMonitor {
     ///                      etc). It already landed in the text field, so the
     ///                      replacer must backspace over it and re-type it.
     ///                      Pass nil only if nothing was printed after the word.
+    /// - Parameter wordAutorepeatCount: captured by the caller BEFORE it resets
+    ///                      the live counter for the next word — reading
+    ///                      `self.wordAutorepeatCount` here would always see 0.
     @discardableResult
     private func processCurrentWord(
-        trigger: String?, triggerKeystroke: BufferedKeystroke? = nil, triggerEvent: KeyEventSnapshot
+        trigger: String?, triggerKeystroke: BufferedKeystroke? = nil, triggerEvent: KeyEventSnapshot,
+        wordAutorepeatCount: Int
     ) -> Bool {
         guard !isPaused else { return false }
         if instantCorrectionGate.consumeIfCorrected() {
