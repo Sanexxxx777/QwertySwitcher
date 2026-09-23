@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import AppKit
+import Darwin
 
 final class KeyboardMonitor {
     private var eventTap: CFMachPort?
@@ -2613,6 +2614,91 @@ final class KeyboardMonitor {
                 + " — regression risk (macOS disables the tap on repeated timeouts)"
         )
     }
+
+    // MARK: - Tap delivery latency probe (diagnostic only — Plan 006 Step 5)
+
+    /// `recordCallbackDuration` above measures our OWN handler time. It says
+    /// nothing about how LATE a key already was when the callback started —
+    /// the tap runs on the main run loop, shared with UI, so a busy UI frame
+    /// can delay delivery before our code ever sees the event. Which of the
+    /// two candidate meanings of `CGEvent.timestamp` applies on this Mac is
+    /// unknown ahead of time: Apple's docs say nanoseconds since boot
+    /// (interpretation A), but Apple Silicon has been observed to hand back
+    /// raw `mach_absolute_time` ticks instead (interpretation B — needs
+    /// `mach_timebase_info` to convert to ns). Decided once, from the first
+    /// `tapAgeProbeCount` keyDowns after launch; `.none` disables the check
+    /// permanently if neither interpretation ever produced a plausible age.
+    enum TapAgeInterpretation: Equatable {
+        case a
+        case b
+        case none
+    }
+
+    private var tapAgeInterpretation: TapAgeInterpretation?
+    private var tapAgeProbesA: [Double] = []
+    private var tapAgeProbesB: [Double] = []
+    private let tapAgeProbeCount = 5
+    private var slowKeyDeliveryCount = 0
+    private var lastSlowKeyDeliveryLogAt: CFAbsoluteTime = 0
+
+    /// Pure decision, unit-tested without a live CGEventTap: which
+    /// interpretation had EVERY one of its probe ages inside a plausible
+    /// 0…1000ms window. A is preferred when both qualify — it matches
+    /// Apple's documented meaning of `CGEvent.timestamp`.
+    static func chooseTimestampInterpretation(
+        probesA: [Double], probesB: [Double]
+    ) -> TapAgeInterpretation {
+        func allPlausible(_ probes: [Double]) -> Bool {
+            !probes.isEmpty && probes.allSatisfy { $0 >= 0 && $0 <= 1000 }
+        }
+        if allPlausible(probesA) { return .a }
+        if allPlausible(probesB) { return .b }
+        return .none
+    }
+
+    /// Called by `eventTapCallback` for every keyDown, with the raw
+    /// `CGEvent.timestamp` still in scope — read there, never inside
+    /// `handle(_:)`. No behaviour change: this only measures and logs.
+    func noteTapDeliveryAge(eventTimestamp: UInt64) {
+        let nowNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let ageA_ms = Double(nowNs >= eventTimestamp ? nowNs - eventTimestamp : 0) / 1_000_000
+
+        var timebase = mach_timebase_info()
+        mach_timebase_info(&timebase)
+        let ticksAsNs = timebase.denom > 0
+            ? eventTimestamp * UInt64(timebase.numer) / UInt64(timebase.denom)
+            : eventTimestamp
+        let ageB_ms = Double(nowNs >= ticksAsNs ? nowNs - ticksAsNs : 0) / 1_000_000
+
+        if let tapAgeInterpretation {
+            guard tapAgeInterpretation != .none else { return }
+            let age = tapAgeInterpretation == .a ? ageA_ms : ageB_ms
+            guard age > 15 else { return }
+            slowKeyDeliveryCount += 1
+            let now = CFAbsoluteTimeGetCurrent()
+            guard now - lastSlowKeyDeliveryLogAt >= 1 else { return }
+            lastSlowKeyDeliveryLogAt = now
+            DebugLog.shared.log(
+                "KM",
+                "WARNING: slow key delivery \(Int(age.rounded()))ms count=\(slowKeyDeliveryCount)"
+            )
+            return
+        }
+
+        tapAgeProbesA.append(ageA_ms)
+        tapAgeProbesB.append(ageB_ms)
+        DebugLog.shared.log(
+            "KM",
+            "tap age probe a_ms=\(String(format: "%.1f", ageA_ms)) b_ms=\(String(format: "%.1f", ageB_ms))",
+            level: .verbose
+        )
+        guard tapAgeProbesA.count >= tapAgeProbeCount else { return }
+        let chosen = Self.chooseTimestampInterpretation(probesA: tapAgeProbesA, probesB: tapAgeProbesB)
+        tapAgeInterpretation = chosen
+        if chosen == .none {
+            DebugLog.shared.log("KM", "tap age: units unknown")
+        }
+    }
 }
 
 private func eventTapCallback(
@@ -2622,6 +2708,13 @@ private func eventTapCallback(
     let monitor = Unmanaged<KeyboardMonitor>.fromOpaque(userInfo).takeUnretainedValue()
     let isDisableNotification = type == .tapDisabledByTimeout
         || type == .tapDisabledByUserInput
+    // Plan 006 Step 5 (diagnostic only, no behaviour change): how old the
+    // event already is by the time the callback starts. `event.timestamp`
+    // is read HERE — never inside `handle(_:)`, which only ever sees the
+    // snapshot built below.
+    if type == .keyDown {
+        monitor.noteTapDeliveryAge(eventTimestamp: event.timestamp)
+    }
     // Built once here, skipped only for a disable notification (which carries
     // no real keystroke fields) — every check below reads this snapshot
     // instead of the raw CGEvent.

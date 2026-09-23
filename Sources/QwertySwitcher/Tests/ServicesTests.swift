@@ -57,6 +57,64 @@ enum ExceptionsTests {
         )
         isolated.removeProfiles(for: ["editor.example"])
         TestRunner.assertNil(isolated.profile(for: "editor.example"), "profile removal is exact")
+
+        // Plan 006 Step 1: decoded-value caches (write-through + cross-instance invalidation + cap).
+        let cacheSuite = AppIdentity.bundleIdentifier + ".tests.exceptions.cache." + UUID().uuidString
+        guard let cacheDefaults = UserDefaults(suiteName: cacheSuite) else {
+            TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+            return
+        }
+        defer { cacheDefaults.removePersistentDomain(forName: cacheSuite) }
+        let cached = ExceptionsService(defaults: cacheDefaults)
+
+        cached.wordExceptions = ["alpha"]
+        TestRunner.assertTrue(
+            cached.wordExceptions.contains("alpha"), "wordExceptions read-after-write hits the fresh value"
+        )
+        cached.setProfile(
+            AppProfile(blockAutoSwitch: true, blockInstantCorrection: false, blockHotkeys: false),
+            for: "cache.example"
+        )
+        TestRunner.assertTrue(
+            cached.profile(for: "cache.example")?.blockAutoSwitch == true,
+            "appProfiles read-after-write hits the fresh value"
+        )
+        cached.learnException(original: "asd", corrected: "фыв")
+        TestRunner.assertTrue(cached.isAutoLearned("asd"), "autoLearned read-after-write hits the fresh value")
+
+        let second = ExceptionsService(defaults: cacheDefaults)
+        TestRunner.assertTrue(second.wordExceptions.contains("alpha"), "a second instance sees the initial state")
+        cached.wordExceptions = ["alpha", "beta"]
+        NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: cacheDefaults)
+        // The observer is registered with `queue: .main` (fix, revise round
+        // 1): its block is scheduled on the main queue, not run synchronously
+        // inline with `post`, even when `post` itself runs on the main
+        // thread — it needs one more main-run-loop turn to execute.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        TestRunner.assertTrue(
+            second.wordExceptions.contains("beta"),
+            "a second instance sees a write from another instance after the change notification fires (next main-thread turn)"
+        )
+
+        let capSuite = AppIdentity.bundleIdentifier + ".tests.exceptions.cap." + UUID().uuidString
+        guard let capDefaults = UserDefaults(suiteName: capSuite) else {
+            TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+            return
+        }
+        defer { capDefaults.removePersistentDomain(forName: capSuite) }
+        let capped = ExceptionsService(defaults: capDefaults)
+        for i in 0..<1000 {
+            capped.learnException(original: "word\(i)", corrected: "target\(i)")
+        }
+        TestRunner.assertEqual(capped.autoLearned.count, 1000, "auto-learned store fills to the cap")
+        capped.learnException(original: "overflow", corrected: "переполнение")
+        TestRunner.assertTrue(!capped.isAutoLearned("overflow"), "the cap refuses a new 1,001st entry")
+        TestRunner.assertEqual(capped.autoLearned.count, 1000, "store size stays at the cap after a refused insert")
+        capped.learnException(original: "word0", corrected: "новоеслово")
+        TestRunner.assertEqual(
+            capped.autoLearned["word0"], "новоеслово",
+            "an update to an already-learned key still goes through once the store is full"
+        )
     }
 }
 
@@ -701,6 +759,121 @@ enum DebugLogTests {
         TestRunner.assertTrue(
             rotateLog.currentContents.contains("MARKER_AFTER_ROTATION"),
             "logging continues into a fresh debug.log right after rotation"
+        )
+
+        // (c) Plan 006 Step 2: the timestamp is captured at call time, not
+        // write time — it must survive even a backed-up queue.
+        let gapDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("qsw-debuglog-gap-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: gapDir) }
+        let gapLog = DebugLog(directory: gapDir)
+        // `queue` is private — block it with 200 lines first, so the two
+        // timed lines below are still sitting unwritten when their real
+        // 50ms gap happens.
+        for i in 0..<200 {
+            gapLog.log("KM", "queue filler \(i)")
+        }
+        gapLog.log("GAP", "first")
+        Thread.sleep(forTimeInterval: 0.05)
+        gapLog.log("GAP", "second")
+        gapLog.waitForPendingWrites()
+
+        let gapFormatter = DateFormatter()
+        gapFormatter.dateFormat = "HH:mm:ss.SSS"
+        gapFormatter.locale = Locale(identifier: "en_US_POSIX")
+        let gapLines = gapLog.currentContents.split(separator: "\n").filter { $0.contains("[GAP]") }
+        if gapLines.count == 2,
+           let firstStamp = gapFormatter.date(from: String(gapLines[0].prefix(12))),
+           let secondStamp = gapFormatter.date(from: String(gapLines[1].prefix(12))) {
+            let deltaMs = secondStamp.timeIntervalSince(firstStamp) * 1000
+            TestRunner.assertTrue(
+                deltaMs >= 40,
+                "timestamp reflects call time, not write time — a 50ms gap survives a queue backed up by 200 lines (delta=\(deltaMs)ms)"
+            )
+        } else {
+            TestRunner.assertTrue(false, "both GAP lines are written with a parseable HH:mm:ss.SSS timestamp")
+        }
+
+        // Revise round 1, defect 2: a deleted log FILE (or its whole
+        // DIRECTORY — `PrivacyService.deleteAllLocalData()` removes the
+        // entire logs directory) must be recreated on the next write, not
+        // lost into an unlinked inode held by the persistent `writeHandle`.
+        // SAFETY: confirm each log's path is not under the real
+        // ~/Library/Logs/QwertySwitcher before deleting anything — abort
+        // this whole test rather than ever touch a real user log.
+        let realLogsDir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Logs/QwertySwitcher", isDirectory: true)
+
+        // (d) deleted FILE
+        let deletedFileDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("qsw-debuglog-deleted-file-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: deletedFileDir) }
+        let deletedFileLog = DebugLog(directory: deletedFileDir)
+        guard !deletedFileLog.fileURL.path.hasPrefix(realLogsDir.path) else {
+            TestRunner.assertTrue(
+                false, "SAFETY STOP: deleted-file test's log path resolved under the real logs directory"
+            )
+            return
+        }
+        deletedFileLog.log("KM", "before deletion")
+        deletedFileLog.waitForPendingWrites()
+        try? FileManager.default.removeItem(at: deletedFileLog.fileURL)
+        TestRunner.assertTrue(
+            !FileManager.default.fileExists(atPath: deletedFileLog.fileURL.path),
+            "the log file is actually gone before the recreate-on-write check"
+        )
+        deletedFileLog.log("KM", "after file deletion")
+        deletedFileLog.waitForPendingWrites()
+        TestRunner.assertTrue(
+            FileManager.default.fileExists(atPath: deletedFileLog.fileURL.path),
+            "a deleted log FILE is recreated on the next write"
+        )
+        TestRunner.assertTrue(
+            deletedFileLog.currentContents.contains("after file deletion"),
+            "the new line actually lands in the recreated file"
+        )
+        let recreatedFileMode = (try? FileManager.default.attributesOfItem(
+            atPath: deletedFileLog.fileURL.path
+        ))?[.posixPermissions] as? Int
+        TestRunner.assertEqual(recreatedFileMode, 0o600, "the recreated file keeps mode 0600")
+
+        // (e) deleted DIRECTORY
+        let deletedDirDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("qsw-debuglog-deleted-dir-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: deletedDirDir) }
+        let deletedDirLog = DebugLog(directory: deletedDirDir)
+        guard !deletedDirLog.fileURL.path.hasPrefix(realLogsDir.path) else {
+            TestRunner.assertTrue(
+                false, "SAFETY STOP: deleted-directory test's log path resolved under the real logs directory"
+            )
+            return
+        }
+        deletedDirLog.log("KM", "before directory deletion")
+        deletedDirLog.waitForPendingWrites()
+        try? FileManager.default.removeItem(at: deletedDirDir)
+        TestRunner.assertTrue(
+            !FileManager.default.fileExists(atPath: deletedDirDir.path),
+            "the whole log directory is actually gone before the recreate-on-write check"
+        )
+        deletedDirLog.log("KM", "after directory deletion")
+        deletedDirLog.waitForPendingWrites()
+        TestRunner.assertTrue(
+            FileManager.default.fileExists(atPath: deletedDirDir.path),
+            "a deleted log DIRECTORY is recreated on the next write"
+        )
+        let recreatedDirMode = (try? FileManager.default.attributesOfItem(
+            atPath: deletedDirDir.path
+        ))?[.posixPermissions] as? Int
+        TestRunner.assertEqual(recreatedDirMode, 0o700, "the recreated directory keeps mode 0700")
+        TestRunner.assertTrue(
+            deletedDirLog.currentContents.contains("after directory deletion"),
+            "the new line lands in the file inside the recreated directory"
+        )
+        let recreatedFileInDirMode = (try? FileManager.default.attributesOfItem(
+            atPath: deletedDirLog.fileURL.path
+        ))?[.posixPermissions] as? Int
+        TestRunner.assertEqual(
+            recreatedFileInDirMode, 0o600, "the recreated file inside the recreated directory keeps mode 0600"
         )
     }
 }
