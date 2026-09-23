@@ -112,7 +112,10 @@ final class DebugLog {
 
     var fileURL: URL { url }
 
-    /// Blocks until all previously queued log writes have completed. Test-only.
+    /// Blocks until all previously queued log writes have completed. Test-only
+    /// — except `main.swift` also calls this on the single-instance-lock
+    /// "another copy is already running" exit path, so the loser's log line
+    /// is flushed before `exit(0)` tears the process down.
     func waitForPendingWrites() {
         queue.sync {}
     }

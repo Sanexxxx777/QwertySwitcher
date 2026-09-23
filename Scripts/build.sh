@@ -85,6 +85,25 @@ mkdir -p "$APP_BUNDLE/Contents/Resources/Dictionaries"
 BINARY_PATH=$(swift build --disable-sandbox ${SWIFT_SDK_ARGS[@]+"${SWIFT_SDK_ARGS[@]}"} -c release --show-bin-path)/$BINARY_NAME
 cp "$BINARY_PATH" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
 cp "$PROJECT_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/"
+
+# Same stamp as make-dmg.sh: the owner's Mac runs build.sh + install.sh builds,
+# so "which commit is installed here" must be answerable from this bundle too.
+# Written into the COPIED plist, never Resources/Info.plist, before signing.
+if SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse --short=12 HEAD 2>/dev/null); then
+    if [ -n "$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null || true)" ]; then
+        SOURCE_COMMIT="${SOURCE_COMMIT}-dirty"
+    fi
+else
+    SOURCE_COMMIT="unknown"
+fi
+BUNDLE_PLIST="$APP_BUNDLE/Contents/Info.plist"
+if /usr/libexec/PlistBuddy -c "Print :QSWSourceCommit" "$BUNDLE_PLIST" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c "Set :QSWSourceCommit $SOURCE_COMMIT" "$BUNDLE_PLIST"
+else
+    /usr/libexec/PlistBuddy -c "Add :QSWSourceCommit string $SOURCE_COMMIT" "$BUNDLE_PLIST"
+fi
+echo "  source commit: $SOURCE_COMMIT"
+
 echo "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 cp "$PROJECT_DIR/Resources/PrivacyInfo.xcprivacy" "$APP_BUNDLE/Contents/Resources/"
 
