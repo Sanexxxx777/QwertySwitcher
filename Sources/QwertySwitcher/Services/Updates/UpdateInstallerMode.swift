@@ -275,7 +275,18 @@ enum UpdateInstallerMode {
     /// is covered, not just the ones that happened to remember to call
     /// `finishTransaction` themselves.
     private static func open(_ target: URL) {
-        finishTransaction(markerURL: UpdateTransactionMarker.markerURL(), log: HelperLog())
+        let log = HelperLog()
+        finishTransaction(markerURL: UpdateTransactionMarker.markerURL(), log: log)
+        // Test mode never reaches LaunchServices, on ANY path (success,
+        // refusal, rollback). A contract fixture carries the real bundle id,
+        // and an async `/usr/bin/open` racing the fixture's deletion made
+        // LaunchServices start a SECOND copy of the installed app (23.09.2026:
+        // two extra live event taps from test runs, every correction typed
+        // two or three times).
+        if isTestMode {
+            log.write("test mode — not opening \(target.path)")
+            return
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         process.arguments = [target.path]
@@ -363,8 +374,14 @@ final class HelperLog {
     private let maxBytes = 1_000_000
 
     init() {
-        let dir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Logs/QwertySwitcher", isDirectory: true)
+        // Same override `DebugLog` honours: `Scripts/test.sh` and the helper
+        // contract point it at a scratch dir, so test runs stop appending to
+        // the owner's real update.log.
+        let override = ProcessInfo.processInfo.environment["QSW_LOG_DIR"] ?? ""
+        let dir = !override.isEmpty
+            ? URL(fileURLWithPath: override, isDirectory: true)
+            : FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Logs/QwertySwitcher", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)

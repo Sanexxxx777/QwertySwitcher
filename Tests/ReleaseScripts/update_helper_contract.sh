@@ -28,6 +28,8 @@ DEBUG_BIN="$BIN_DIR/QwertySwitcher"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 export QSW_UPDATES_ROOT_DIR="$WORK/updates"
+export QSW_LOG_DIR="$WORK/logs"
+HELPER_LOG="$WORK/logs/update.log"
 export QSW_UPDATE_HELPER_TEST_MODE=1
 mkdir -p "$QSW_UPDATES_ROOT_DIR"
 
@@ -224,6 +226,14 @@ set -e
     || fail "a staged bundle tampered with after signing should be refused with exit 13, got $STATUS6"
 [ "$(cat "$TARGET6/Contents/Resources/payload.txt")" = "installed-v1" ] \
     || fail "target's payload.txt changed despite the staged bundle failing its use-time codesign re-check"
+# Test mode must never hand a fixture to LaunchServices: the fixture carries
+# the real bundle id, and an async /usr/bin/open racing the trap's cleanup
+# launched a second copy of the INSTALLED app (23.09.2026). Positive evidence
+# on both paths that used to open: refusal (case 6) and rollback (case 2).
+for opened in "$TARGET6" "$TARGET2"; do
+    grep -qF "test mode — not opening $opened" "$HELPER_LOG" \
+        || fail "helper reached /usr/bin/open in test mode for $opened (see $HELPER_LOG)"
+done
 diff -r "$SNAPSHOT6" "$TARGET6" >/dev/null 2>&1 \
     || fail "target was modified despite the staged bundle failing its use-time codesign re-check"
 codesign --verify --deep --strict "$TARGET6" >/dev/null 2>&1 \
