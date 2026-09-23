@@ -396,4 +396,49 @@ enum VerifiedEraseGuardTests {
         )
     }
 }
+
+
+/// Plan 004, defect 3: `CGEventSource(stateID: .hidSystemState)` carries
+/// whatever modifier flags the owner is physically holding — without
+/// clearing them, a Cmd/Option held during the 30–250ms of a replacement
+/// turned a plain backspace into Option+Delete (delete word) or Cmd+Delete
+/// on the live field. Pinned structurally, same precedent as
+/// `ReplacementAtomicityGuardTests`: building a live CGEvent in the test
+/// process can deadlock on macOS 27 (see TestRunner.swift).
+enum SyntheticEventFlagsGuardTests {
+    static func run() {
+        TestRunner.section("TextReplacer — synthetic keyboard events carry no inherited modifiers")
+
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()      // Tests/
+            .deletingLastPathComponent()      // QwertySwitcher/
+            .appendingPathComponent("Core/TextReplacer.swift")
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            TestRunner.skip("TextReplacer.swift not readable from \(source.path)")
+            return
+        }
+
+        let marker = "CGEvent(keyboardEventSource:"
+        let occurrences = text.components(separatedBy: marker).count - 1
+        TestRunner.assertEqual(
+            occurrences, 1,
+            "every synthetic keyboard event (backspace, verified-erase backspace, Unicode retype) is"
+                + " built through ONE shared helper — a second, uncleared construction site would"
+                + " reopen the inherited-modifiers hole"
+        )
+
+        guard let markerRange = text.range(of: marker) else {
+            TestRunner.assertTrue(false, "\(marker) not found — test needs updating")
+            return
+        }
+        // Same bounding convention as ReplacementAtomicityGuardTests above:
+        // the next `private func` (or end of file) closes the helper.
+        let rest = String(text[markerRange.upperBound...])
+        let helperBody = rest.range(of: "private func").map { String(rest[..<$0.lowerBound]) } ?? rest
+        TestRunner.assertTrue(
+            helperBody.contains(".flags = []"),
+            "the shared helper clears flags on every synthetic event it builds"
+        )
+    }
+}
 #endif

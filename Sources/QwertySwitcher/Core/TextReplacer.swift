@@ -289,6 +289,24 @@ final class TextReplacer {
         }
     }
 
+    /// The ONE place that constructs a synthetic keyboard CGEvent — every
+    /// backspace, verified-erase backspace and Unicode retype event goes
+    /// through here. `event.flags = []` is the fix (plan 004, defect 3):
+    /// `CGEventSource(stateID: .hidSystemState)` carries the REAL, currently
+    /// held modifier flags, and without clearing them here an Option/Cmd the
+    /// owner is physically holding during the 30–250ms of a replacement
+    /// turned a plain backspace into Option+Delete (delete word) or
+    /// Cmd+Delete on the live text field.
+    private static func makeSyntheticKeyEvent(
+        source: CGEventSource?, virtualKey: CGKeyCode, keyDown: Bool
+    ) -> CGEvent? {
+        guard let event = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: keyDown) else {
+            return nil
+        }
+        event.flags = []
+        return event
+    }
+
     /// Point of no return: cancellation is honoured only BEFORE the first
     /// backspace goes out. Once even one character has been erased, the
     /// transaction must finish — bailing halfway erased the user's text and
@@ -314,8 +332,8 @@ final class TextReplacer {
         guard !cancellation.isCancelled else { return false }
         let src = CGEventSource(stateID: .hidSystemState)
         for _ in 0..<count {
-            if let kd = CGEvent(keyboardEventSource: src, virtualKey: 51, keyDown: true),
-               let ku = CGEvent(keyboardEventSource: src, virtualKey: 51, keyDown: false) {
+            if let kd = Self.makeSyntheticKeyEvent(source: src, virtualKey: 51, keyDown: true),
+               let ku = Self.makeSyntheticKeyEvent(source: src, virtualKey: 51, keyDown: false) {
                 SyntheticEventMarker.mark(kd)
                 SyntheticEventMarker.mark(ku)
                 Self.deliver(kd, toPid: pid)
@@ -365,8 +383,8 @@ final class TextReplacer {
         var last = start
         let deadline = CFAbsoluteTimeGetCurrent() + 0.12
         while sent < count + maxExtra {
-            if let kd = CGEvent(keyboardEventSource: src, virtualKey: 51, keyDown: true),
-               let ku = CGEvent(keyboardEventSource: src, virtualKey: 51, keyDown: false) {
+            if let kd = Self.makeSyntheticKeyEvent(source: src, virtualKey: 51, keyDown: true),
+               let ku = Self.makeSyntheticKeyEvent(source: src, virtualKey: 51, keyDown: false) {
                 SyntheticEventMarker.mark(kd)
                 SyntheticEventMarker.mark(ku)
                 Self.deliver(kd, toPid: pid)
@@ -422,12 +440,12 @@ final class TextReplacer {
         let src = CGEventSource(stateID: .hidSystemState)
         for char in text {
             let utf16 = Array(String(char).utf16)
-            if let kd = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true) {
+            if let kd = Self.makeSyntheticKeyEvent(source: src, virtualKey: 0, keyDown: true) {
                 SyntheticEventMarker.mark(kd)
                 kd.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
                 Self.deliver(kd, toPid: pid)
             }
-            if let ku = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false) {
+            if let ku = Self.makeSyntheticKeyEvent(source: src, virtualKey: 0, keyDown: false) {
                 SyntheticEventMarker.mark(ku)
                 ku.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
                 Self.deliver(ku, toPid: pid)
