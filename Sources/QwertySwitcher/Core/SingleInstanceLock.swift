@@ -13,6 +13,13 @@ import Darwin
 /// the kernel releases the lock the instant the holding process's file
 /// descriptor table goes away (normal exit, crash, `kill -9` — all included),
 /// so there is no stale-lock file to detect or clean up, unlike a PID file.
+///
+/// Ceiling (accepted): «Удалить все локальные данные» removes the folder
+/// holding the lock file and then terminates the app. If that wipe fails
+/// halfway, the running copy keeps its lock on an unlinked file, so a copy
+/// started later would create a fresh file and run too. Rare (a failed
+/// delete); upgrade path = re-create the file and lock it again on that
+/// failure branch.
 enum SingleInstanceLock {
     /// `~/Library/Application Support/QwertySwitcher/instance.lock`.
     static var defaultURL: URL {
