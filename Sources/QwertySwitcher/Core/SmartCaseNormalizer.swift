@@ -66,4 +66,16 @@ struct SentenceStartTracker {
         sentenceEnded = false
         gapAfterEnd = false
     }
+
+    /// A conversion re-rendered the symbol that closed the last word (EN "?"
+    /// typed for RU "," is shown as ","): re-judge the sentence end from what is
+    /// on screen now. A gap already typed after it is kept only if the new
+    /// symbol still ends a sentence.
+    /// Accepted ceiling: "/" re-rendered as "." after a gap was already typed
+    /// leaves the next word lowercase — a missed capital, never a false one.
+    mutating func reobserveTrailing(_ trailing: String?) {
+        guard let last = trailing?.last else { return }
+        sentenceEnded = ".!?".contains(last)
+        if !sentenceEnded { gapAfterEnd = false }
+    }
 }
