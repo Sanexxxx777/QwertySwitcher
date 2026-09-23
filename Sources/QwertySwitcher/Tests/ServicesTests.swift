@@ -447,14 +447,39 @@ enum SmartCaseTests {
         tracker.observeEmptyBoundary(isGap: true, leadHasDigit: false)
         TestRunner.assertTrue(!tracker.consumeForWord(), "a gap without a sentence end does not capitalize")
 
+        // Plan 012: a conversion re-renders the trigger that closed the last
+        // word (EN "?" typed for RU "," is shown as ",") — smart case must
+        // re-judge from what is on screen now.
+        tracker.observeBoundary("?")
+        tracker.observeEmptyBoundary(isGap: true, leadHasDigit: false)
+        tracker.reobserveTrailing(",")
+        TestRunner.assertTrue(
+            !tracker.shouldCapitalizeNextWord,
+            "reobserveTrailing(\",\") after \"?\" + gap disarms capitalization — the on-screen symbol"
+                + " does not end a sentence"
+        )
+        tracker.observeBoundary(".")
+        tracker.observeEmptyBoundary(isGap: true, leadHasDigit: false)
+        tracker.reobserveTrailing("!")
+        TestRunner.assertTrue(
+            tracker.shouldCapitalizeNextWord,
+            "reobserveTrailing(\"!\") after \".\" + gap stays armed — the on-screen symbol still"
+                + " ends a sentence"
+        )
+
         let monitorSource = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Core/KeyboardMonitor.swift")
         let source = (try? String(contentsOf: monitorSource, encoding: .utf8)) ?? ""
         TestRunner.assertTrue(
-            source.contains("if !captured.isEmpty { sentenceStartTracker.observeBoundary(trailing) }"),
-            "empty whitespace boundaries do not clear sentence capitalization"
+            source.contains("if !captured.isEmpty {\n")
+                && source.contains(
+                    "sentenceStartTracker.observeBoundary(languageReplacementStarted"
+                        + " ? (lastRetypedTrigger ?? trailing) : trailing)"
+                ),
+            "boundary judges the sentence end from the on-screen (retyped) trigger when a"
+                + " replacement started — 23.09.2026"
         )
         TestRunner.assertTrue(
             source.contains(

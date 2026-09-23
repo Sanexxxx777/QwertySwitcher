@@ -75,6 +75,14 @@ final class KeyboardMonitor {
     /// scoring buffer into something it was never meant to hold.
     private var runKeystrokes: [BufferedKeystroke] = []
 
+    /// Set by `processCurrentWord` right before a language replacement
+    /// starts, to the trigger symbol as it will actually render in the
+    /// TARGET layout (e.g. EN "?" typed for RU "," renders as ","). Cleared
+    /// before each `processCurrentWord` call in `handleWordBoundary` so a
+    /// boundary where no replacement starts never reads a stale value —
+    /// smart case must judge the sentence end by what lands on screen.
+    private var lastRetypedTrigger: String?
+
     /// Set by `convertWholeRun` when it measured the real on-screen text for
     /// a letters-only run (AX resync) and then fell through — a pure word is
     /// this function's business to convert, not judge, so it hands the
@@ -1037,6 +1045,7 @@ final class KeyboardMonitor {
             && !captured.isEmpty
             && expandSnippet(keystrokes: captured, trigger: trailing, triggerEvent: triggerEvent)
 
+        lastRetypedTrigger = nil
         let languageReplacementStarted = !snippetStarted && canAutoCorrect
             && learned == nil
             && !captured.isEmpty
@@ -1058,7 +1067,12 @@ final class KeyboardMonitor {
         // Empty boundaries can follow punctuation ("Hello." then Space). They
         // must not clear the sentence-start intent before the next word
         // arrives — they are what confirms it (the gap after the period).
-        if !captured.isEmpty { sentenceStartTracker.observeBoundary(trailing) } else {
+        // A conversion re-renders `trailing` for the TARGET layout (EN "?"
+        // typed for RU "," is shown as ",") — 23.09.2026: judge the sentence
+        // end from what actually landed on screen, not the source symbol.
+        if !captured.isEmpty {
+            sentenceStartTracker.observeBoundary(languageReplacementStarted ? (lastRetypedTrigger ?? trailing) : trailing)
+        } else {
             sentenceStartTracker.observeEmptyBoundary(isGap: proseBoundary, leadHasDigit: leadHasDigit)
         }
 
@@ -2137,6 +2151,13 @@ final class KeyboardMonitor {
                         // so retyped and erased must simply match.
                         + " net=\(runReplacement.count - length)"
                 )
+                // This path re-renders `trailing` for the target layout too
+                // (see `trailing = …characterForKeycode(… layout: targetLayout
+                // …)` above) — the sentence tracker must judge it same as the
+                // boundary path does.
+                if let trailing, !trailing.isEmpty {
+                    self.sentenceStartTracker.reobserveTrailing(trailing)
+                }
                 // Island: `swapTarget` (called above, before `isPaused` was
                 // set) runs `languageDetector.detect` synchronously, so the
                 // ring already carries this word's own entry — same as the
@@ -2313,6 +2334,7 @@ final class KeyboardMonitor {
             // before delivery. Suppress it so it can never race our own
             // backspaces (RC-1); it's retyped as part of the payload instead.
             isPaused = true
+            lastRetypedTrigger = retypedTrigger
             avalancheGuard.recordFired()
             suppressCurrentEvent = true
             pendingUserEvents.enqueueFront(triggerEvent)
