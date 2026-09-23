@@ -1096,7 +1096,11 @@ enum KeyboardMonitorIntegrationTests {
             }
         }
 
-        // (b) Double Shift via history: "dot" is a valid EN word, so the
+        // (b) Double Shift right after the trigger: the run still holds
+        // [d, o, t, Shift+kc44], so Double Shift takes the WHOLE-RUN path
+        // (`convertWholeRun`: a run with a non-letter converts key by key) —
+        // the review of the first version found the fix only in the
+        // history path, and this case stayed red. "dot" is a valid EN word, so the
         // boundary leaves it alone; Shift+kc44 still closes it (trailing
         // "?"), arming the manual-switch history exactly like the "на 300$"
         // fixture above. Double Shift is pressed right there — the SAME
@@ -1110,7 +1114,7 @@ enum KeyboardMonitorIntegrationTests {
         // layout ('?' → ',') and, with the fix, re-judges the sentence end
         // from it — same defect, the OTHER path that can re-render a
         // trigger.
-        TestRunner.section("Plan 012: smart case reads the on-screen trigger — Double Shift via history")
+        TestRunner.section("Plan 012: smart case reads the on-screen trigger — Double Shift on the whole run")
         inputSources.switchTo(enLayout)
         do {
             let h = harness(autoSwitch: true)
