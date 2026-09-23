@@ -114,7 +114,7 @@ final class LanguageDetector {
     /// — which would silently blocklist every junk-override fixture) and
     /// must never leak into a deterministic test run.
     private static var isTestBinary: Bool {
-        CommandLine.arguments.contains("--test")
+        TestRunMode.isActive
     }
 
     init(dictionary: WordDictionary, inputSourceManager: InputSourceManager,

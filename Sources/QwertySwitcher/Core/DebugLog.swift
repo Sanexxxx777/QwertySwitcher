@@ -156,7 +156,7 @@ final class DebugLog {
         if let override = ProcessInfo.processInfo.environment["QSW_LOG_DIR"], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)
         }
-        if CommandLine.arguments.contains("--test") {
+        if TestRunMode.isActive {
             return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
                 .appendingPathComponent("QwertySwitcherTestLogs", isDirectory: true)
         }

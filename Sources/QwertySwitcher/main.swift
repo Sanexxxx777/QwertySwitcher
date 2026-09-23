@@ -2,9 +2,11 @@ import AppKit
 import Foundation
 
 // Headless test mode: `QwertySwitcher --test` runs unit tests and exits.
-if CommandLine.arguments.contains("--test") {
+#if DEBUG
+if TestRunMode.isActive {
     exit(Int32(TestRunner.run()))
 }
+#endif
 
 // Update-installer helper mode: this is the SAME binary, launched from the
 // staged copy of a downloaded release (see UpdateInstallerMode). Runs and

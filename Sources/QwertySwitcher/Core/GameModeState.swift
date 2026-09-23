@@ -175,7 +175,7 @@ final class GameModeState {
     /// use — the real frontmost app at test-binary launch is ambient,
     /// uncontrolled state that must never leak into a deterministic run.
     private static var isTestBinary: Bool {
-        CommandLine.arguments.contains("--test")
+        TestRunMode.isActive
     }
 
     // MARK: - AppKit-facing (off hot path)
