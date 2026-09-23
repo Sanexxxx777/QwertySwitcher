@@ -220,6 +220,15 @@ final class KeyboardMonitor {
     // out of scope for now — see Fix report.
     private var pendingLeadingSymbols: [BufferedKeystroke] = []
 
+    /// Digits typed with no letters yet ("5" in "Готово. 5 минут"): the
+    /// sentence starts with the number, so smart case must not capitalize
+    /// the word after it.
+    private var pendingLeadHasDigit: Bool {
+        pendingLeadingSymbols.contains {
+            InputBuffer.digitChar(keycode: $0.keycode, flags: $0.flags)?.first?.isNumber == true
+        }
+    }
+
     /// Position (1-based `buffer.count` right after it was appended) of the
     /// most recent alphabet-ambiguous key — a letter in one alphabet and
     /// punctuation in the other, see `InputBuffer.isAlphabetAmbiguous` — in
@@ -756,6 +765,16 @@ final class KeyboardMonitor {
                 logContextWipe("backspace")
             }
             switchUndoManager.invalidate()
+            // Nothing of the current word left to delete = the backspace eats
+            // what came before it. With no leading symbols pending that is the
+            // gap or the very period that armed smart case ("спасиб." ⌫ "о."
+            // came out "спасибО.", "готово." ⌫ " теперь" → "Теперь"; field
+            // log 22.09.2026, synthetic examples). A pending "." or "(" is safe
+            // to lose; pending digits are not — the run is dropped wholesale
+            // below, and whatever digits stay on screen still open the sentence.
+            if buffer.isEmpty, pendingLeadingSymbols.isEmpty || pendingLeadHasDigit {
+                sentenceStartTracker.reset()
+            }
             buffer.removeLast()
             lastCompletedWord = nil
             // Conservative: we can't tell from here whether the deleted
@@ -961,7 +980,10 @@ final class KeyboardMonitor {
         proseBoundary: Bool = false
     ) {
         let captured = buffer.currentWord()
-        let capitalizeSentenceStart = captured.isEmpty ? false : sentenceStartTracker.consumeForWord()
+        // Read before `pendingLeadingSymbols` is cleared below.
+        let leadHasDigit = pendingLeadHasDigit
+        let capitalizeSentenceStart = captured.isEmpty
+            ? false : sentenceStartTracker.consumeForWord(leadHasDigit: leadHasDigit)
         if captured.isEmpty { switchUndoManager.invalidate() }
         let retyped = languageDetector.lastConvertedWord(keystrokes: captured) ?? ""
         let learned = autoLearnTracker.confirmRetype(word: retyped, trailing: trailing)
@@ -997,8 +1019,11 @@ final class KeyboardMonitor {
             )
         let replacementStarted = snippetStarted || languageReplacementStarted || smartCaseStarted
         // Empty boundaries can follow punctuation ("Hello." then Space). They
-        // must not clear the sentence-start intent before the next word arrives.
-        if !captured.isEmpty { sentenceStartTracker.observeBoundary(trailing) }
+        // must not clear the sentence-start intent before the next word
+        // arrives — they are what confirms it (the gap after the period).
+        if !captured.isEmpty { sentenceStartTracker.observeBoundary(trailing) } else {
+            sentenceStartTracker.observeEmptyBoundary(isGap: proseBoundary, leadHasDigit: leadHasDigit)
+        }
 
         if replacementStarted {
             lastCompletedWord = nil
