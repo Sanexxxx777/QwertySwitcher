@@ -28,7 +28,8 @@ Ported faithfully from (read 2026-08-16):
     `!ambiguousKeyRecent` (KeyboardMonitor.ambiguousKeyRecent / the
     lastAmbiguousKeyIndex bookkeeping) — an alphabet-ambiguous physical key
     ([ ] ' ; , . `, i.e. ъ х э ж б ю ё in Russian) blocks tryInstantCorrection
-    while it is within the last 2 keystrokes of the run.
+    while it is within the last 1 keystroke of the run (narrowed from 2 on
+    21.08.2026 — see `ambiguous_recent()` below).
   Core/NGramAnalyzer.swift, Core/WordFrequency.swift — reused verbatim via
     false_switch_sim.ngram / freq_bonus (already a faithful port there).
 
@@ -160,8 +161,16 @@ def combined_score(word, lang):
 
 
 def evaluate_instant(keys_prefix, current_lang, other_langs, min_length):
-    """Returns (winner_lang, corrected_word) or None. Mirrors
-    InstantCorrectionAnalyzer.evaluate() exactly, including guard order."""
+    """Returns (winner_lang, corrected_word) or None. Mirrors the CORE of
+    InstantCorrectionAnalyzer.evaluate() — the min-length gate, the own-
+    word-level guard, and the candidate floor/margin/ceiling scoring, in the
+    same order — but does NOT model three guards Swift ships: the
+    maxLength=20 keystroke cap (InstantCorrectionAnalyzer.maxLength), the
+    Mechanism A learned-word bypass (`learnedActive`), or the own-reading
+    junk gate (JunkMeter.isClean — ported separately in
+    instant_junk_gate_sim.py, not here). Numbers from this file are not
+    directly comparable to live behavior on inputs where any of those three
+    guards would have fired."""
     if len(keys_prefix) < min_length:
         return None
     current_text = convert(keys_prefix, current_lang)

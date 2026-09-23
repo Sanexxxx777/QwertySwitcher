@@ -89,6 +89,26 @@ mkdir -p "$APP_BUNDLE/Contents/Resources/Dictionaries"
 
 lipo -create "$BIN_ARM64" "$BIN_X86" -output "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
 cp "$PROJECT_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/"
+
+# Stamp the bundle with the commit it was built from — "what code is on this
+# Mac" must be answerable from a shipped .app, not just from the DMG's build
+# log. Written into the COPIED plist, never Resources/Info.plist (that file
+# never ships — it's not part of the signed bundle).
+if SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse --short=12 HEAD 2>/dev/null); then
+    if [ -n "$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null || true)" ]; then
+        SOURCE_COMMIT="${SOURCE_COMMIT}-dirty"
+    fi
+else
+    SOURCE_COMMIT="unknown"
+fi
+BUNDLE_PLIST="$APP_BUNDLE/Contents/Info.plist"
+if /usr/libexec/PlistBuddy -c "Print :QSWSourceCommit" "$BUNDLE_PLIST" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c "Set :QSWSourceCommit $SOURCE_COMMIT" "$BUNDLE_PLIST"
+else
+    /usr/libexec/PlistBuddy -c "Add :QSWSourceCommit string $SOURCE_COMMIT" "$BUNDLE_PLIST"
+fi
+echo "  source commit: $SOURCE_COMMIT"
+
 echo "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 cp "$PROJECT_DIR/Resources/PrivacyInfo.xcprivacy" "$APP_BUNDLE/Contents/Resources/"
 
