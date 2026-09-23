@@ -46,7 +46,7 @@ final class InputSourceManager {
     // `--test`) launch is completely unaffected — production always
     // switches for real.
     private static var isTestBinary: Bool {
-        CommandLine.arguments.contains("--test")
+        TestRunMode.isActive
     }
     /// Explicit, rare escape hatch for a manual full-fidelity run that
     /// deliberately wants the real TIS integration exercised — OFF by

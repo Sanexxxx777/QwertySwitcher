@@ -308,7 +308,7 @@ final class KeyboardMonitor {
         self.personalFreqStore = personalFrequencyStore
         self.feedbackTracker = feedbackTracker
         self.gameMode = gameMode
-        self.activeAppBundleID = CommandLine.arguments.contains("--test")
+        self.activeAppBundleID = TestRunMode.isActive
             ? nil : NSWorkspace.shared.frontmostApplication?.bundleIdentifier
 
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -412,7 +412,7 @@ final class KeyboardMonitor {
     }
 
     @objc private func appDidActivate(_ notification: Notification) {
-        if !CommandLine.arguments.contains("--test") {
+        if !TestRunMode.isActive {
             activeAppBundleID = (
                 notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             )?.bundleIdentifier
