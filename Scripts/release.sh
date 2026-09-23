@@ -15,20 +15,47 @@ STORE_DIR="${QSW_STORE_DIR:-$HOME/Projects/web/store}"
 DOWNLOADS_DIR="$STORE_DIR/downloads"
 FEED_DIR="$DOWNLOADS_DIR/qwertyswitcher"
 
+# --allow-dirty may appear anywhere in the arguments; strip it out first so
+# the positional k1|k2 + release-notes parsing below is unaffected by where
+# it was passed.
+ALLOW_DIRTY=false
+ARGS=()
+for arg in "$@"; do
+    if [ "$arg" = "--allow-dirty" ]; then
+        ALLOW_DIRTY=true
+    else
+        ARGS+=("$arg")
+    fi
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+
 KEY_ID="${1:-k1}"
 case "$KEY_ID" in
     k1|k2) ;;
-    *) echo "Usage: $0 [k1|k2] [release notes]"; exit 2 ;;
+    *) echo "Usage: $0 [k1|k2] [release notes] [--allow-dirty]"; exit 2 ;;
 esac
 NOTES_ARG="${2:-}"
 KEY_PATH="$HOME/.claude/secrets/qsw_update_ed25519_${KEY_ID}.key"
 
 echo "=== Qwerty Switcher release (signing key: $KEY_ID) ==="
 
-# ── 0. Git cleanliness — warn only, packaging is not blocked on it ──
+# ── 0. Git cleanliness — refuses to package a dirty tree unless --allow-dirty ──
 cd "$PROJECT_DIR"
+COMMIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo unknown)
 if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
-    echo "⚠ working tree is not clean — packaging from it anyway (warning, not a block)"
+    if [ "$ALLOW_DIRTY" = true ]; then
+        echo "⚠ working tree is not clean — packaging from it anyway (warning, not a block)"
+    else
+        echo "✗ working tree is not clean — refusing to package (pass --allow-dirty to override)"
+        exit 4
+    fi
+fi
+
+# ── 0.5. Tests must pass before a release is packaged ──
+echo "[0.5/8] Running test suite..."
+if ! ./Scripts/test.sh; then
+    echo "✗ test suite failed — refusing to package"
+    exit 5
 fi
 
 # ── 1. Universal build + DMG (make-dmg.sh already signs + secret-scans) ──
@@ -147,7 +174,7 @@ echo "[8/8] Done. Nothing was pushed or released — run these yourself:"
 echo ""
 echo "  cd \"$STORE_DIR\" && git add -A && git commit -m \"Qwerty Switcher $VERSION\" && git push"
 echo "  cd \"$PROJECT_DIR\" && git add -A && git commit -m \"Release $VERSION (build $BUILD)\" && git push"
-echo "  gh release create v$VERSION \"$DMG_PATH\" \"$ZIP_PATH\" \"$APPCAST_PATH\" --title \"Qwerty Switcher $VERSION\" --notes \"$NOTES\""
+echo "  gh release create v$VERSION \"$DMG_PATH\" \"$ZIP_PATH\" \"$APPCAST_PATH\" --title \"Qwerty Switcher $VERSION\" --notes \"$NOTES\" --target $COMMIT_SHA"
 echo ""
 echo "✓ appcast: $APPCAST_PATH"
 echo "✓ dmg:     $DMG_PATH"
