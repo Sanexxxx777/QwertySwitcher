@@ -4,8 +4,10 @@
 <dict>
     <key>com.apple.security.app-sandbox</key>
     <true/>
-    <!-- App Sandbox blocks all outbound network by default; the license
-         check needs this to reach the license server. -->
+    <!-- App Sandbox blocks all outbound network by default; the only
+         outbound use is the opt-in update check (Services/Updates/) — a Mac
+         App Store build would not need this at all, since the store itself
+         delivers updates. -->
 	<key>com.apple.security.network.client</key>
 	<true/>
 	<key>com.apple.security.files.user-selected.read-write</key>

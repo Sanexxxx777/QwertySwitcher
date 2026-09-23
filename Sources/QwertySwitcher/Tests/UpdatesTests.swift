@@ -20,6 +20,7 @@ enum UpdatesTests {
         manualInstallGate()
         checkConcurrencyGate()
         limits()
+        archiveEntryLimits()
         designatedRequirementParser()
         reportFilter()
         feedURLOverride()
@@ -423,6 +424,147 @@ enum UpdatesTests {
             isSuccess(UpdateStager.evaluateUnpackedEntries(containedSymlink, maxFiles: 5000, maxBytes: 150_000_000)),
             "a symlink that resolves inside the stage root is allowed"
         )
+    }
+
+    // MARK: - Pre-extraction archive-entry limits
+
+    private static func archiveEntryLimits() {
+        TestRunner.section("Updates — pre-extraction archive-entry limits (evaluateArchiveEntries)")
+
+        let normal = [
+            UpdateStager.ArchiveEntry(path: "Qwerty Switcher.app/", isSymlink: false),
+            UpdateStager.ArchiveEntry(path: "Qwerty Switcher.app/Contents/Info.plist", isSymlink: false),
+        ]
+        TestRunner.assertTrue(
+            isSuccess(UpdateStager.evaluateArchiveEntries(normal)),
+            "normal entries with no symlink, absolute path, or .. component pass"
+        )
+
+        let parentEscape = [UpdateStager.ArchiveEntry(path: "../x", isSymlink: false)]
+        TestRunner.assertEqual(
+            errorCase(UpdateStager.evaluateArchiveEntries(parentEscape)),
+            "symlinkEscape", "a '../x' entry path is refused"
+        )
+
+        let nestedParentEscape = [UpdateStager.ArchiveEntry(path: "a/../../b", isSymlink: false)]
+        TestRunner.assertEqual(
+            errorCase(UpdateStager.evaluateArchiveEntries(nestedParentEscape)),
+            "symlinkEscape", "an 'a/../../b' entry path is refused"
+        )
+
+        let absolutePath = [UpdateStager.ArchiveEntry(path: "/etc/x", isSymlink: false)]
+        TestRunner.assertEqual(
+            errorCase(UpdateStager.evaluateArchiveEntries(absolutePath)),
+            "symlinkEscape", "an absolute '/etc/x' entry path is refused"
+        )
+
+        let symlinkEntry = [UpdateStager.ArchiveEntry(path: "Qwerty Switcher.app/link", isSymlink: true)]
+        TestRunner.assertEqual(
+            errorCase(UpdateStager.evaluateArchiveEntries(symlinkEntry)),
+            "symlinkEscape", "a symlink entry is refused, regardless of its path"
+        )
+
+        // Real-archive assert: zip an actual symlink with /usr/bin/zip and
+        // run the zipinfo-backed wrapper against it, so the test doesn't
+        // just trust the pure evaluator above — it confirms the listing
+        // wrapper correctly reports isSymlink for a real archive entry too.
+        let tmpRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("qsw-archive-entry-test-\(UUID().uuidString)", isDirectory: true)
+        let folderToZip = tmpRoot.appendingPathComponent("payload", isDirectory: true)
+        let zipPath = tmpRoot.appendingPathComponent("payload.zip")
+        defer { try? FileManager.default.removeItem(at: tmpRoot) }
+
+        do {
+            try FileManager.default.createDirectory(at: folderToZip, withIntermediateDirectories: true)
+            try "hello".write(to: folderToZip.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
+            try FileManager.default.createSymbolicLink(
+                at: folderToZip.appendingPathComponent("link.txt"),
+                withDestinationURL: folderToZip.appendingPathComponent("file.txt")
+            )
+
+            let zipProcess = Process()
+            zipProcess.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+            zipProcess.arguments = ["-y", "-r", zipPath.path, "payload"]
+            zipProcess.currentDirectoryURL = tmpRoot
+            zipProcess.standardOutput = FileHandle.nullDevice
+            zipProcess.standardError = FileHandle.nullDevice
+            try zipProcess.run()
+            zipProcess.waitUntilExit()
+            TestRunner.assertEqual(zipProcess.terminationStatus, 0, "the fixture zip was created")
+
+            switch UpdateStager.listZipArchiveEntries(at: zipPath) {
+            case .failure:
+                TestRunner.assertTrue(false, "listing the real fixture zip should not fail")
+            case .success(let entries):
+                let symlinkEntries = entries.filter { $0.isSymlink }
+                TestRunner.assertEqual(symlinkEntries.count, 1, "exactly one entry is reported as a symlink")
+                TestRunner.assertTrue(
+                    symlinkEntries.first?.path.hasSuffix("link.txt") == true,
+                    "the reported symlink entry is link.txt"
+                )
+            }
+
+            TestRunner.assertEqual(
+                errorCase(UpdateStager.evaluateZipArchiveEntries(at: zipPath)),
+                "symlinkEscape", "the real fixture zip containing a symlink is refused"
+            )
+        } catch {
+            TestRunner.assertTrue(false, "could not build the real-archive fixture: \(error)")
+        }
+
+        // Positive real-archive assert: a mis-count or off-by-one in the
+        // zipinfo parsing above would silently refuse every FUTURE ordinary
+        // release archive — and no test would go red for it, because every
+        // other assert in this function only proves REFUSAL. Built exactly
+        // the way Scripts/release.sh:50 packages a real release (ditto
+        // -c -k --keepParent, run with the bundle's PARENT as cwd) so this
+        // exercises the same code path a real release zip goes through.
+        let releaseTmpRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("qsw-release-archive-test-\(UUID().uuidString)", isDirectory: true)
+        let bundleDir = releaseTmpRoot.appendingPathComponent("Qwerty Switcher.app", isDirectory: true)
+        let releaseZipPath = releaseTmpRoot.appendingPathComponent("release-fixture.zip")
+        defer { try? FileManager.default.removeItem(at: releaseTmpRoot) }
+
+        do {
+            let macOSDir = bundleDir.appendingPathComponent("Contents/MacOS", isDirectory: true)
+            let dictionariesDir = bundleDir.appendingPathComponent("Contents/Resources/Dictionaries", isDirectory: true)
+            try FileManager.default.createDirectory(at: macOSDir, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: dictionariesDir, withIntermediateDirectories: true)
+            try "<plist/>".write(
+                to: bundleDir.appendingPathComponent("Contents/Info.plist"), atomically: true, encoding: .utf8
+            )
+            try "binary".write(to: macOSDir.appendingPathComponent("QwertySwitcher"), atomically: true, encoding: .utf8)
+            try "word\n".write(to: dictionariesDir.appendingPathComponent("en_US.txt"), atomically: true, encoding: .utf8)
+
+            let dittoProcess = Process()
+            dittoProcess.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            dittoProcess.arguments = ["-c", "-k", "--keepParent", "Qwerty Switcher.app", "release-fixture.zip"]
+            dittoProcess.currentDirectoryURL = releaseTmpRoot
+            dittoProcess.standardOutput = FileHandle.nullDevice
+            dittoProcess.standardError = FileHandle.nullDevice
+            try dittoProcess.run()
+            dittoProcess.waitUntilExit()
+            TestRunner.assertEqual(dittoProcess.terminationStatus, 0, "the release-style fixture zip was created")
+
+            switch UpdateStager.listZipArchiveEntries(at: releaseZipPath) {
+            case .failure:
+                TestRunner.assertTrue(false, "listing a real, ordinary release-style zip should not fail")
+            case .success(let entries):
+                TestRunner.assertTrue(entries.count >= 5, "a release-style zip reports at least 5 entries (got \(entries.count))")
+                TestRunner.assertTrue(entries.allSatisfy { !$0.isSymlink }, "a release-style zip with no symlinks reports none")
+                TestRunner.assertTrue(
+                    entries.allSatisfy { $0.path.hasPrefix("Qwerty Switcher.app/") },
+                    "every entry of a --keepParent archive is rooted at 'Qwerty Switcher.app/'"
+                )
+            }
+
+            TestRunner.assertTrue(
+                isSuccess(UpdateStager.evaluateZipArchiveEntries(at: releaseZipPath)),
+                "a real, ordinary release-style zip (built like Scripts/release.sh does) is accepted"
+            )
+        } catch {
+            TestRunner.assertTrue(false, "could not build the release-style archive fixture: \(error)")
+        }
     }
 
     private static func isSuccess(_ result: Result<Void, UpdateStager.StageError>) -> Bool {
