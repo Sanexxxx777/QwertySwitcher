@@ -3,37 +3,6 @@ import CoreGraphics
 import AppKit
 
 final class KeyboardMonitor {
-    private struct QueuedUserEvent {
-        let type: CGEventType
-        let keycode: CGKeyCode
-        let flags: CGEventFlags
-        let autorepeat: Int64
-        let keyboardType: Int64
-
-        init(type: CGEventType, event: CGEvent) {
-            self.type = type
-            keycode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-            flags = event.flags
-            autorepeat = event.getIntegerValueField(.keyboardEventAutorepeat)
-            keyboardType = event.getIntegerValueField(.keyboardEventKeyboardType)
-        }
-
-        func makeEvent() -> CGEvent? {
-            let source = CGEventSource(stateID: .hidSystemState)
-            guard let event = CGEvent(
-                keyboardEventSource: source,
-                virtualKey: keycode,
-                keyDown: type != .keyUp
-            ) else { return nil }
-            event.type = type
-            event.flags = flags
-            event.setIntegerValueField(.keyboardEventAutorepeat, value: autorepeat)
-            event.setIntegerValueField(.keyboardEventKeyboardType, value: keyboardType)
-            SyntheticEventMarker.markAsReplayedUserEvent(event)
-            return event
-        }
-    }
-
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var mouseMonitor: Any?
@@ -62,8 +31,35 @@ final class KeyboardMonitor {
         }
     }
     var isPaused = false
-    private var pendingUserEvents = PendingUserEventQueue<QueuedUserEvent>()
+    private var pendingUserEvents = PendingUserEventQueue<KeyEventSnapshot>()
     private var invalidateAfterReplacement = false
+
+    /// Side effect for replaying a queued keystroke once a paused replacement
+    /// finishes. Production posts a real CGEvent back into the session tap
+    /// (`eventTapCallback` sees it again, routed `.replayedUser` via its own
+    /// marker) — the headless test harness overrides this to append to an
+    /// in-memory list instead, since a posted CGEvent goes nowhere observable
+    /// there. `finishReplacement` is the only caller.
+    var replaySink: (KeyEventSnapshot) -> Void = { snapshot in
+        guard let event = snapshot.makeEvent() else {
+            // No fallback exists if CGEvent construction itself fails
+            // system-wide — but silently dropping it here used to lose the
+            // character with zero trace. Logging at least turns an invisible
+            // loss into a diagnosable one.
+            DebugLog.shared.log("KM", "WARNING: dropped a queued keystroke — CGEvent construction failed")
+            return
+        }
+        event.post(tap: .cgAnnotatedSessionEventTap)
+    }
+
+    /// Source of "the real text and caret position under the focused field",
+    /// read by Double Shift's run-resync (`convertWholeRun`) before falling
+    /// through to the scored path. Production asks the real Accessibility
+    /// API; the headless test harness has no focused element to read and
+    /// overrides this to `{ nil }` (same as AX silently returning nothing).
+    var focusedTextProvider: () -> (text: String, caret: Int)? = {
+        AXTextSelectionService.focusedElement().flatMap { AXTextSelectionService.valueAndCaret($0) }
+    }
 
     /// Everything printable typed since the last real break — letters, digits
     /// and symbols alike, in the order they were pressed. Only Double Shift
@@ -542,8 +538,8 @@ final class KeyboardMonitor {
 
     /// Internal (not fileprivate) so the headless test harness in
     /// TestRunner.swift can exercise the exact queue/skip contract directly.
-    func queueIfReplacementActive(_ event: CGEvent) -> Bool {
-        guard isPaused, !SyntheticEventMarker.shouldBypass(event) else { return false }
+    func queueIfReplacementActive(_ event: KeyEventSnapshot) -> Bool {
+        guard isPaused, event.route == .physical else { return false }
         // Modifier transitions (Shift/Cmd/Option/CapsLock) are deliberately
         // NEVER queued for replay — root cause of the "avalanche" incident
         // (CLAUDE.md): a real Shift down/up captured here and replayed later,
@@ -553,13 +549,13 @@ final class KeyboardMonitor {
         // — fed a replayed burst it can register a false Double Shift, which
         // fires another correction, whose own pause queues the NEXT physical
         // shift transition, and so on. Each queued keyDown/keyUp already
-        // carries its own flags snapshot (`QueuedUserEvent.flags`), so the
+        // carries its own flags snapshot (`KeyEventSnapshot.flags`), so the
         // target app doesn't need a correctly-ordered flagsChanged replay to
         // render correctly — letting real modifier transitions pass through
         // live (unsuppressed, analyzed with their true timing) costs nothing
         // and removes the fuse.
         guard event.type != .flagsChanged else { return false }
-        pendingUserEvents.enqueue(QueuedUserEvent(type: event.type, event: event))
+        pendingUserEvents.enqueue(event)
         return true
     }
 
@@ -586,12 +582,12 @@ final class KeyboardMonitor {
         exceptionsService.areHotkeysBlockedForCurrentApp() || gameMode.isActive(bundleID: activeAppBundleID)
     }
 
-    fileprivate func handlesShortcut(type: CGEventType, event: CGEvent) -> Bool {
-        let keycode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-        if type == .flagsChanged && keycode == 57 {
+    fileprivate func handlesShortcut(_ event: KeyEventSnapshot) -> Bool {
+        let keycode = event.keycode
+        if event.type == .flagsChanged && keycode == 57 {
             return prefsService.isCapsLockSwitchEnabled && !hotkeysBlocked()
         }
-        guard type == .keyDown else { return false }
+        guard event.type == .keyDown else { return false }
         let flags = event.flags
         if flags.contains(.maskCommand) && flags.contains(.maskShift) && flags.contains(.maskAlternate) && keycode == 9 {
             return prefsService.isPasteNoFormatEnabled
@@ -605,50 +601,70 @@ final class KeyboardMonitor {
             && !hotkeysBlocked()
     }
 
-    /// Internal (not fileprivate) so the headless integration-test harness in
-    /// TestRunner.swift can feed synthetic CGEvents directly — same code path
-    /// the real CGEventTap callback uses, minus the tap plumbing itself.
+    /// Compatibility adapter over `handle(_:)`, kept internal (not
+    /// fileprivate) in case anything still calls the tap-callback shape
+    /// directly with a raw CGEvent. `eventTapCallback` and the test harness
+    /// call `handleTapDisabled`/`handle(_:)` directly instead — this only
+    /// builds the one `KeyEventSnapshot` they would otherwise build themselves.
     func handleEvent(_ proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if type == .tapDisabledByTimeout { tapTimeoutDisableCount += 1 }
-            DebugLog.shared.log(
-                "KM",
-                "event tap disabled (\(type == .tapDisabledByTimeout ? "timeout" : "userInput")) — re-enabling"
-                    + (type == .tapDisabledByTimeout ? " count=\(tapTimeoutDisableCount)" : "")
-            )
-            if let tap = eventTap {
-                CGEvent.tapEnable(tap: tap, enable: true)
-                health = secureInputDetector.isSecureInput ? .secureInput : .running
-            } else {
-                health = .unavailable
-            }
+        guard type != .tapDisabledByTimeout, type != .tapDisabledByUserInput else {
+            handleTapDisabled(type)
             return
         }
+        handle(KeyEventSnapshot(type: type, event: event))
+    }
 
+    /// The tap-disabled branch of the old combined `handleEvent`, extracted
+    /// so `eventTapCallback` can call it directly for a disable notification
+    /// without building a `KeyEventSnapshot` from an event that carries no
+    /// real keystroke fields.
+    func handleTapDisabled(_ type: CGEventType) {
+        if type == .tapDisabledByTimeout { tapTimeoutDisableCount += 1 }
+        DebugLog.shared.log(
+            "KM",
+            "event tap disabled (\(type == .tapDisabledByTimeout ? "timeout" : "userInput")) — re-enabling"
+                + (type == .tapDisabledByTimeout ? " count=\(tapTimeoutDisableCount)" : "")
+        )
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: true)
+            health = secureInputDetector.isSecureInput ? .secureInput : .running
+        } else {
+            health = .unavailable
+        }
+    }
+
+    /// The real keystroke hot path — everything the old `handleEvent` did
+    /// once past the tap-disabled branch, driven purely off
+    /// `KeyEventSnapshot`'s scalar fields (no CGEvent reads left below this
+    /// point in the file — see `KeyEventSnapshot.init(type:event:)`).
+    /// Internal (not fileprivate) so the headless integration-test harness in
+    /// TestRunner.swift can drive it directly — same code path
+    /// `eventTapCallback` uses, minus the tap plumbing itself.
+    func handle(_ event: KeyEventSnapshot) {
         // Generated events carry a process-local marker. Unlike the old 300ms
         // cooldown, this filters only our own synthetic keystrokes (backspace/
         // retype) — replayed real keystrokes route as `.replayedUser` and are
         // analyzed exactly like live typing (RC-2: a replayed space must still
         // clear the buffer at a word boundary instead of bypassing analysis).
-        if SyntheticEventMarker.route(event) == .ours { return }
+        if event.route == .ours { return }
 
         // Proof of life for the avalanche circuit breaker: a genuinely
         // physical event (not one we replayed from the pause queue) resets
         // the "consecutive auto-fires with no human action" counter. Placed
         // before any branch that can fire a correction, so it always applies
         // regardless of which path below eventually runs.
-        if !SyntheticEventMarker.isReplayedUserEvent(event) {
+        if event.route != .replayedUser {
             avalancheGuard.registerPhysicalEvent()
         }
 
-        if type == .flagsChanged {
-            hotkeyManager?.handleFlagsChanged(event)
+        if event.type == .flagsChanged {
+            hotkeyManager?.handleFlagsChanged(keycode: UInt16(event.keycode), flags: event.flags)
             return
         }
 
-        guard type == .keyDown else { return }
+        guard event.type == .keyDown else { return }
 
-        let keycode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        let keycode = event.keycode
         let flags = event.flags
 
         // Cmd+Option+Shift+V
@@ -899,7 +915,7 @@ final class KeyboardMonitor {
             // that landed with the OS autorepeat flag set — a game control
             // held down, not a human typing. Reset alongside `runKeystrokes`/
             // `buffer` at all 7 sites above.
-            if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 { wordAutorepeatCount += 1 }
+            if event.autorepeat != 0 { wordAutorepeatCount += 1 }
             if InputBuffer.isAlphabetAmbiguous(keycode) { lastAmbiguousKeyIndex = buffer.count }
             // Instant correction fires MID-word, before the evidence is in. It
             // has its own, looser scorer, so while an alphabet-ambiguous key is
@@ -975,7 +991,7 @@ final class KeyboardMonitor {
     }
 
     private func handleWordBoundary(
-        trailing: String?, canAutoCorrect: Bool, keepForManualSwitch: Bool, triggerEvent: CGEvent,
+        trailing: String?, canAutoCorrect: Bool, keepForManualSwitch: Bool, triggerEvent: KeyEventSnapshot,
         triggerKeystroke: BufferedKeystroke? = nil, wordHadHeldKeys: Bool = false,
         proseBoundary: Bool = false
     ) {
@@ -1102,7 +1118,7 @@ final class KeyboardMonitor {
 
     @discardableResult
     private func expandSnippet(
-        keystrokes: [BufferedKeystroke], trigger: String?, triggerEvent: CGEvent
+        keystrokes: [BufferedKeystroke], trigger: String?, triggerEvent: KeyEventSnapshot
     ) -> Bool {
         guard !isPaused, let trigger,
               let layout = languageDetector.inputSourceManager.currentLayout else { return false }
@@ -1113,7 +1129,7 @@ final class KeyboardMonitor {
 
         isPaused = true
         suppressCurrentEvent = true
-        pendingUserEvents.enqueueFront(QueuedUserEvent(type: .keyDown, event: triggerEvent))
+        pendingUserEvents.enqueueFront(triggerEvent)
         textReplacer.replaceCurrentWord(
             length: keystrokes.count,
             replacement: replacement,
@@ -1141,7 +1157,7 @@ final class KeyboardMonitor {
 
     @discardableResult
     private func applySmartCase(
-        keystrokes: [BufferedKeystroke], trigger: String?, triggerEvent: CGEvent,
+        keystrokes: [BufferedKeystroke], trigger: String?, triggerEvent: KeyEventSnapshot,
         capitalizeSentenceStart: Bool
     ) -> Bool {
         guard !isPaused, let trigger,
@@ -1154,7 +1170,7 @@ final class KeyboardMonitor {
 
         isPaused = true
         suppressCurrentEvent = true
-        pendingUserEvents.enqueueFront(QueuedUserEvent(type: .keyDown, event: triggerEvent))
+        pendingUserEvents.enqueueFront(triggerEvent)
         textReplacer.replaceCurrentWord(
             length: keystrokes.count,
             replacement: replacement,
@@ -1202,7 +1218,7 @@ final class KeyboardMonitor {
     /// switched immediately so the rest of the word types correctly, and
     /// `InstantCorrectionGate` is marked so the eventual boundary handler does
     /// not attempt a second correction on the same word.
-    private func tryInstantCorrection(triggerEvent: CGEvent) {
+    private func tryInstantCorrection(triggerEvent: KeyEventSnapshot) {
         guard !isPaused else { return }
         let keystrokes = buffer.currentWord()
         guard keystrokes.count >= InstantCorrectionAnalyzer.minLength else { return }
@@ -1268,7 +1284,7 @@ final class KeyboardMonitor {
         // delivered normally); `correctedWord` already accounts for the
         // suppressed one.
         suppressCurrentEvent = true
-        pendingUserEvents.enqueueFront(QueuedUserEvent(type: .keyDown, event: triggerEvent))
+        pendingUserEvents.enqueueFront(triggerEvent)
         let length = leadingSymbols.count + keystrokes.count - 1
         textReplacer.replaceCurrentWord(
             length: length,
@@ -1779,8 +1795,7 @@ final class KeyboardMonitor {
         // on the "./exit" report (18:43:06: conversion counted 5 characters,
         // six had been typed, and nothing said whether the screen was ever
         // consulted).
-        let axWord = AXTextSelectionService.focusedElement()
-            .flatMap { AXTextSelectionService.valueAndCaret($0) }
+        let axWord = focusedTextProvider()
             .flatMap { CaretWordExtractor.wordBeforeCaret(text: $0.text, caretUTF16Offset: $0.caret) }
             .map(\.word)
         if let actual = axWord, actual != modelText {
@@ -2101,7 +2116,7 @@ final class KeyboardMonitor {
     ///                      Pass nil only if nothing was printed after the word.
     @discardableResult
     private func processCurrentWord(
-        trigger: String?, triggerKeystroke: BufferedKeystroke? = nil, triggerEvent: CGEvent
+        trigger: String?, triggerKeystroke: BufferedKeystroke? = nil, triggerEvent: KeyEventSnapshot
     ) -> Bool {
         guard !isPaused else { return false }
         if instantCorrectionGate.consumeIfCorrected() {
@@ -2242,7 +2257,7 @@ final class KeyboardMonitor {
             isPaused = true
             avalancheGuard.recordFired()
             suppressCurrentEvent = true
-            pendingUserEvents.enqueueFront(QueuedUserEvent(type: .keyDown, event: triggerEvent))
+            pendingUserEvents.enqueueFront(triggerEvent)
             textReplacer.replaceCurrentWord(
                 length: runLength,
                 replacement: runReplacement,
@@ -2466,17 +2481,7 @@ final class KeyboardMonitor {
             invalidateEditingContext()
         }
         for queued in pendingUserEvents.drain() {
-            guard let event = queued.makeEvent() else {
-                // No fallback exists if CGEvent construction itself fails
-                // system-wide — but silently `continue`-ing here used to
-                // drop the character with zero trace. Logging at least turns
-                // an invisible loss into a diagnosable one (task: "терять
-                // символы нельзя" — this is the honest floor when recovery
-                // genuinely isn't possible).
-                DebugLog.shared.log("KM", "WARNING: dropped a queued keystroke — CGEvent construction failed")
-                continue
-            }
-            event.post(tap: .cgAnnotatedSessionEventTap)
+            replaySink(queued)
         }
     }
 
@@ -2554,13 +2559,21 @@ private func eventTapCallback(
     let monitor = Unmanaged<KeyboardMonitor>.fromOpaque(userInfo).takeUnretainedValue()
     let isDisableNotification = type == .tapDisabledByTimeout
         || type == .tapDisabledByUserInput
-    if !isDisableNotification && SyntheticEventMarker.route(event) == .ours {
+    // Built once here, skipped only for a disable notification (which carries
+    // no real keystroke fields) — every check below reads this snapshot
+    // instead of the raw CGEvent.
+    let snapshot = isDisableNotification ? nil : KeyEventSnapshot(type: type, event: event)
+    if let snapshot, snapshot.route == .ours {
         return Unmanaged.passUnretained(event)
     }
-    if !isDisableNotification && monitor.queueIfReplacementActive(event) { return nil }
+    if let snapshot, monitor.queueIfReplacementActive(snapshot) { return nil }
     let callbackStart = CFAbsoluteTimeGetCurrent()
-    let suppressHandledShortcut = monitor.handlesShortcut(type: type, event: event)
-    monitor.handleEvent(proxy, type: type, event: event)
+    let suppressHandledShortcut = snapshot.map { monitor.handlesShortcut($0) } ?? false
+    if isDisableNotification {
+        monitor.handleTapDisabled(type)
+    } else if let snapshot {
+        monitor.handle(snapshot)
+    }
     let suppressTrigger = monitor.consumeSuppressCurrentEvent()
     let suppressed = suppressHandledShortcut || suppressTrigger
     monitor.recordCallbackDuration(CFAbsoluteTimeGetCurrent() - callbackStart, type: type, suppressed: suppressed)

@@ -80,6 +80,10 @@ final class KeyboardMonitorHarness {
     let replacer: FakeTextReplacer
     let monitor: KeyboardMonitor
     private let inputSources: InputSourceManager
+    /// Keystrokes `KeyboardMonitor.replaySink` captured while a replacement
+    /// was in flight, waiting to be dispatched — the harness's stand-in for
+    /// production replaying a real CGEvent back through the session tap.
+    private var pendingReplays: [KeyEventSnapshot] = []
 
     var screen: String { replacer.screen }
     /// How many replacements the monitor actually attempted — the only way to
@@ -126,43 +130,51 @@ final class KeyboardMonitorHarness {
             secureInputDetector: secureInputDetector,
             learnedWordsStore: learnedWordsStore
         )
+        monitor.replaySink = { [weak self] snapshot in self?.pendingReplays.append(snapshot.asReplayed) }
+        // Terminal-like: no AX inside this headless harness (a CLI test
+        // binary has no focused element to read). A test that needs an
+        // AX-backed run-resync sets its own provider instead.
+        monitor.focusedTextProvider = { nil }
     }
 
-    /// Simulate one physical keydown. Mirrors `eventTapCallback`: run the
-    /// same analysis `handleEvent` does, then only render the character if
-    /// the tap wouldn't have suppressed it — a firing correction suppresses
-    /// the just-typed trigger letter and retypes it itself as part of its
-    /// own payload (RC-1 in KeyboardMonitor.swift), so it must NOT also land
-    /// on screen via the normal path.
-    ///
-    /// `autorepeat` (wave 2, gamemode-spec-20260831.md): sets the OS
-    /// autorepeat field a real held-down key carries — additive, defaults
-    /// to false so every pre-existing call renders exactly as before.
-    func press(_ keycode: UInt16, flags: CGEventFlags = [], autorepeat: Bool = false) {
+    /// Renders `keycode`/`flags` as they'd appear on screen right now (the
+    /// currently active layout) unless the tap suppressed them — shared by a
+    /// fresh physical keydown and by draining a replayed one.
+    private func dispatch(_ snapshot: KeyEventSnapshot) {
         let rendered = inputSources.currentLayout.flatMap {
-            inputSources.characterForKeycode(keycode, layout: $0, flags: flags)
+            inputSources.characterForKeycode(snapshot.keycode, layout: $0, flags: snapshot.flags)
         }
-        guard let event = Self.makeKeyDown(keycode: keycode, flags: flags, autorepeat: autorepeat) else { return }
-        let proxy = OpaquePointer(UnsafeMutableRawPointer(bitPattern: 1)!)
-        monitor.handleEvent(proxy, type: .keyDown, event: event)
+        monitor.handle(snapshot)
         let suppressed = monitor.consumeSuppressCurrentEvent()
         if !suppressed, let rendered {
             replacer.appendPhysicalChar(rendered)
         }
     }
 
+    /// Simulate one physical keydown. Mirrors `eventTapCallback`: run the
+    /// same analysis `handle` does, then only render the character if the
+    /// tap wouldn't have suppressed it — a firing correction suppresses the
+    /// just-typed trigger letter and retypes it itself as part of its own
+    /// payload (RC-1 in KeyboardMonitor.swift), so it must NOT also land on
+    /// screen via the normal path. Afterward, drain any keystrokes
+    /// `KeyboardMonitor.replaySink` queued while a replacement this press
+    /// started was in flight, dispatching each the same way — a replayed key
+    /// may itself finish a replacement and queue MORE replays, so this loops
+    /// until the list is empty, mirroring production (a replayed event only
+    /// re-enters the tap after the current callback returns).
+    ///
+    /// `autorepeat` (wave 2, gamemode-spec-20260831.md): sets the OS
+    /// autorepeat field a real held-down key carries — additive, defaults
+    /// to false so every pre-existing call renders exactly as before.
+    func press(_ keycode: UInt16, flags: CGEventFlags = [], autorepeat: Bool = false) {
+        dispatch(KeyEventSnapshot(type: .keyDown, keycode: keycode, flags: flags, autorepeat: autorepeat ? 1 : 0))
+        while !pendingReplays.isEmpty {
+            dispatch(pendingReplays.removeFirst())
+        }
+    }
+
     func press(_ stroke: BufferedKeystroke) { press(stroke.keycode, flags: stroke.flags) }
     func type(_ strokes: [BufferedKeystroke]) { strokes.forEach { press($0) } }
-
-    private static func makeKeyDown(keycode: UInt16, flags: CGEventFlags, autorepeat: Bool = false) -> CGEvent? {
-        let source = CGEventSource(stateID: .hidSystemState)
-        guard let event = CGEvent(keyboardEventSource: source, virtualKey: keycode, keyDown: true) else {
-            return nil
-        }
-        event.flags = flags
-        if autorepeat { event.setIntegerValueField(.keyboardEventAutorepeat, value: 1) }
-        return event
-    }
 }
 
 
@@ -1377,15 +1389,6 @@ enum QueueReplacementActiveTests {
         dictionary.waitUntilPrefixIndexReady()
         let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
 
-        func makeEvent(virtualKey: CGKeyCode, type: CGEventType) -> CGEvent? {
-            let source = CGEventSource(stateID: .hidSystemState)
-            guard let event = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true) else {
-                return nil
-            }
-            event.type = type
-            return event
-        }
-
         h.monitor.isPaused = true
         defer { h.monitor.isPaused = false }
 
@@ -1393,25 +1396,17 @@ enum QueueReplacementActiveTests {
         // during an active replacement must NOT be queued for a later,
         // squashed-timing replay — that replay is exactly what fed
         // HotkeyManager's Shift-tap gesture detector a false double-tap.
-        if let flagsEvent = makeEvent(virtualKey: 56, type: .flagsChanged) {
-            TestRunner.assertTrue(
-                !h.monitor.queueIfReplacementActive(flagsEvent),
-                "a Shift transition during an active pause is NOT queued — avalanche fix"
-            )
-        } else {
-            TestRunner.assertTrue(false, "flagsChanged fixture event constructs")
-        }
+        TestRunner.assertTrue(
+            !h.monitor.queueIfReplacementActive(KeyEventSnapshot(type: .flagsChanged, keycode: 56)),
+            "a Shift transition during an active pause is NOT queued — avalanche fix"
+        )
 
         // Real letters typed during the pause must still be queued and
         // replayed later (pre-existing, unrelated behavior — must survive).
-        if let keyEvent = makeEvent(virtualKey: 0, type: .keyDown) {
-            TestRunner.assertTrue(
-                h.monitor.queueIfReplacementActive(keyEvent),
-                "a letter keydown during an active pause is still queued for later replay"
-            )
-        } else {
-            TestRunner.assertTrue(false, "keyDown fixture event constructs")
-        }
+        TestRunner.assertTrue(
+            h.monitor.queueIfReplacementActive(KeyEventSnapshot(type: .keyDown, keycode: 0)),
+            "a letter keydown during an active pause is still queued for later replay"
+        )
     }
 }
 
@@ -1549,18 +1544,10 @@ enum TapTimeoutCounterTests {
         dictionary.waitUntilPrefixIndexReady()
         let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
 
-        guard let event = CGEvent(
-            keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: 0, keyDown: true
-        ) else {
-            TestRunner.assertTrue(false, "fixture event constructs")
-            return
-        }
-        let proxy = OpaquePointer(UnsafeMutableRawPointer(bitPattern: 1)!)
-
         TestRunner.assertEqual(h.monitor.tapTimeoutDisableCount, 0, "counter starts at 0")
-        h.monitor.handleEvent(proxy, type: .tapDisabledByTimeout, event: event)
+        h.monitor.handleTapDisabled(.tapDisabledByTimeout)
         TestRunner.assertEqual(h.monitor.tapTimeoutDisableCount, 1, "one timeout-disable event increments the counter")
-        h.monitor.handleEvent(proxy, type: .tapDisabledByTimeout, event: event)
+        h.monitor.handleTapDisabled(.tapDisabledByTimeout)
         TestRunner.assertEqual(h.monitor.tapTimeoutDisableCount, 2, "counter accumulates across repeated events")
     }
 }
