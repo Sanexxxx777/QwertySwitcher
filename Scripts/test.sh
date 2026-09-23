@@ -51,9 +51,24 @@ if [ "$CAN_BUILD_FULL_APP" = true ]; then
     BIN_DIR=$(swift build --disable-sandbox ${SWIFT_SDK_ARGS[@]+"${SWIFT_SDK_ARGS[@]}"} -c debug --show-bin-path)
     SWIFT_STATUS=0
     "$BIN_DIR/QwertySwitcher" --test || SWIFT_STATUS=$?
+
+    # Port parity (plan 009, Step 5): the Python research port must still
+    # agree with the Swift detector on every golden decision. A missing
+    # python3 is an environment gap, not a code failure — note it and move
+    # on rather than failing the whole suite over a missing interpreter.
+    GOLDEN_STATUS=0
+    if command -v python3 >/dev/null 2>&1; then
+        echo ""
+        echo "=== Port parity — golden decisions (Python vs Swift) ==="
+        python3 "$PROJECT_DIR/Scripts/research/false_switch_sim.py" \
+            --check-golden "$PROJECT_DIR/Scripts/research/golden_decisions.json" || GOLDEN_STATUS=$?
+    else
+        echo "note: python3 not found — skipping golden-decisions port-parity check"
+    fi
+
     CONTRACT_STATUS=0
     run_release_contracts || CONTRACT_STATUS=$?
-    [ "$SWIFT_STATUS" -eq 0 ] && [ "$CONTRACT_STATUS" -eq 0 ] || exit 1
+    [ "$SWIFT_STATUS" -eq 0 ] && [ "$GOLDEN_STATUS" -eq 0 ] && [ "$CONTRACT_STATUS" -eq 0 ] || exit 1
     exit 0
 fi
 
