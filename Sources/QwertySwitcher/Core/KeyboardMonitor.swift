@@ -1953,6 +1953,16 @@ final class KeyboardMonitor {
                     targetLanguageCode: targetLayout.languageCode, prefsService: self.prefsService
                 )
                 NotificationCenter.default.post(name: .statsUpdated, object: nil)
+                // The run's last keystroke may be the trigger the sentence
+                // tracker already judged at its boundary: "dot?" typed in EN
+                // becomes "вще," (plan 012, 23.09.2026). Re-judge only when
+                // that last symbol ends a sentence on either side; a run that
+                // ends in a letter leaves the tracker alone — it may hold the
+                // armed capital for the word still being typed.
+                if let before = onScreen.last, let after = converted.last,
+                   ".!?".contains(before) || ".!?".contains(after) {
+                    self.sentenceStartTracker.reobserveTrailing(String(after))
+                }
                 DebugLog.shared.log(
                     "KM",
                     "doubleShift via run: \(currentLayout.languageCode)→\(targetLayout.languageCode)"
