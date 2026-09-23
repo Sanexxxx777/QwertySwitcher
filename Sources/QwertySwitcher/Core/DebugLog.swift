@@ -32,6 +32,14 @@ final class DebugLog {
     private let iso: ISO8601DateFormatter
     private let compact: DateFormatter
     private let verboseKey = AppIdentity.keyPrefix + "verboseLog"
+    /// One append-only handle kept open for the life of the process instead
+    /// of open/seek/close per line; `currentFileSize` tracks size in memory
+    /// so rotation no longer stats the file on every write. Both live only
+    /// on `queue` (see `openHandleIfNeeded`/`write`/`rotate`) — the one
+    /// direct call from `init` runs before `shared` is reachable from any
+    /// other thread, so it never races the queue.
+    private var writeHandle: FileHandle?
+    private var currentFileSize = 0
 
     /// `directory` is injectable for tests only — production always uses the
     /// default `~/Library/Logs/QwertySwitcher`, UNLESS `QSW_LOG_DIR` is set
@@ -57,7 +65,7 @@ final class DebugLog {
         pruneAgedLogs(now: Date())
 
         // Mark app start
-        write(module: "APP", event: "---- session start \(iso.string(from: Date())) ----")
+        write(module: "APP", event: "---- session start \(iso.string(from: Date())) ----", at: Date())
     }
 
     /// Pure age decision, extracted so the retention rule is testable without
@@ -80,11 +88,20 @@ final class DebugLog {
     }
 
     /// Compact log line: `HH:mm:ss.SSS [MOD] event`. `.verbose` events are
-    /// dropped before ever reaching the write queue when verbose logging is off.
-    func log(_ module: String, _ event: String, level: DebugLogLevel = .normal) {
+    /// dropped before ever reaching the write queue when verbose logging is
+    /// off — `event` is `@autoclosure` so its string interpolation is never
+    /// built in that case either. The timestamp is captured HERE, on the
+    /// caller's thread, before the write is dispatched to `queue`: the queue
+    /// can be backed up (a burst of calls, or a slow disk), and a timestamp
+    /// taken at write time would then record when the line was FLUSHED, not
+    /// when the event actually happened — turning a busy log into false
+    /// evidence about event timing.
+    func log(_ module: String, _ event: @autoclosure () -> String, level: DebugLogLevel = .normal) {
         if level == .verbose && !isVerboseEnabled { return }
+        let message = event()
+        let now = Date()
         queue.async { [weak self] in
-            self?.write(module: module, event: event)
+            self?.write(module: module, event: message, at: now)
         }
     }
 
@@ -106,35 +123,51 @@ final class DebugLog {
         UserDefaults.standard.bool(forKey: verboseKey)
     }
 
-    private func write(module: String, event: String) {
-        let line = "\(compact.string(from: Date())) [\(module)] \(event)\n"
+    private func write(module: String, event: String, at date: Date) {
+        let line = "\(compact.string(from: date)) [\(module)] \(event)\n"
         guard let data = line.data(using: .utf8) else { return }
+        guard let handle = openHandleIfNeeded() else { return }
 
-        if !fm.fileExists(atPath: url.path) {
-            fm.createFile(atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600])
-            return
-        }
-
-        // Append
-        if let handle = try? FileHandle(forWritingTo: url) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: data)
-        }
+        try? handle.write(contentsOf: data)
+        currentFileSize += data.count
 
         // Rotate if oversized
-        if let size = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int, size > maxBytes {
+        if currentFileSize > maxBytes {
             rotate()
         }
+    }
+
+    /// Returns the one long-lived append handle, opening it (and creating
+    /// the file with 0600 if it doesn't exist yet) on first use. Called only
+    /// from `write`, which itself only ever runs on `queue`.
+    private func openHandleIfNeeded() -> FileHandle? {
+        if let writeHandle { return writeHandle }
+        if !fm.fileExists(atPath: url.path) {
+            guard fm.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
+                return nil
+            }
+            currentFileSize = 0
+        } else {
+            currentFileSize = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return nil }
+        _ = try? handle.seekToEnd()
+        writeHandle = handle
+        return handle
     }
 
     /// Renames the full (already-oversized) `debug.log` to `debug.1.log`,
     /// overwriting whatever was there before, and lets the next write start a
     /// fresh `debug.log`. Nothing is truncated — the old file's entire
-    /// content survives one rotation back.
+    /// content survives one rotation back. The handle is closed and reopened
+    /// around the rename — a handle keeps writing to the same inode after a
+    /// rename, which would silently keep appending to what is now `debug.1.log`.
     private func rotate() {
+        try? writeHandle?.close()
+        writeHandle = nil
         try? fm.removeItem(at: rotatedURL)
         try? fm.moveItem(at: url, to: rotatedURL)
+        currentFileSize = 0
     }
 
     /// Test isolation (incident 05.08.2026): `DebugLog.shared` is a true

@@ -127,6 +127,7 @@ enum TestRunner {
         ShortTokenTests.run()
         BigramTablesTests.run()
         UpdatesTests.run()
+        DictionaryIndexTests.run()
         print("---")
         print("\(passed) passed, \(failed) failed, \(skipped) skipped")
         return failed == 0 ? 0 : 1
