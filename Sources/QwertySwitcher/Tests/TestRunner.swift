@@ -130,6 +130,7 @@ enum TestRunner {
         ShortTokenTests.run()
         BigramTablesTests.run()
         UpdatesTests.run()
+        SingleInstanceLockTests.run()
         DictionaryIndexTests.run()
         print("---")
         print("\(passed) passed, \(failed) failed, \(skipped) skipped")
