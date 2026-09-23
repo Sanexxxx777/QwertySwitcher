@@ -63,4 +63,17 @@ codesign_line=$(grep -n 'codesign --force' "$MAKE_DMG_SCRIPT" | head -1 | cut -d
 [ "$stamp_line" -lt "$codesign_line" ] \
     || fail "make-dmg.sh stamps QSWSourceCommit AFTER the first codesign --force"
 
-echo "PASS: release.sh gates packaging on --allow-dirty + a green test suite before make-dmg.sh, and make-dmg.sh stamps QSWSourceCommit before signing"
+# ── build.sh (the owner's dev installs via install.sh) carries the same stamp ──
+BUILD_SCRIPT="$PROJECT_DIR/Scripts/build.sh"
+[ -f "$BUILD_SCRIPT" ] || fail "Scripts/build.sh is missing"
+bash -n "$BUILD_SCRIPT" || fail "Scripts/build.sh does not parse"
+build_stamp_line=$(grep -n 'QSWSourceCommit string\|QSWSourceCommit \$SOURCE_COMMIT' "$BUILD_SCRIPT" | head -1 | cut -d: -f1 || true)
+build_codesign_line=$(grep -n 'codesign --force' "$BUILD_SCRIPT" | head -1 | cut -d: -f1 || true)
+[ -n "$build_stamp_line" ]    || fail "build.sh does not write QSWSourceCommit via PlistBuddy"
+[ -n "$build_codesign_line" ] || fail "build.sh has no codesign --force step"
+[ "$build_stamp_line" -lt "$build_codesign_line" ] \
+    || fail "build.sh stamps QSWSourceCommit AFTER the first codesign --force"
+grep -v '^[[:space:]]*#' "$BUILD_SCRIPT" | grep -q 'Resources/Info.plist.*PlistBuddy\|PlistBuddy.*Resources/Info.plist' \
+    && fail "build.sh must never stamp the source Resources/Info.plist"
+
+echo "PASS: release.sh gates packaging on --allow-dirty + a green test suite before make-dmg.sh, and make-dmg.sh + build.sh stamp QSWSourceCommit before signing"
