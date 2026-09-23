@@ -1091,14 +1091,61 @@ enum SmartCaseTests {
         var tracker = SentenceStartTracker()
         tracker.observeBoundary(".")
         TestRunner.assertTrue(
+            !tracker.shouldCapitalizeNextWord,
+            "a period alone does not arm capitalization — the gap after it does"
+        )
+        tracker.observeEmptyBoundary(isGap: true, leadHasDigit: false)
+        TestRunner.assertTrue(
             tracker.shouldCapitalizeNextWord,
             "sentence punctuation keeps capitalization armed across following whitespace"
         )
-        TestRunner.assertTrue(tracker.consumeForWord(), "period arms capitalization for one word")
+        TestRunner.assertTrue(tracker.consumeForWord(), "period + Space arms capitalization for one word")
         TestRunner.assertTrue(!tracker.consumeForWord(), "capitalization intent is consumed once")
         tracker.observeBoundary("!")
+        tracker.observeEmptyBoundary(isGap: true, leadHasDigit: false)
         tracker.reset()
         TestRunner.assertTrue(!tracker.consumeForWord(), "context reset clears sentence intent")
+
+        // Field log 21–23.09.2026: four wrong capitalizations out of 22.
+        tracker.observeBoundary(".")
+        TestRunner.assertTrue(
+            !tracker.consumeForWord(),
+            "word typed right after the period, no gap (RU '.' instead of 'ю': узна.т, т.е) stays lowercase"
+        )
+        tracker.observeBoundary(".")
+        tracker.observeEmptyBoundary(isGap: true, leadHasDigit: false)
+        tracker.observeEmptyBoundary(isGap: true, leadHasDigit: true)
+        TestRunner.assertTrue(
+            !tracker.consumeForWord(),
+            "sentence opened by a number keeps the next word lowercase (Готово. 5 минут)"
+        )
+        tracker.observeBoundary(".")
+        tracker.observeEmptyBoundary(isGap: true, leadHasDigit: false)
+        TestRunner.assertTrue(
+            !tracker.consumeForWord(leadHasDigit: true),
+            "digits glued to the first word keep it lowercase (Готово. 5км)"
+        )
+        tracker.observeBoundary(".")
+        tracker.reset() // KeyboardMonitor: backspace with an empty current word
+        tracker.observeEmptyBoundary(isGap: true, leadHasDigit: false)
+        TestRunner.assertTrue(
+            !tracker.consumeForWord(),
+            "backspaced period no longer capitalizes (спасиб. ⌫ о. → спасибо., готово. ⌫ теперь)"
+        )
+
+        // What must keep working.
+        for mark in ["?", "!"] {
+            tracker.observeBoundary(mark)
+            tracker.observeEmptyBoundary(isGap: true, leadHasDigit: false)
+            TestRunner.assertTrue(tracker.consumeForWord(), "'\(mark)' + Space capitalizes the next word")
+        }
+        tracker.observeBoundary("?")
+        tracker.observeEmptyBoundary(isGap: false, leadHasDigit: false) // "?!" / "..."
+        tracker.observeEmptyBoundary(isGap: true, leadHasDigit: false)
+        TestRunner.assertTrue(tracker.consumeForWord(), "stacked punctuation then Space still capitalizes")
+        tracker.observeBoundary(" ")
+        tracker.observeEmptyBoundary(isGap: true, leadHasDigit: false)
+        TestRunner.assertTrue(!tracker.consumeForWord(), "a gap without a sentence end does not capitalize")
 
         let monitorSource = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -1108,6 +1155,23 @@ enum SmartCaseTests {
         TestRunner.assertTrue(
             source.contains("if !captured.isEmpty { sentenceStartTracker.observeBoundary(trailing) }"),
             "empty whitespace boundaries do not clear sentence capitalization"
+        )
+        TestRunner.assertTrue(
+            source.contains(
+                "sentenceStartTracker.observeEmptyBoundary(isGap: proseBoundary, leadHasDigit: leadHasDigit)"
+            ),
+            "empty boundaries feed the gap/number rule to the sentence tracker"
+        )
+        TestRunner.assertTrue(
+            source.contains("sentenceStartTracker.consumeForWord(leadHasDigit: leadHasDigit)"),
+            "digits glued to a word reach the sentence tracker"
+        )
+        TestRunner.assertTrue(
+            source.contains(
+                "if buffer.isEmpty, pendingLeadingSymbols.isEmpty || pendingLeadHasDigit {\n"
+                    + "                sentenceStartTracker.reset()"
+            ),
+            "backspace past the current word resets sentence capitalization unless it only ate a leading '.'/'('"
         )
     }
 }
