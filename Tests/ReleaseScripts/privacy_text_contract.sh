@@ -10,6 +10,8 @@ fail() { echo "FAIL: $1"; exit 1; }
 BANNED_PATTERNS=(
     "no network calls at all"
     "makes no network calls"
+    "never character keycodes"
+    "not character keycodes"
 )
 
 for pattern in "${BANNED_PATTERNS[@]}"; do
@@ -18,6 +20,9 @@ for pattern in "${BANNED_PATTERNS[@]}"; do
     fi
     if grep -Il "$pattern" "$PROJECT_DIR/README.md" >/dev/null 2>&1; then
         fail "the retired claim '$pattern' still appears in README.md"
+    fi
+    if grep -Il "$pattern" "$PROJECT_DIR/ARCHITECTURE.md" >/dev/null 2>&1; then
+        fail "the retired claim '$pattern' still appears in ARCHITECTURE.md"
     fi
 done
 

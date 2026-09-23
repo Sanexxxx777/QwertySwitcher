@@ -21,8 +21,10 @@
 Since 0.10.0 the app is free and has no licensing or device-identity traffic.
 Opt-in updates fetch an Ed25519-signed manifest, then verify archive size,
 SHA-256, bundle signature, signing identity, and build before installation.
-Typing analysis remains local. Logs contain decision metadata, not character
-keycodes; diagnostic files are owner-only.
+Typing analysis remains local. Logs contain decision metadata; the verbose
+log (off by default) also records key codes so a wrong correction can be
+traced, and «Собрать отчёт» strips those lines before sharing. Diagnostic
+files are owner-only (0600 in a 0700 folder).
 
 ## Основные компоненты
 
