@@ -11,13 +11,6 @@ enum TestRunner {
     private static var passed = 0
     private static var skipped = 0
 
-    /// macOS 27.0 beta can deadlock in SkyLight while constructing a
-    /// synthetic keyboard CGEvent after TIS layout activity. Keep every pure
-    /// test running and skip only fixtures that require a real CGEvent.
-    static var syntheticKeyboardEventsAreSafe: Bool {
-        ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 27
-    }
-
     static func run() -> Int {
         if CommandLine.arguments.contains("--test-release-safety") {
             DebugLogTests.run()

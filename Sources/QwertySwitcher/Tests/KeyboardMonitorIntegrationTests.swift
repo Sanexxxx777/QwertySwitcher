@@ -221,16 +221,6 @@ enum KeyboardMonitorIntegrationTests {
     static func run() {
         TestRunner.section("KeyboardMonitor integration — headless typed-sequence → screen (no GUI)")
 
-        // On macOS 27.0 beta, CGEvent(keyboardEventSource:) can deadlock inside
-        // SkyLight after the harness changes the active input source. A live
-        // stack sample showed SLEventCreateKeyboardEvent waiting forever on
-        // CGSEventSourceShutdown's mutex. Pure state-machine coverage still
-        // runs; skip only this synthetic-GUI integration layer.
-        if !TestRunner.syntheticKeyboardEventsAreSafe {
-            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
-            return
-        }
-
         let inputSources = InputSourceManager()
         guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
               let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
@@ -1005,10 +995,6 @@ enum HeldKeysGameModeGateTests {
     static func run() {
         TestRunner.section("Game mode — ≥3 autorepeat keystrokes in a word silence both correction paths")
 
-        guard TestRunner.syntheticKeyboardEventsAreSafe else {
-            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
-            return
-        }
         let inputSources = InputSourceManager()
         guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
               let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
@@ -1093,10 +1079,6 @@ enum SanityCapBoundaryGuardTests {
     static func run() {
         TestRunner.section("Sanity cap — a run longer than 20 keystrokes never reaches the boundary detector either")
 
-        guard TestRunner.syntheticKeyboardEventsAreSafe else {
-            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
-            return
-        }
         let inputSources = InputSourceManager()
         guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
               let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
@@ -1139,10 +1121,6 @@ enum BackspaceResetsInstantGateTests {
     static func run() {
         TestRunner.section("Bug B fix — backspace resets instantCorrectionGate so the boundary path re-evaluates")
 
-        guard TestRunner.syntheticKeyboardEventsAreSafe else {
-            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
-            return
-        }
         let inputSources = InputSourceManager()
         guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
               let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
@@ -1218,10 +1196,6 @@ enum DoubleShiftInapplicableLogTests {
     static func run() {
         TestRunner.section("Bug A fix — 'learned: inapplicable' checks the OWN reading in sourceLang, not the target")
 
-        guard TestRunner.syntheticKeyboardEventsAreSafe else {
-            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
-            return
-        }
         let inputSources = InputSourceManager()
         guard let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }),
               inputSources.supportedLayouts.contains(where: { $0.isEnglish }) else {
@@ -1379,11 +1353,6 @@ enum QueueReplacementActiveTests {
     static func run() {
         TestRunner.section("KeyboardMonitor.queueIfReplacementActive — flagsChanged is never queued for replay")
 
-        guard TestRunner.syntheticKeyboardEventsAreSafe else {
-            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
-            return
-        }
-
         let inputSources = InputSourceManager()
         let dictionary = WordDictionary()
         dictionary.waitUntilPrefixIndexReady()
@@ -1414,11 +1383,6 @@ enum QueueReplacementActiveTests {
 enum AvalancheGuardWiringTests {
     static func run() {
         TestRunner.section("KeyboardMonitor — avalanche guard is wired into the real correction path")
-
-        guard TestRunner.syntheticKeyboardEventsAreSafe else {
-            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
-            return
-        }
 
         let inputSources = InputSourceManager()
         guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
@@ -1473,11 +1437,6 @@ enum HotPathStructuralGuardTests {
         TestRunner.section(
             "Hot path structural guard — handleEvent for an ordinary letter never runs AX/replacement work"
         )
-
-        guard TestRunner.syntheticKeyboardEventsAreSafe else {
-            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
-            return
-        }
 
         let inputSources = InputSourceManager()
         guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }) else {
@@ -1535,10 +1494,6 @@ enum HotPathStructuralGuardTests {
 enum TapTimeoutCounterTests {
     static func run() {
         TestRunner.section("KeyboardMonitor — tapDisabledByTimeout increments an observable counter")
-        guard TestRunner.syntheticKeyboardEventsAreSafe else {
-            TestRunner.skip("macOS 27 blocks synthetic CGEvent construction in this headless harness")
-            return
-        }
         let inputSources = InputSourceManager()
         let dictionary = WordDictionary()
         dictionary.waitUntilPrefixIndexReady()
