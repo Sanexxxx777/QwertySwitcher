@@ -86,9 +86,14 @@ enum ExceptionsTests {
         TestRunner.assertTrue(second.wordExceptions.contains("alpha"), "a second instance sees the initial state")
         cached.wordExceptions = ["alpha", "beta"]
         NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: cacheDefaults)
+        // The observer is registered with `queue: .main` (fix, revise round
+        // 1): its block is scheduled on the main queue, not run synchronously
+        // inline with `post`, even when `post` itself runs on the main
+        // thread — it needs one more main-run-loop turn to execute.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         TestRunner.assertTrue(
             second.wordExceptions.contains("beta"),
-            "a second instance sees a write from another instance after the change notification fires"
+            "a second instance sees a write from another instance after the change notification fires (next main-thread turn)"
         )
 
         let capSuite = AppIdentity.bundleIdentifier + ".tests.exceptions.cap." + UUID().uuidString
@@ -788,6 +793,88 @@ enum DebugLogTests {
         } else {
             TestRunner.assertTrue(false, "both GAP lines are written with a parseable HH:mm:ss.SSS timestamp")
         }
+
+        // Revise round 1, defect 2: a deleted log FILE (or its whole
+        // DIRECTORY — `PrivacyService.deleteAllLocalData()` removes the
+        // entire logs directory) must be recreated on the next write, not
+        // lost into an unlinked inode held by the persistent `writeHandle`.
+        // SAFETY: confirm each log's path is not under the real
+        // ~/Library/Logs/QwertySwitcher before deleting anything — abort
+        // this whole test rather than ever touch a real user log.
+        let realLogsDir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Logs/QwertySwitcher", isDirectory: true)
+
+        // (d) deleted FILE
+        let deletedFileDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("qsw-debuglog-deleted-file-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: deletedFileDir) }
+        let deletedFileLog = DebugLog(directory: deletedFileDir)
+        guard !deletedFileLog.fileURL.path.hasPrefix(realLogsDir.path) else {
+            TestRunner.assertTrue(
+                false, "SAFETY STOP: deleted-file test's log path resolved under the real logs directory"
+            )
+            return
+        }
+        deletedFileLog.log("KM", "before deletion")
+        deletedFileLog.waitForPendingWrites()
+        try? FileManager.default.removeItem(at: deletedFileLog.fileURL)
+        TestRunner.assertTrue(
+            !FileManager.default.fileExists(atPath: deletedFileLog.fileURL.path),
+            "the log file is actually gone before the recreate-on-write check"
+        )
+        deletedFileLog.log("KM", "after file deletion")
+        deletedFileLog.waitForPendingWrites()
+        TestRunner.assertTrue(
+            FileManager.default.fileExists(atPath: deletedFileLog.fileURL.path),
+            "a deleted log FILE is recreated on the next write"
+        )
+        TestRunner.assertTrue(
+            deletedFileLog.currentContents.contains("after file deletion"),
+            "the new line actually lands in the recreated file"
+        )
+        let recreatedFileMode = (try? FileManager.default.attributesOfItem(
+            atPath: deletedFileLog.fileURL.path
+        ))?[.posixPermissions] as? Int
+        TestRunner.assertEqual(recreatedFileMode, 0o600, "the recreated file keeps mode 0600")
+
+        // (e) deleted DIRECTORY
+        let deletedDirDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("qsw-debuglog-deleted-dir-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: deletedDirDir) }
+        let deletedDirLog = DebugLog(directory: deletedDirDir)
+        guard !deletedDirLog.fileURL.path.hasPrefix(realLogsDir.path) else {
+            TestRunner.assertTrue(
+                false, "SAFETY STOP: deleted-directory test's log path resolved under the real logs directory"
+            )
+            return
+        }
+        deletedDirLog.log("KM", "before directory deletion")
+        deletedDirLog.waitForPendingWrites()
+        try? FileManager.default.removeItem(at: deletedDirDir)
+        TestRunner.assertTrue(
+            !FileManager.default.fileExists(atPath: deletedDirDir.path),
+            "the whole log directory is actually gone before the recreate-on-write check"
+        )
+        deletedDirLog.log("KM", "after directory deletion")
+        deletedDirLog.waitForPendingWrites()
+        TestRunner.assertTrue(
+            FileManager.default.fileExists(atPath: deletedDirDir.path),
+            "a deleted log DIRECTORY is recreated on the next write"
+        )
+        let recreatedDirMode = (try? FileManager.default.attributesOfItem(
+            atPath: deletedDirDir.path
+        ))?[.posixPermissions] as? Int
+        TestRunner.assertEqual(recreatedDirMode, 0o700, "the recreated directory keeps mode 0700")
+        TestRunner.assertTrue(
+            deletedDirLog.currentContents.contains("after directory deletion"),
+            "the new line lands in the file inside the recreated directory"
+        )
+        let recreatedFileInDirMode = (try? FileManager.default.attributesOfItem(
+            atPath: deletedDirLog.fileURL.path
+        ))?[.posixPermissions] as? Int
+        TestRunner.assertEqual(
+            recreatedFileInDirMode, 0o600, "the recreated file inside the recreated directory keeps mode 0600"
+        )
     }
 }
 

@@ -126,6 +126,20 @@ final class DebugLog {
     private func write(module: String, event: String, at date: Date) {
         let line = "\(compact.string(from: date)) [\(module)] \(event)\n"
         guard let data = line.data(using: .utf8) else { return }
+
+        // The file — or its whole directory — can disappear out from under
+        // a held-open handle: by hand, or via
+        // `PrivacyService.deleteAllLocalData()`, which removes the entire
+        // logs directory. A handle open on the now-unlinked inode keeps
+        // writing successfully and silently into nothing. This runs on
+        // `queue`, never the tap thread, so one extra `fileExists` stat per
+        // line is fine — drop the stale handle so `openHandleIfNeeded`
+        // below is forced to recreate directory + file instead of reusing
+        // a handle to a deleted inode.
+        if writeHandle != nil, !fm.fileExists(atPath: url.path) {
+            try? writeHandle?.close()
+            writeHandle = nil
+        }
         guard let handle = openHandleIfNeeded() else { return }
 
         try? handle.write(contentsOf: data)
@@ -137,11 +151,19 @@ final class DebugLog {
         }
     }
 
-    /// Returns the one long-lived append handle, opening it (and creating
-    /// the file with 0600 if it doesn't exist yet) on first use. Called only
-    /// from `write`, which itself only ever runs on `queue`.
+    /// Returns the one long-lived append handle, opening it on first use (or
+    /// after `write` dropped a stale one). Recreates the logs directory
+    /// (0700) if it's gone, then the file (0600) if it's gone — covers both
+    /// "file deleted" and "whole directory deleted" the same way `init` sets
+    /// them up originally. Called only from `write`, which itself only ever
+    /// runs on `queue`.
     private func openHandleIfNeeded() -> FileHandle? {
         if let writeHandle { return writeHandle }
+        let logsDir = url.deletingLastPathComponent()
+        if !fm.fileExists(atPath: logsDir.path) {
+            try? fm.createDirectory(at: logsDir, withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: 0o700])
+        }
         if !fm.fileExists(atPath: url.path) {
             guard fm.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
                 return nil

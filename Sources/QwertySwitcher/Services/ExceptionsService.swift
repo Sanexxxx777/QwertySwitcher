@@ -41,10 +41,19 @@ final class ExceptionsService {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        // `queue: .main`, not `nil`: every cache read happens on the main
+        // thread (the tap callback runs on the main run loop), so
+        // invalidation must be serialized with those reads — a write from a
+        // background queue (e.g. an updater's network completion writing
+        // `updates.*` keys) would otherwise mutate the cache vars
+        // concurrently with a main-thread read, a data race. A
+        // cross-instance write becomes visible on the next main-thread
+        // turn; same-instance writes are already write-through and don't
+        // depend on this notification at all.
         defaultsChangeObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
             object: defaults,
-            queue: nil
+            queue: .main
         ) { [weak self] _ in
             self?.cachedWordExceptions = nil
             self?.cachedAppProfiles = nil
