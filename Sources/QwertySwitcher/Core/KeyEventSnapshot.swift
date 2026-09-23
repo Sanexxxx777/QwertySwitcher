@@ -44,8 +44,13 @@ struct KeyEventSnapshot {
     }
 
     /// Moved verbatim from the old `QueuedUserEvent.makeEvent()` — builds a
-    /// real CGEvent for replay and marks it so the event tap routes it as
-    /// `.replayedUser`, never `.ours` or `.physical`.
+    /// real CGEvent for replay. Marks it `.ours` when the snapshot's own
+    /// route already says so (plan 004: a failed replacement's completion
+    /// restores its suppressed trigger via `PendingUserEventQueue.replaceFront
+    /// (with: trigger.asOurs)` — that trigger must round-trip through the
+    /// tap and reach the app WITHOUT being analyzed a second time); every
+    /// other queued snapshot marks `.replayedUser` as before, so the tap
+    /// still analyzes it exactly like live typing.
     func makeEvent() -> CGEvent? {
         let source = CGEventSource(stateID: .hidSystemState)
         guard let event = CGEvent(
@@ -57,7 +62,11 @@ struct KeyEventSnapshot {
         event.flags = flags
         event.setIntegerValueField(.keyboardEventAutorepeat, value: autorepeat)
         event.setIntegerValueField(.keyboardEventKeyboardType, value: keyboardType)
-        SyntheticEventMarker.markAsReplayedUserEvent(event)
+        if route == .ours {
+            SyntheticEventMarker.mark(event)
+        } else {
+            SyntheticEventMarker.markAsReplayedUserEvent(event)
+        }
         return event
     }
 
@@ -69,6 +78,20 @@ struct KeyEventSnapshot {
         KeyEventSnapshot(
             type: type, keycode: keycode, flags: flags,
             autorepeat: autorepeat, keyboardType: keyboardType, route: .replayedUser
+        )
+    }
+
+    /// Same fields, re-routed as our own synthetic event — used to restore a
+    /// failed replacement's suppressed trigger keystroke to the front of the
+    /// queue (`PendingUserEventQueue.replaceFront`) so it reaches the app
+    /// once, unanalyzed, instead of being re-run through `handle(_:)` a
+    /// second time (plan 004, defect 2: a re-analyzed trigger double-counts
+    /// itself into `buffer`/`runKeystrokes`, or wipes out state a completion
+    /// just restored).
+    var asOurs: KeyEventSnapshot {
+        KeyEventSnapshot(
+            type: type, keycode: keycode, flags: flags,
+            autorepeat: autorepeat, keyboardType: keyboardType, route: .ours
         )
     }
 }

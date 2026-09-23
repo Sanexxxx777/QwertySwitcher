@@ -26,9 +26,31 @@ import AppKit
 /// production code uses, so a wrong backspace-count formula in
 /// `KeyboardMonitor` shows up here exactly as it would on a real screen.
 final class FakeTextReplacer: TextReplacing {
+    /// How `replaceCurrentWord` resolves. Default mirrors the ONLY behaviour
+    /// this class had before plan 004 (synchronous success), so every
+    /// pre-existing test keeps running byte-for-byte the same. `.deferred`
+    /// holds the transaction open (`KeyboardMonitor.isPaused` stays true)
+    /// until the test explicitly calls
+    /// `KeyboardMonitorHarness.completePendingReplacement` — modelling a
+    /// replacement genuinely in flight while more keys arrive, which no
+    /// synchronous-only fake could ever reach.
+    enum CompletionMode {
+        case immediate(TextReplacer.Result)
+        case deferred
+    }
+
     private(set) var screen: String = ""
     private(set) var invocationCount = 0
     private let inputSources: InputSourceManager
+    var mode: CompletionMode = .immediate(.success)
+
+    /// Set only while a `.deferred` call is waiting on `completePending`;
+    /// consumed (and cleared) by it. Holds the ORIGINAL completion so it can
+    /// be invoked later with whichever result the test picks, plus the
+    /// screen mutation — applied only for `.success`, since a real failure
+    /// happens before the first destructive step (layout switch
+    /// verification, in `TextReplacer`) and changes nothing on screen.
+    private var pending: (completion: (TextReplacer.Result) -> Void, applySuccess: () -> Void)?
 
     init(inputSources: InputSourceManager) {
         self.inputSources = inputSources
@@ -40,24 +62,44 @@ final class FakeTextReplacer: TextReplacing {
         completion: @escaping (TextReplacer.Result) -> Void
     ) {
         invocationCount += 1
-        // The real TextReplacer switches the input source FIRST, before any
-        // backspace/retype — matters here too: any further keys the harness
-        // presses after this correction (mid-word instant-correction cases
-        // keep typing the rest of the word) must render under the NEW
-        // layout, exactly like a real app would see them.
-        inputSources.switchTo(targetLayout)
-        let plan = TextReplacementPlan(
-            originalLength: length, replacement: replacement, trailing: trailing,
-            trailingAlreadyOnScreen: trailingAlreadyOnScreen
-        )
-        // Clamped to what's actually on screen — exactly what a real text
-        // field does once there's nothing left to delete. A backspace count
-        // that's too high WITHIN the existing text (the interesting bug
-        // class) still eats into whatever precedes the word, same as live.
-        let backspaces = min(plan.backspaceCount, screen.count)
-        screen.removeLast(backspaces)
-        screen += plan.payload
-        completion(.success)
+        let applySuccess: () -> Void = { [weak self] in
+            guard let self else { return }
+            // The real TextReplacer switches the input source FIRST, before any
+            // backspace/retype — matters here too: any further keys the harness
+            // presses after this correction (mid-word instant-correction cases
+            // keep typing the rest of the word) must render under the NEW
+            // layout, exactly like a real app would see them.
+            self.inputSources.switchTo(targetLayout)
+            let plan = TextReplacementPlan(
+                originalLength: length, replacement: replacement, trailing: trailing,
+                trailingAlreadyOnScreen: trailingAlreadyOnScreen
+            )
+            // Clamped to what's actually on screen — exactly what a real text
+            // field does once there's nothing left to delete. A backspace count
+            // that's too high WITHIN the existing text (the interesting bug
+            // class) still eats into whatever precedes the word, same as live.
+            let backspaces = min(plan.backspaceCount, self.screen.count)
+            self.screen.removeLast(backspaces)
+            self.screen += plan.payload
+        }
+        switch mode {
+        case .immediate(let result):
+            if result == .success { applySuccess() }
+            completion(result)
+        case .deferred:
+            pending = (completion: completion, applySuccess: applySuccess)
+        }
+    }
+
+    /// Resolves the transaction `replaceCurrentWord` left open under
+    /// `.deferred`: applies the screen mutation for `.success` only, then
+    /// calls the ORIGINAL completion with `result`. A no-op if nothing is
+    /// pending.
+    func completePending(with result: TextReplacer.Result = .success) {
+        guard let pending else { return }
+        self.pending = nil
+        if result == .success { pending.applySuccess() }
+        pending.completion(result)
     }
 
     func cancelCurrentReplacement() {}
@@ -130,7 +172,15 @@ final class KeyboardMonitorHarness {
             secureInputDetector: secureInputDetector,
             learnedWordsStore: learnedWordsStore
         )
-        monitor.replaySink = { [weak self] snapshot in self?.pendingReplays.append(snapshot.asReplayed) }
+        // Mirrors `KeyEventSnapshot.makeEvent()`'s conditional marking
+        // (plan 004): an `.ours` snapshot (a failed replacement's restored
+        // trigger — see `PendingUserEventQueue.replaceFront`) keeps that
+        // route when it round-trips through the real tap, so `dispatch`
+        // below renders it without re-analyzing it. Everything else becomes
+        // `.replayedUser`, exactly as before.
+        monitor.replaySink = { [weak self] snapshot in
+            self?.pendingReplays.append(snapshot.route == .ours ? snapshot : snapshot.asReplayed)
+        }
         // Terminal-like: no AX inside this headless harness (a CLI test
         // binary has no focused element to read). A test that needs an
         // AX-backed run-resync sets its own provider instead.
@@ -139,15 +189,39 @@ final class KeyboardMonitorHarness {
 
     /// Renders `keycode`/`flags` as they'd appear on screen right now (the
     /// currently active layout) unless the tap suppressed them — shared by a
-    /// fresh physical keydown and by draining a replayed one.
+    /// fresh physical keydown and by draining a replayed one. Mirrors
+    /// `eventTapCallback` (KeyboardMonitor.swift) branch for branch:
+    /// `route == .ours` is passed straight through (rendered, never
+    /// analyzed — the real tap does this for our own synthetic events);
+    /// `queueIfReplacementActive` swallows a key that arrives mid-pause (the
+    /// real app never sees it until it's replayed); everything else is
+    /// handled + suppression-checked exactly as before.
     private func dispatch(_ snapshot: KeyEventSnapshot) {
         let rendered = inputSources.currentLayout.flatMap {
             inputSources.characterForKeycode(snapshot.keycode, layout: $0, flags: snapshot.flags)
         }
+        if snapshot.route == .ours {
+            if let rendered { replacer.appendPhysicalChar(rendered) }
+            return
+        }
+        if monitor.queueIfReplacementActive(snapshot) { return }
         monitor.handle(snapshot)
         let suppressed = monitor.consumeSuppressCurrentEvent()
         if !suppressed, let rendered {
             replacer.appendPhysicalChar(rendered)
+        }
+    }
+
+    /// Drains `pendingReplays` FIFO, dispatching each the same way a fresh
+    /// keydown is dispatched — a replayed key may itself finish a
+    /// replacement and queue MORE replays, so this loops until the list is
+    /// empty, mirroring production (a replayed event only re-enters the tap
+    /// after the current callback returns). Shared by `press` and
+    /// `completePendingReplacement` — the two places a replacement can
+    /// finish and hand back queued keystrokes.
+    private func drainPendingReplays() {
+        while !pendingReplays.isEmpty {
+            dispatch(pendingReplays.removeFirst())
         }
     }
 
@@ -156,25 +230,26 @@ final class KeyboardMonitorHarness {
     /// tap wouldn't have suppressed it — a firing correction suppresses the
     /// just-typed trigger letter and retypes it itself as part of its own
     /// payload (RC-1 in KeyboardMonitor.swift), so it must NOT also land on
-    /// screen via the normal path. Afterward, drain any keystrokes
-    /// `KeyboardMonitor.replaySink` queued while a replacement this press
-    /// started was in flight, dispatching each the same way — a replayed key
-    /// may itself finish a replacement and queue MORE replays, so this loops
-    /// until the list is empty, mirroring production (a replayed event only
-    /// re-enters the tap after the current callback returns).
+    /// screen via the normal path.
     ///
     /// `autorepeat` (wave 2, gamemode-spec-20260831.md): sets the OS
     /// autorepeat field a real held-down key carries — additive, defaults
     /// to false so every pre-existing call renders exactly as before.
     func press(_ keycode: UInt16, flags: CGEventFlags = [], autorepeat: Bool = false) {
         dispatch(KeyEventSnapshot(type: .keyDown, keycode: keycode, flags: flags, autorepeat: autorepeat ? 1 : 0))
-        while !pendingReplays.isEmpty {
-            dispatch(pendingReplays.removeFirst())
-        }
+        drainPendingReplays()
     }
 
     func press(_ stroke: BufferedKeystroke) { press(stroke.keycode, flags: stroke.flags) }
     func type(_ strokes: [BufferedKeystroke]) { strokes.forEach { press($0) } }
+
+    /// Completes a replacement the test put on hold via `replacer.mode =
+    /// .deferred`, then drains any replay this produces — the harness's
+    /// hand-crank for what happens automatically, later, in production.
+    func completePendingReplacement(with result: TextReplacer.Result = .success) {
+        replacer.completePending(with: result)
+        drainPendingReplays()
+    }
 }
 
 
@@ -1390,6 +1465,210 @@ enum QueueReplacementActiveTests {
             h.monitor.queueIfReplacementActive(KeyEventSnapshot(type: .keyDown, keycode: 0)),
             "a letter keydown during an active pause is still queued for later replay"
         )
+    }
+}
+
+
+// MARK: - Plan 004: replay-burst correctness + failed-replacement trigger handling
+//
+// Two defects verified by reading the code (see plans/004-replay-correctness.md):
+// 1. A replayed key burst (queued while a replacement was in flight) is
+//    handed back to `handle(_:)` unanalyzed for suppression only — nothing
+//    stops one of THOSE replayed keys from itself completing a word boundary
+//    and launching a SECOND, fully automatic replacement (smart case /
+//    Yoficator / a snippet) in the middle of the burst.
+// 2. A failed replacement (`.layoutSwitchFailed` / `.cancelled`) replays its
+//    own suppressed trigger keystroke by re-entering `handle(_:)` exactly
+//    like a genuinely queued key — re-analyzing it a second time instead of
+//    just rendering it, which double-counts a letter trigger into `buffer`
+//    or wipes out the boundary path's own `lastCompletedWord` restore.
+enum ReplayBurstAndFailureTests {
+    static func run() {
+        TestRunner.section("Replay burst & failed-replacement trigger handling (plan 004)")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the replay-burst/failure fixtures")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+
+        let environment = KeyboardMonitorTestEnvironment(inputSources: inputSources)
+        defer { environment.restore() }
+
+        func harness() -> KeyboardMonitorHarness {
+            // Each call must start every block in the same, known layout —
+            // `inputSources` is shared across this suite's `do` blocks, and
+            // an earlier block's correction leaves it switched (simulated
+            // layout persists on the instance, see InputSourceManager).
+            inputSources.switchTo(enLayout)
+            let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
+            h.prefs.isAutoSwitchEnabled = true
+            h.prefs.isInstantCorrectionEnabled = true
+            h.prefs.isYoficatorEnabled = true
+            h.prefs.isSmartCaseEnabled = true
+            h.prefs.activeLayoutIDs = [enLayout.id, ruLayout.id]
+            h.exceptions.appExceptions = []
+            h.exceptions.wordExceptions = []
+            h.exceptions.autoLearned = [:]
+            return h
+        }
+
+        // "ghbdtn" (en keys) → привет — golden case, fires instant correction
+        // on the LAST keystroke (see HeldKeysGameModeGateTests above).
+        guard let ghbdtn = InstantCorrectionFixtures.keystrokes(for: "ghbdtn", reverse: enReverse) else {
+            TestRunner.assertTrue(false, "'ghbdtn': EN fixture can type every character")
+            return
+        }
+        guard let eshche = InstantCorrectionFixtures.keystrokes(for: "еще", reverse: ruReverse) else {
+            TestRunner.assertTrue(false, "'еще': ru fixture can type every character")
+            return
+        }
+
+        // --- Defect 1: mid-burst replacement --------------------------------
+        // Hold "ghbdtn"→привет in flight (.deferred; the exact keystroke
+        // instant fires on is an implementation detail of the scorer, not
+        // hardcoded here — loop until it does, matching
+        // AvalancheGuardWiringTests' own precedent above), then type " еще "
+        // WHILE paused — all 5 keystrokes are queued (not analyzed, not
+        // rendered yet). Releasing the pending replacement replays them.
+        // Without the fix, «еще»'s own trailing space still reaches
+        // Yoficator (well inside the 0.2s settling window) and starts a
+        // SECOND replacement that this harness never resolves.
+        do {
+            let h = harness()
+            h.replacer.mode = .deferred
+            var fired = false
+            for stroke in ghbdtn {
+                h.press(stroke)
+                if h.invocationCount >= 1 { fired = true; break }
+            }
+            TestRunner.assertTrue(fired, "setup: instant correction fires somewhere in \"ghbdtn\"")
+
+            h.press(49) // space
+            for stroke in eshche { h.press(stroke) }
+            h.press(49) // space
+
+            // Resolve the held replacement WITHOUT draining the burst yet
+            // (completePendingReplacement would do both at once) — captures
+            // the actual corrected word this harness/scorer produced,
+            // instead of assuming it from a hardcoded "привет".
+            h.replacer.completePending()
+            let correctedWord = h.screen
+            TestRunner.assertTrue(
+                !correctedWord.isEmpty && correctedWord.allSatisfy { !$0.isWhitespace },
+                "setup: the instant correction produced one corrected word, nothing queued rendered yet"
+                    + " (got \"\(correctedWord)\")"
+            )
+
+            // `pending` is already nil (consumed above), so this call is
+            // just the drain half — dispatches the queued " еще " burst.
+            h.completePendingReplacement()
+
+            TestRunner.assertEqual(
+                h.invocationCount, 1,
+                "no second replacement was started by the replayed burst (defect 1)"
+            )
+            TestRunner.assertEqual(
+                h.screen, correctedWord + " еще ",
+                "the queued burst renders exactly as typed — Yoficator does not rewrite «еще» mid-burst"
+                    + " (accepted trade-off of the fix)"
+            )
+        }
+
+        // --- Defect 2, boundary path: a failed replacement replays its
+        // trigger untouched --------------------------------------------------
+        // `.deferred` (not `.immediate`) is used deliberately here: the
+        // completion must run AFTER `handleWordBoundary`'s own
+        // "lastCompletedWord = nil" tail (which runs as soon as
+        // `processCurrentWord` returns `true`, i.e. the instant the
+        // replacement STARTS) — exactly like production, where
+        // `TextReplacer.replaceCurrentWord` returns immediately and
+        // completes asynchronously. An `.immediate(.layoutSwitchFailed)`
+        // here would complete INSIDE that same synchronous call and get
+        // overwritten by that same tail regardless of the fix.
+        do {
+            let h = harness()
+            h.prefs.isInstantCorrectionEnabled = false // isolate the boundary path
+            h.replacer.mode = .deferred
+            h.type(ghbdtn)
+            h.press(49) // space — boundary correction starts, held in flight
+            TestRunner.assertEqual(h.invocationCount, 1, "setup: boundary correction attempted")
+
+            h.completePendingReplacement(with: .layoutSwitchFailed)
+            TestRunner.assertEqual(
+                h.screen, "ghbdtn ",
+                "setup: a failed layout switch leaves the word on screen exactly as typed"
+            )
+
+            h.replacer.mode = .immediate(.success)
+            TestRunner.assertTrue(
+                h.monitor.swapLastWordInBuffer(),
+                "Double Shift finds the failed word via the restored lastCompletedWord history"
+            )
+            TestRunner.assertEqual(
+                h.screen, "привет ",
+                "Double Shift erases exactly the failed word + trailing space and retypes the real"
+                    + " correction — a re-analyzed trigger would have wiped lastCompletedWord instead"
+                    + " (defect 2, boundary path)"
+            )
+        }
+
+        // --- Defect 2, instant path: buffer-length-dependent behaviour -----
+        // A cancelled instant correction must not double-count its trigger
+        // letter into `buffer`, or a subsequent Double Shift (which reads
+        // the LIVE buffer here, not history) scores a corrupted run.
+        do {
+            let h = harness()
+            h.replacer.mode = .immediate(.cancelled)
+            h.type(ghbdtn) // instant fires on the last letter, then cancels
+            TestRunner.assertEqual(h.invocationCount, 1, "setup: instant correction attempted")
+            TestRunner.assertEqual(h.screen, "ghbdtn", "setup: the cancelled word is left on screen exactly as typed")
+
+            h.replacer.mode = .immediate(.success)
+            TestRunner.assertTrue(
+                h.monitor.swapLastWordInBuffer(),
+                "Double Shift finds the live buffer after a cancelled instant correction"
+            )
+            TestRunner.assertEqual(
+                h.screen, "привет",
+                "Double Shift converts exactly the 6 typed keystrokes — a double-counted trigger"
+                    + " would corrupt the run (defect 2, instant path)"
+            )
+        }
+
+        // --- Defect 2, instant path: the instant gate is reset on .cancelled
+        // ---------------------------------------------------------------
+        // Checked via the debug log, not via whether the boundary correction
+        // actually FIRES: `finishReplacement()` sets the 0.2s post-
+        // replacement cooldown unconditionally (every replacement path funnels
+        // through it, including a cancelled one), so a boundary correction
+        // attempted immediately afterward is legitimately blocked by the
+        // cooldown regardless of this fix. `instantCorrectionGate` is
+        // checked BEFORE the cooldown (`processCurrentWord`'s very first
+        // lines), so the log line it produces isolates the gate specifically
+        // — same technique as BackspaceResetsInstantGateTests above.
+        do {
+            let h = harness()
+            h.replacer.mode = .immediate(.cancelled)
+            h.type(ghbdtn) // instant fires on the last letter, then cancels
+            TestRunner.assertEqual(h.invocationCount, 1, "setup: instant correction attempted")
+
+            DebugLog.shared.waitForPendingWrites()
+            let before = DebugLog.shared.currentContents
+            h.press(49) // space — boundary path re-evaluates the same word
+            DebugLog.shared.waitForPendingWrites()
+            let newLines = String(DebugLog.shared.currentContents.dropFirst(before.count))
+            TestRunner.assertTrue(
+                !newLines.contains("skip boundary correction: already instant-corrected"),
+                "a cancelled instant correction resets instantCorrectionGate — the boundary path is not"
+                    + " silently blocked by a correction that never actually happened (defect 2)"
+            )
+        }
     }
 }
 

@@ -32,6 +32,19 @@ struct PendingUserEventQueue<Element> {
         items.removeFirst()
     }
 
+    /// A failed replacement (`.layoutSwitchFailed` / `.cancelled`) must still
+    /// replay its suppressed trigger — the model already contains it, it
+    /// just never reached the screen — but MUST NOT let it be analyzed a
+    /// second time (plan 004, defect 2): re-analysis double-counts a letter
+    /// trigger into `buffer`/`runKeystrokes`, or overwrites state a
+    /// completion handler just restored. Callers pass the same trigger
+    /// re-routed via `KeyEventSnapshot.asOurs` so it round-trips through the
+    /// tap unanalyzed. A no-op on an empty queue (mirrors `discardFront`).
+    mutating func replaceFront(with element: Element) {
+        guard !items.isEmpty else { return }
+        items[0] = element
+    }
+
     mutating func drain() -> [Element] {
         defer { items.removeAll(keepingCapacity: true) }
         return items
