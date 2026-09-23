@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 
 /// Stub registered up front (10.09.2026) so TestRunner.swift is edited exactly
@@ -348,3 +349,4 @@ private enum BigramTestFixtures {
         return result
     }
 }
+#endif

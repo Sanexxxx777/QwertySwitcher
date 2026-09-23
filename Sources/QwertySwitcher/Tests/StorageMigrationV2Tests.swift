@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 
 /// v2 storage migration (0.11.0): licence/trial rows left behind by the
@@ -58,3 +59,4 @@ enum StorageMigrationV2Tests {
         )
     }
 }
+#endif
