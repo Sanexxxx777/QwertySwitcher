@@ -45,8 +45,8 @@ struct AboutView: View {
                 Rectangle().fill(theme.border).frame(height: 1).padding(.horizontal, 40)
 
                 VStack(spacing: 8) {
-                    infoRow("Словарь", "≈714 000 слов (RU + EN)")
-                    infoRow("Движок", "BloomFilter + NSSpellChecker")
+                    infoRow("Словарь", "≈697 000 слов (RU + EN)")
+                    infoRow("Движок", "Bloom-фильтр + точная проверка по словарю")
                     infoRow("Горячие клавиши", "Shift / Double Shift / L+R Shift")
                     infoRow("Аналитика", "Нет (privacy-first)")
                     infoRow("Статус", "Бесплатно, без подписки")

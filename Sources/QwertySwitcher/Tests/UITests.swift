@@ -285,6 +285,83 @@ enum AuthorLinksViewTests {
             !FileManager.default.fileExists(atPath: viewsDir.appendingPathComponent("LicenseView.swift").path),
             "LicenseView.swift no longer exists — replaced by AuthorLinksView in 0.10.0"
         )
+
+        // Plan 010 (honest texts): the word count and engine description in
+        // AboutView, and the clipboard/learning-store honesty in
+        // PrivacyService.policyText, must not drift from the code again.
+        TestRunner.section("AboutView / PrivacyService — claims match the code (Plan 010 guard)")
+
+        let projectRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()      // Tests/
+            .deletingLastPathComponent()      // QwertySwitcher/
+            .deletingLastPathComponent()      // Sources/
+            .deletingLastPathComponent()      // project root
+
+        guard let aboutSource = try? String(
+            contentsOf: viewsDir.appendingPathComponent("AboutView.swift"), encoding: .utf8
+        ) else {
+            TestRunner.assertTrue(false, "AboutView.swift not readable — test needs updating")
+            return
+        }
+
+        guard let enWords = try? String(
+            contentsOf: projectRoot.appendingPathComponent("Resources/Dictionaries/en_US.txt"), encoding: .utf8
+        ), let ruWords = try? String(
+            contentsOf: projectRoot.appendingPathComponent("Resources/Dictionaries/ru_RU.txt"), encoding: .utf8
+        ) else {
+            TestRunner.assertTrue(false, "dictionary files not readable — test needs updating")
+            return
+        }
+        let realTotal = enWords.split(separator: "\n").count + ruWords.split(separator: "\n").count
+
+        guard let match = aboutSource.range(of: #"≈([\d\s]+)\s*слов"#, options: .regularExpression) else {
+            TestRunner.assertTrue(false, "AboutView does not carry a '≈N слов' claim — test needs updating")
+            return
+        }
+        let digitsOnly = aboutSource[match].filter { $0.isNumber }
+        guard let claimedTotal = Int(digitsOnly) else {
+            TestRunner.assertTrue(false, "could not parse a number out of AboutView's '≈N слов' claim")
+            return
+        }
+        let deviation = abs(Double(claimedTotal) - Double(realTotal)) / Double(realTotal)
+        TestRunner.assertTrue(
+            deviation <= 0.01,
+            "AboutView's word count (\(claimedTotal)) is within 1% of the real dictionary total (\(realTotal))"
+        )
+
+        TestRunner.assertTrue(
+            !aboutSource.contains("NSSpellChecker"),
+            "AboutView no longer claims NSSpellChecker is part of the engine"
+        )
+
+        guard let privacySource = try? String(
+            contentsOf: projectRoot.appendingPathComponent("Sources/QwertySwitcher/Services/PrivacyService.swift"),
+            encoding: .utf8
+        ) else {
+            TestRunner.assertTrue(false, "PrivacyService.swift not readable — test needs updating")
+            return
+        }
+        guard let policyRange = privacySource.range(of: "static let policyText"),
+              let clipboardRange = privacySource.range(
+                  of: "Буфер обмена", range: policyRange.upperBound..<privacySource.endIndex
+              ) else {
+            TestRunner.assertTrue(false, "PrivacyService.policyText / its clipboard paragraph not found")
+            return
+        }
+        let clipboardParagraph = privacySource[clipboardRange.lowerBound...]
+        TestRunner.assertTrue(
+            clipboardParagraph.contains("Double Shift"),
+            "PrivacyService's clipboard paragraph names Double Shift, not just paste-without-formatting"
+        )
+        let policyText = privacySource[policyRange.lowerBound...]
+        TestRunner.assertTrue(
+            policyText.contains("исправляли через Double Shift"),
+            "PrivacyService.policyText names the Double-Shift learned-pairs store (LearnedWordsStore)"
+        )
+        TestRunner.assertTrue(
+            policyText.contains("личный частотник"),
+            "PrivacyService.policyText names the personal-frequency store (PersonalFrequencyStore)"
+        )
     }
 }
 #endif

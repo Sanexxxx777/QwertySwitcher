@@ -55,16 +55,18 @@ Full pipeline, scoring formula and file layout: [`ARCHITECTURE.md`](ARCHITECTURE
 
 ## Stack
 
-- Swift 6, Swift Package Manager only — no Xcode project file, `swift build`
-  is enough
+- Swift Package Manager only (swift-tools-version 5.9, Swift 5 language
+  mode; builds with the Swift 6.x compilers) — no Xcode project file,
+  `swift build` is enough
 - AppKit for the menu-bar item, SwiftUI for the windows
 - `CGEventTap`, Carbon's Text Input Sources (`TIS…`), `UCKeyTranslate` — raw
   event-level key interception, not the Accessibility-API text-replacement
   route most "typing helper" apps use
 - Custom Bloom filter with its own binary cache format (`.ssbf`) instead of
   pulling in a dependency for a lookup structure this small
-- Standalone test runner (`QwertySwitcher --test`) — no XCTest/Xcode required
-  to run the suite
+- Standalone test runner (`QwertySwitcher --test`, debug builds only —
+  release binaries carry no test code); `./Scripts/test.sh` builds it, runs
+  the suite and the release-script contracts — no XCTest required
 
 ## Build & run
 
@@ -106,7 +108,10 @@ identifier, no telemetry). Installing an update stays a separate, manual
 opt-in toggle. See [`docs/SIGNING.md`](docs/SIGNING.md) for how that manifest
 is signed and verified before anything is installed.
 
-Diagnostic logs contain decision metadata, never character keycodes, even in verbose mode. Log files are owner-only.
+Diagnostic logs contain decision metadata. The verbose log (off by default)
+also records key codes, so a wrong correction can be traced to the exact
+word; «Собрать отчёт» strips those lines before anything is shared. Log
+files are owner-only (0600 in a 0700 folder).
 
 `PrivacyService` audits `UserDefaults` on launch for anything that looks like
 it could be leaking typed text.
