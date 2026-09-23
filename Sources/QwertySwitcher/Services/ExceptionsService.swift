@@ -28,15 +28,58 @@ final class ExceptionsService {
     private let appProfilesKey = AppIdentity.keyPrefix + "appProfiles.v1"
     private let autoLearnedKey = AppIdentity.keyPrefix + "autoLearned"
 
+    /// Decoded-value caches for the hot path (`profile(for:)` is called on
+    /// every keyDown). Filled lazily on first read, replaced write-through
+    /// in each setter, and invalidated by `UserDefaults.didChangeNotification`
+    /// as a backstop for writes from another `ExceptionsService` instance on
+    /// the same suite (e.g. UI vs. monitor, or two test instances).
+    private var cachedWordExceptions: Set<String>?
+    private var cachedAppProfiles: [String: AppProfile]?
+    private var cachedAutoLearned: [String: String]?
+    private let maxAutoLearnedEntries = 1000
+    private var defaultsChangeObserver: NSObjectProtocol?
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        // `queue: .main`, not `nil`: every cache read happens on the main
+        // thread (the tap callback runs on the main run loop), so
+        // invalidation must be serialized with those reads — a write from a
+        // background queue (e.g. an updater's network completion writing
+        // `updates.*` keys) would otherwise mutate the cache vars
+        // concurrently with a main-thread read, a data race. A
+        // cross-instance write becomes visible on the next main-thread
+        // turn; same-instance writes are already write-through and don't
+        // depend on this notification at all.
+        defaultsChangeObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: defaults,
+            queue: .main
+        ) { [weak self] _ in
+            self?.cachedWordExceptions = nil
+            self?.cachedAppProfiles = nil
+            self?.cachedAutoLearned = nil
+        }
+    }
+
+    deinit {
+        if let defaultsChangeObserver {
+            NotificationCenter.default.removeObserver(defaultsChangeObserver)
+        }
     }
 
     // MARK: - Word Exceptions (user-added words to never switch)
 
     var wordExceptions: Set<String> {
-        get { Set(defaults.stringArray(forKey: wordExceptionsKey) ?? []) }
-        set { defaults.set(Array(newValue).sorted(), forKey: wordExceptionsKey) }
+        get {
+            if let cachedWordExceptions { return cachedWordExceptions }
+            let value = Set(defaults.stringArray(forKey: wordExceptionsKey) ?? [])
+            cachedWordExceptions = value
+            return value
+        }
+        set {
+            cachedWordExceptions = newValue
+            defaults.set(Array(newValue).sorted(), forKey: wordExceptionsKey)
+        }
     }
 
     /// Validate word exception (like Caramba's regex validator)
@@ -70,16 +113,22 @@ final class ExceptionsService {
 
     var appProfiles: [String: AppProfile] {
         get {
+            if let cachedAppProfiles { return cachedAppProfiles }
+            let value: [String: AppProfile]
             if let data = defaults.data(forKey: appProfilesKey),
                let decoded = try? JSONDecoder().decode([String: AppProfile].self, from: data) {
-                return decoded
+                value = decoded
+            } else {
+                let legacy = defaults.stringArray(forKey: appExceptionsKey) ?? defaultAppExceptions
+                value = Dictionary(uniqueKeysWithValues: legacy.map { ($0, AppProfile()) })
             }
-            let legacy = defaults.stringArray(forKey: appExceptionsKey) ?? defaultAppExceptions
-            return Dictionary(uniqueKeysWithValues: legacy.map { ($0, AppProfile()) })
+            cachedAppProfiles = value
+            return value
         }
         set {
             let normalized = newValue.filter { !$0.key.isEmpty && !$0.value.isEmpty }
             guard let data = try? JSONEncoder().encode(normalized) else { return }
+            cachedAppProfiles = normalized
             defaults.set(data, forKey: appProfilesKey)
             defaults.removeObject(forKey: appExceptionsKey)
         }
@@ -186,14 +235,29 @@ final class ExceptionsService {
     // MARK: - Auto-Learned Exceptions (from user corrections via backspace)
 
     var autoLearned: [String: String] {
-        get { defaults.dictionary(forKey: autoLearnedKey) as? [String: String] ?? [:] }
-        set { defaults.set(newValue, forKey: autoLearnedKey) }
+        get {
+            if let cachedAutoLearned { return cachedAutoLearned }
+            let value = defaults.dictionary(forKey: autoLearnedKey) as? [String: String] ?? [:]
+            cachedAutoLearned = value
+            return value
+        }
+        set {
+            cachedAutoLearned = newValue
+            defaults.set(newValue, forKey: autoLearnedKey)
+        }
     }
 
-    /// Record that user cancelled auto-switch by pressing backspace after correction
+    /// Record that user cancelled auto-switch by pressing backspace after correction.
+    /// Capped at `maxAutoLearnedEntries`: once full, a NEW key is refused (an
+    /// update to an already-learned key still goes through).
     func learnException(original: String, corrected: String) {
         var learned = autoLearned
-        learned[original.lowercased()] = corrected.lowercased()
+        let key = original.lowercased()
+        if learned[key] == nil && learned.count >= maxAutoLearnedEntries {
+            DebugLog.shared.log("AUTOLEARN", "exception store full")
+            return
+        }
+        learned[key] = corrected.lowercased()
         autoLearned = learned
         DebugLog.shared.log(
             "AUTOLEARN",
