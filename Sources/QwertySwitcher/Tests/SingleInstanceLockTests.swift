@@ -124,6 +124,27 @@ enum SingleInstanceLockTests {
                               "SingleInstanceLock.acquire appears after the UpdateStartupGuard check")
         TestRunner.assertTrue(acquireRange.lowerBound < nsAppRange.lowerBound,
                               "SingleInstanceLock.acquire appears before NSApplication.shared")
+
+        // A broken lock must never keep the switcher from starting: the
+        // `.unavailable` branch logs and falls through, it does not exit.
+        if let unavailable = text.range(of: "case .unavailable"),
+           let nextCase = text.range(of: "case .locked", range: unavailable.upperBound..<text.endIndex) {
+            TestRunner.assertTrue(!text[unavailable.upperBound..<nextCase.lowerBound].contains("exit("),
+                                  "main.swift: the .unavailable branch starts the app instead of exiting")
+        } else {
+            TestRunner.assertTrue(false, "main.swift: .unavailable/.locked branches not found — test needs updating")
+        }
+
+        // The lock fd must not leak into children: the app posix_spawns the
+        // update helper, which outlives it. An inherited fd would keep the lock
+        // held, the freshly installed copy would see "busy" and exit, and the
+        // helper would roll the update back.
+        let lockSource = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Core/SingleInstanceLock.swift")
+        let lockText = (try? String(contentsOf: lockSource, encoding: .utf8)) ?? ""
+        TestRunner.assertTrue(lockText.contains("O_CLOEXEC"),
+                              "SingleInstanceLock opens the lock file with O_CLOEXEC (not inherited by the update helper)")
     }
 }
 #endif
