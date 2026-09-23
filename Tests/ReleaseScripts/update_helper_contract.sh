@@ -197,6 +197,40 @@ open_call_line=$(grep -n '^        open(target)$' "$HELPER_SOURCE_FOR_ORDER" | h
 
 rm -f "$QSW_UPDATES_ROOT_DIR/.transaction"
 
+# ── Case 6: the staged bundle is tampered with AFTER signing (Step 2's
+#    use-time re-verification, security review: the stage is same-user-
+#    writable and UpdateStager's own check can be hours old by the time this
+#    helper runs) — the helper's codesign re-check at the moment install.sh
+#    is about to be copied out must refuse it, exit 13, and leave the target
+#    completely untouched. ──
+TARGET6="$WORK/case6/dest/Qwerty Switcher.app"
+STAGE6="$WORK/case6/stage"
+mkdir -p "$(dirname "$TARGET6")" "$STAGE6"
+build_fixture_app "$TARGET6" "installed-v1"
+sleep 1
+build_fixture_app "$STAGE6/Qwerty Switcher.app" "staged-v2"
+# Append a line to install.sh AFTER it was sealed into the signed bundle —
+# this breaks the seal without touching anything build_fixture_app's own
+# codesign call already checked (that call ran before this line does).
+echo "# tampered after signing" >> "$STAGE6/Qwerty Switcher.app/Contents/Resources/install.sh"
+SNAPSHOT6="$WORK/case6-before-snapshot"
+cp -R "$TARGET6" "$SNAPSHOT6"
+
+set +e
+"$DEBUG_BIN" --install-update --stage "$STAGE6" --target "$TARGET6" --parent-pid 0
+STATUS6=$?
+set -e
+[ "$STATUS6" = "13" ] \
+    || fail "a staged bundle tampered with after signing should be refused with exit 13, got $STATUS6"
+[ "$(cat "$TARGET6/Contents/Resources/payload.txt")" = "installed-v1" ] \
+    || fail "target's payload.txt changed despite the staged bundle failing its use-time codesign re-check"
+diff -r "$SNAPSHOT6" "$TARGET6" >/dev/null 2>&1 \
+    || fail "target was modified despite the staged bundle failing its use-time codesign re-check"
+codesign --verify --deep --strict "$TARGET6" >/dev/null 2>&1 \
+    || fail "target fails signature verification after a refused tampered-stage install"
+
+echo "PASS: a staged bundle tampered with after signing is refused (exit 13) before install.sh ever runs, target untouched"
+
 # ── Source guards (also unit-tested in UpdatesTests.swift; re-checked here
 #    as a release-time gate independent of the Swift suite) ──
 HELPER_SOURCE="$PROJECT_DIR/Sources/QwertySwitcher/Services/Updates/UpdateInstallerMode.swift"

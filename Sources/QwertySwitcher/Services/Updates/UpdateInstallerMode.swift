@@ -25,7 +25,11 @@ enum UpdateInstallerMode {
     /// (parent wait, straggler kill, install.sh, post-sync identity/signature
     /// re-check, rollback) runs exactly as in production.
     static var isTestMode: Bool {
+        #if DEBUG
         ProcessInfo.processInfo.environment["QSW_UPDATE_HELPER_TEST_MODE"] == "1"
+        #else
+        false
+        #endif
     }
 
     static func parseArguments(_ raw: [String]) -> Arguments? {
@@ -106,6 +110,31 @@ enum UpdateInstallerMode {
         guard let stagedApp = findAppBundle(in: stage) else {
             log.write("no staged .app bundle found under \(stage.path)")
             return 3
+        }
+
+        // The stage lives under `~/Library/Application Support`, which any
+        // same-user process can write without a permission prompt, and
+        // `UpdateStager`'s own verification of it can be hours old by the
+        // time this helper runs. So the staged bundle is re-verified HERE,
+        // at the moment its install.sh is about to be copied out and run as
+        // a child of this permission-holding app — not trusted on the
+        // strength of a check that ran earlier against a directory someone
+        // else could have touched since.
+        guard runCodesignVerify(stagedApp) else {
+            log.write("refusing: staged bundle at \(stagedApp.path) fails codesign --verify — it may have been altered since staging")
+            openIfReachable(target)
+            return 13
+        }
+        let stagedIdentity = DesignatedRequirement.signingIdentity(
+            fromDesignatedRequirement: designatedRequirement(of: stagedApp)
+        )
+        guard stagedIdentity == precedingIdentity,
+              stagedIdentity != "adhoc" || isTestMode,
+              stagedIdentity != "unsigned"
+        else {
+            log.write("refusing: staged bundle's signing identity (\(stagedIdentity)) does not match the installed app's (\(precedingIdentity)) — it may have been swapped since staging")
+            openIfReachable(target)
+            return 14
         }
 
         let stagedInstallScriptSource = stagedApp.appendingPathComponent("Contents/Resources/install.sh")
