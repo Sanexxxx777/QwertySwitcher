@@ -100,6 +100,31 @@ final class UpdateStager {
         return .success(())
     }
 
+    /// An entry from the archive's OWN listing — checked before extraction
+    /// (`ditto` runs after this passes), unlike `UnpackedEntry` above which
+    /// walks what already landed on disk. `path` is the entry's path exactly
+    /// as the archive stores it (zip paths are always `/`-separated).
+    struct ArchiveEntry {
+        let path: String
+        let isSymlink: Bool
+    }
+
+    /// Refuses a symlink entry, an absolute path, or a `..` path component —
+    /// any of the three could place a file outside the stage directory that
+    /// `ditto -x` is about to create it under. Reuses `.symlinkEscape`: all
+    /// three are the same shape of problem (an entry escaping the directory
+    /// the archive is supposed to be confined to), just caught at a
+    /// different point (listing vs. post-extraction path resolution) than
+    /// the on-disk symlink-escape check above.
+    static func evaluateArchiveEntries(_ entries: [ArchiveEntry]) -> Result<Void, StageError> {
+        for entry in entries {
+            if entry.isSymlink { return .failure(.symlinkEscape) }
+            if entry.path.hasPrefix("/") { return .failure(.symlinkEscape) }
+            if entry.path.split(separator: "/").contains("..") { return .failure(.symlinkEscape) }
+        }
+        return .success(())
+    }
+
     // MARK: - Disk-touching implementation
 
     private func validateAndUnpack(data: Data, manifest: UpdateManifest, installedBundle: URL,
@@ -133,6 +158,19 @@ final class UpdateStager {
         } catch {
             completion(.failure(.unzipFailed(-1)))
             return
+        }
+
+        // Refuse a hostile archive from its OWN listing, before `ditto`
+        // extracts a single byte — a symlink or an entry with an absolute
+        // path / `..` component could otherwise land outside stageDir the
+        // moment it's unpacked. `validateUnpackedLimits` below still runs
+        // post-extraction as defense in depth.
+        switch Self.evaluateZipArchiveEntries(at: zipPath) {
+        case .failure(let error):
+            try? fileManager.removeItem(at: zipPath)
+            completion(.failure(error))
+            return
+        case .success: break
         }
 
         let ditto = Process()
@@ -203,6 +241,67 @@ final class UpdateStager {
     private func findAppBundle(in dir: URL) -> URL? {
         (try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil))?
             .first { $0.pathExtension == "app" }
+    }
+
+    /// Lists the archive with `zipinfo` and reports each entry's path and
+    /// whether it's a symlink — see `evaluateArchiveEntries` above for the
+    /// refusal logic. Not `private` — the real-archive test builds a
+    /// throwaway zip with a symlink and calls this directly (it has no
+    /// `UpdateStager` instance to go through, and this needs none: it only
+    /// touches the zip file named by `zipPath`). Two `zipinfo` invocations
+    /// because `-1` gives bare names (one per line, in archive order) and
+    /// the long form's permission string is the only way to tell a symlink
+    /// entry ('l…') from a regular file ('-…') or directory ('d…'); both
+    /// list entries in the same order, so they're zipped together
+    /// positionally. A non-zero exit from either = refuse.
+    static func listZipArchiveEntries(at zipPath: URL) -> Result<[ArchiveEntry], StageError> {
+        func run(_ arguments: [String]) -> (status: Int32, output: String) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/zipinfo")
+            process.arguments = arguments
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+            do { try process.run() } catch { return (-1, "") }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        }
+
+        let names = run(["-1", zipPath.path])
+        guard names.status == 0 else { return .failure(.unzipFailed(names.status)) }
+        let namesList = names.output.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+
+        let listing = run([zipPath.path])
+        guard listing.status == 0 else { return .failure(.unzipFailed(listing.status)) }
+        // Header ("Archive: …") and footer ("N files, …") lines don't start
+        // with a permission-string character (-/d/l), so filtering on that
+        // naturally drops them and leaves exactly one line per entry, in the
+        // same order as `namesList`.
+        let entryLines = listing.output.split(separator: "\n", omittingEmptySubsequences: true)
+            .filter { line in
+                guard let first = line.first else { return false }
+                return first == "-" || first == "d" || first == "l"
+            }
+
+        guard entryLines.count == namesList.count else {
+            // Couldn't reliably correlate the two listings — refuse rather
+            // than guess.
+            return .failure(.symlinkEscape)
+        }
+
+        let entries = zip(namesList, entryLines).map { name, line in
+            ArchiveEntry(path: name, isSymlink: line.first == "l")
+        }
+        return .success(entries)
+    }
+
+    /// Lists the archive, then feeds the listing through the pure evaluator.
+    static func evaluateZipArchiveEntries(at zipPath: URL) -> Result<Void, StageError> {
+        switch listZipArchiveEntries(at: zipPath) {
+        case .failure(let error): return .failure(error)
+        case .success(let entries): return evaluateArchiveEntries(entries)
+        }
     }
 
     private func validateUnpackedLimits(root: URL) -> Result<Void, StageError> {
