@@ -1055,6 +1055,94 @@ enum KeyboardMonitorIntegrationTests {
             if let privet = InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse) { h.type(privet) }
             h.press(49)
         }
+
+        // --- Plan 012 (23.09.2026): smart case judges the sentence end by
+        // the symbol that lands ON SCREEN, not the source-layout one a
+        // conversion re-renders — field report «Напишите, Как разберетесь»
+        // (a RU "," typed via an EN "?" keystroke was fed to the tracker as
+        // "?", arming a false capitalization on the next word).
+        //
+        // (a) Boundary path: instant correction is off so the trailing
+        // trigger's conversion happens at `processCurrentWord`, exactly like
+        // the "Trailing trigger converts with the word" fixture above — same
+        // word, same trigger key, extended one more word to prove smart case
+        // reads the re-rendered ',' and not the source '?'.
+        TestRunner.section("Plan 012: smart case reads the on-screen trigger — boundary path")
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: true)
+            h.prefs.isInstantCorrectionEnabled = false
+            h.prefs.isSmartCaseEnabled = true
+            if let ghbdtn = InstantCorrectionFixtures.keystrokes(for: "ghbdtn", reverse: enReverse),
+               let kak = InstantCorrectionFixtures.keystrokes(for: "как", reverse: ruReverse) {
+                h.type(ghbdtn)
+                h.press(44, flags: .maskShift) // '?' on QWERTY, ',' on ЙЦУКЕН — word converts, trailing re-renders
+                TestRunner.assertEqual(h.screen, "привет,", "sanity: same conversion as the fixture above")
+                // Past `finishReplacement`'s 0.2s post-replacement cooldown
+                // (KeyboardMonitor.swift) — smart case is one of the three
+                // features it gates, and this test needs it to actually fire
+                // on "как", not be silently skipped by the cooldown.
+                Thread.sleep(forTimeInterval: 0.25)
+                h.press(49) // space — the gap after the (re-rendered) ','
+                h.type(kak)
+                h.press(49) // space — completes "как"
+                TestRunner.assertEqual(
+                    h.screen, "привет, как ",
+                    "fix: smart case reads the on-screen ',' (not the source '?') — the next word stays"
+                        + " lowercase (was \"привет, Как \")"
+                )
+            } else {
+                TestRunner.assertTrue(false, "'ghbdtn'/'как': fixtures must type every character")
+            }
+        }
+
+        // (b) Double Shift right after the trigger: the run still holds
+        // [d, o, t, Shift+kc44], so Double Shift takes the WHOLE-RUN path
+        // (`convertWholeRun`: a run with a non-letter converts key by key) —
+        // the review of the first version found the fix only in the
+        // history path, and this case stayed red. "dot" is a valid EN word, so the
+        // boundary leaves it alone; Shift+kc44 still closes it (trailing
+        // "?"), arming the manual-switch history exactly like the "на 300$"
+        // fixture above. Double Shift is pressed right there — the SAME
+        // history the punctuation boundary just armed, before anything else
+        // can invalidate it (a further keystroke, even a bare Space, clears
+        // it — see "Digits kill the history slot" above; that is what makes
+        // the gap-arming Space below have to come AFTER Double Shift, not
+        // before, even though the field trigger was press order kc44→Space→
+        // DS — pressing Space first leaves DS nothing to convert).
+        // Double Shift re-renders the SAME trigger keystroke for the target
+        // layout ('?' → ',') and, with the fix, re-judges the sentence end
+        // from it — same defect, the OTHER path that can re-render a
+        // trigger.
+        TestRunner.section("Plan 012: smart case reads the on-screen trigger — Double Shift on the whole run")
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: true)
+            h.prefs.isInstantCorrectionEnabled = false
+            h.prefs.isSmartCaseEnabled = true
+            if let dot = InstantCorrectionFixtures.keystrokes(for: "dot", reverse: enReverse),
+               let kak = InstantCorrectionFixtures.keystrokes(for: "как", reverse: ruReverse) {
+                h.type(dot)
+                h.press(44, flags: .maskShift) // '?' on QWERTY, ',' on ЙЦУКЕН — closes "dot", untouched
+                TestRunner.assertEqual(h.screen, "dot?", "sanity: boundary leaves the EN dictionary word alone")
+                TestRunner.assertTrue(
+                    h.monitor.swapLastWordInBuffer(), "Double Shift reports a conversion from history"
+                )
+                // Past `finishReplacement`'s 0.2s post-replacement cooldown —
+                // see the same note in the boundary-path case above.
+                Thread.sleep(forTimeInterval: 0.25)
+                h.press(49) // space — the gap after the (re-rendered) trailing
+                h.type(kak)
+                h.press(49) // space — completes "как"
+                TestRunner.assertTrue(
+                    h.screen.hasSuffix(", как "),
+                    "fix: smart case reads Double Shift's re-rendered trailing (not the source '?') — the"
+                        + " next word stays lowercase (got \"\(h.screen)\")"
+                )
+            } else {
+                TestRunner.assertTrue(false, "'dot'/'как': fixtures must type every character")
+            }
+        }
     }
 }
 
