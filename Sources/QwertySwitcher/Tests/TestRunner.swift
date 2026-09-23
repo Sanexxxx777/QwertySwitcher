@@ -123,6 +123,7 @@ enum TestRunner {
         ProviderSingleReadGuardTests.run()
         GameModeSourceGuardTests.run()
         DetectorExactnessTests.run()
+        PortParityTests.run()
         AuthorLinksViewTests.run()
         ResyncExtendGuardTests.run()
         StorageMigrationV2Tests.run()
