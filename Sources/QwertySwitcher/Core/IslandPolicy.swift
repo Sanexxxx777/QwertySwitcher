@@ -21,8 +21,10 @@ enum IslandPolicy {
     ///   the current word happened to reach the ring at all (it doesn't, for
     ///   instant corrections — see `restoreIsland`'s doc comment).
     /// - Parameter target: the language the just-corrected word landed in.
-    /// - Parameter isTerminal: `ax=none` terminals (CLAUDE.md) can't resync
-    ///   an unsolicited layout swap against the screen — never restore there.
+    /// - Parameter isTerminal: terminal with island disabled by preference
+    ///   (`PreferencesService.isIslandInTerminalsEnabled` == false) — never
+    ///   restore there. With the preference on (default) the caller passes
+    ///   `false` for terminals too.
     static func shouldRestore(
         context: [LanguageDetector.ContextSlot], target: String, isTerminal: Bool
     ) -> String? {

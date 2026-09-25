@@ -85,6 +85,7 @@ final class DiagnosticsExportService {
             "learningEnabled: \(prefs.isLearningEnabled)",
             "gameModeEnabled: \(prefs.isGameModeEnabled)",
             "verboseLog: \(prefs.isVerboseLogEnabled)",
+            "islandInTerminals: \(prefs.isIslandInTerminalsEnabled)",
             "updatesAutoCheck: \(prefs.updatesAutoCheck)",
             "updatesAutoInstall: \(prefs.updatesAutoInstall)",
             "updatesFeedURL: \(prefs.updatesFeedURL)",

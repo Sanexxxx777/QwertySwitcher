@@ -65,7 +65,18 @@ enum IslandPolicyTests {
                 context: [Slot(lang: "ru", corrected: false), Slot(lang: "ru", corrected: false)],
                 target: "en", isTerminal: true
             ),
-            "terminal app → nil regardless of an otherwise-clean context"
+            "terminal with island disabled by preference → nil regardless of an otherwise-clean context"
+        )
+        // Preference `islandInTerminals` ON (default): `restoreIsland` passes
+        // `isTerminal: false` for a terminal, so it gets the ordinary
+        // decision — the same clean [ru, ru] context restores ru.
+        TestRunner.assertEqual(
+            IslandPolicy.shouldRestore(
+                context: [Slot(lang: "ru", corrected: false), Slot(lang: "ru", corrected: false)],
+                target: "en", isTerminal: false
+            ) ?? "MISSING",
+            "ru",
+            "terminal with island preference on (caller passes isTerminal: false) → restore ru"
         )
         // A corrected slot in the pair immediately before the island means
         // the owner was still mid-correction/mid-toggle right there, not
@@ -302,6 +313,21 @@ enum IslandStructuralGuardTests {
             TestRunner.assertTrue(
                 !scoped.contains("switchToAndVerify("),
                 "restoreIsland never calls switchToAndVerify (hot-path — no sleeping verification loop)"
+            )
+            // (f): terminals are gated by the preference, not hard-blocked.
+            TestRunner.assertTrue(
+                !scoped.contains("guard !LanguageDetector.isTerminalBundle(activeAppBundleID) else {"),
+                "restoreIsland has no hard terminal guard any more"
+            )
+            TestRunner.assertTrue(
+                scoped.contains("isTerminal && !prefsService.isIslandInTerminalsEnabled")
+                    && scoped.contains("guard !islandBlockedInTerminal else {")
+                    && scoped.contains("isTerminal: islandBlockedInTerminal"),
+                "restoreIsland skips terminals only when isIslandInTerminalsEnabled is false, and passes that value to IslandPolicy"
+            )
+            TestRunner.assertTrue(
+                scoped.contains("term=1"),
+                "restoreIsland's `island: restored` line marks terminals with term=1"
             )
         } else {
             TestRunner.assertTrue(false, "restoreIsland not found — test needs updating")

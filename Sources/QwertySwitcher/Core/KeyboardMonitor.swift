@@ -1750,7 +1750,15 @@ final class KeyboardMonitor {
         pendingIslandTarget = nil
         pendingIslandRestore = false
 
-        guard !LanguageDetector.isTerminalBundle(activeAppBundleID) else {
+        // Terminals: the island makes NO text edit, only switches the input
+        // source at a word boundary, and a wrong one is repaired by the same
+        // instant/boundary correction that already runs there — so it obeys a
+        // preference (default on) instead of a hard block. Read straight from
+        // `prefsService` (UserDefaults): restoreIsland runs once per corrected
+        // word, not per key, so this is off the per-key hot path.
+        let isTerminal = LanguageDetector.isTerminalBundle(activeAppBundleID)
+        let islandBlockedInTerminal = isTerminal && !prefsService.isIslandInTerminalsEnabled
+        guard !islandBlockedInTerminal else {
             DebugLog.shared.log("KM", "island: skipped reason=terminal path=\(path)", level: .verbose)
             return
         }
@@ -1768,7 +1776,7 @@ final class KeyboardMonitor {
         let ctxDescription = context.map { "\($0.lang)\($0.corrected ? "*" : "")" }.joined(separator: ",")
 
         guard let restoreLang = IslandPolicy.shouldRestore(
-            context: context, target: target, isTerminal: false
+            context: context, target: target, isTerminal: islandBlockedInTerminal
         ) else {
             // `IslandPolicy` only reports pass/fail (see its own doc comment
             // on why it stays a pure String?) — reclassified here, read-only,
@@ -1802,7 +1810,7 @@ final class KeyboardMonitor {
         // wipes `buffer`/`runKeystrokes` for it (RC-3, see its doc comment).
         languageDetector.setContextLanguage(restoreLang)
         DebugLog.shared.log(
-            "KM", "island: restored \(restoreLang)←\(target) path=\(path) ctx=[\(ctxDescription)]"
+            "KM", "island: restored \(restoreLang)←\(target) path=\(path)\(isTerminal ? " term=1" : "") ctx=[\(ctxDescription)]"
         )
     }
 

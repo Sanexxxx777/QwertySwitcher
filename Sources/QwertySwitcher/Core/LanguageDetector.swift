@@ -68,28 +68,17 @@ final class LanguageDetector {
     /// still covered.
     private var currentAppBundleID: String?
 
-    /// Terminals/editors where `ax=none` (see CLAUDE.md) makes correction
-    /// mistakes unrecoverable and the AX-based repair paths unavailable.
-    /// Junk-override ONLY — it does not touch the rest of `detect()`,
-    /// which already tolerates these apps via the ordinary dictionary path.
-    private static let junkOverrideTerminalBundleIDs: Set<String> = [
-        "com.mitchellh.ghostty", "com.apple.Terminal", "net.kovidgoyal.kitty",
-        "com.googlecode.iterm2", "dev.warp.Warp-Stable", "com.github.wez.wezterm",
-        "org.alacritty", "co.zeit.hyper", "com.microsoft.VSCode",
-        "com.todesktop.230313mzl4w4u92",
-    ]
-
-    /// Shared with the island-restore path (`KeyboardMonitor.restoreIsland`):
-    /// same reasoning as junk-override — `ax=none` terminals can't be
-    /// resynced against the screen, so an unsolicited layout swap there is
-    /// unrecoverable in a way it isn't elsewhere. Takes the bundle id
+    /// Terminal test over the single list `TerminalApps.bundleIDs`. Used by
+    /// the island-restore path (`KeyboardMonitor.restoreIsland`, gated there
+    /// by `PreferencesService.isIslandInTerminalsEnabled`) and by
+    /// `GameModeState`. Takes the bundle id
     /// explicitly rather than reading `currentAppBundleID` — the caller
     /// already has its OWN cache (`KeyboardMonitor.activeAppBundleID`) and
     /// the hot-path ban on synchronous `NSWorkspace`/AX calls applies here
     /// exactly as it does to `isJunkOverrideBlockedByTerminal()` below.
     static func isTerminalBundle(_ bundleID: String?) -> Bool {
         guard let bundleID else { return false }
-        return junkOverrideTerminalBundleIDs.contains(bundleID)
+        return TerminalApps.bundleIDs.contains(bundleID)
     }
 
     private static let skipPatterns: [NSRegularExpression] = {
@@ -835,7 +824,7 @@ final class LanguageDetector {
     /// see the property's doc comment for why.
     private func isJunkOverrideBlockedByTerminal() -> Bool {
         guard let bundleID = currentAppBundleID else { return false }
-        return Self.junkOverrideTerminalBundleIDs.contains(bundleID)
+        return TerminalApps.bundleIDs.contains(bundleID)
     }
 
     static func shouldSkip(_ text: String) -> Bool {

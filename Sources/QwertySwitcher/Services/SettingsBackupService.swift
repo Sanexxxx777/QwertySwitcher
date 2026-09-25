@@ -49,6 +49,9 @@ struct PreferencesBackup: Codable, Equatable {
     let snippetExpansionEnabled: Bool
     let smartCaseEnabled: Bool
     let verboseLogEnabled: Bool
+    /// Optional so backups written before this key existed still decode;
+    /// nil on import leaves the current value untouched.
+    let islandInTerminalsEnabled: Bool?
     let activeLayoutIDs: [String]
     let themePreference: String
 }
@@ -117,6 +120,7 @@ final class SettingsBackupService {
                 snippetExpansionEnabled: prefsService.isSnippetExpansionEnabled,
                 smartCaseEnabled: prefsService.isSmartCaseEnabled,
                 verboseLogEnabled: prefsService.isVerboseLogEnabled,
+                islandInTerminalsEnabled: prefsService.isIslandInTerminalsEnabled,
                 activeLayoutIDs: prefsService.activeLayoutIDs,
                 themePreference: prefsService.themePreference.rawValue
             ),
@@ -237,6 +241,9 @@ final class SettingsBackupService {
         prefsService.isSnippetExpansionEnabled = prefs.snippetExpansionEnabled
         prefsService.isSmartCaseEnabled = prefs.smartCaseEnabled
         prefsService.isVerboseLogEnabled = prefs.verboseLogEnabled
+        if let islandInTerminals = prefs.islandInTerminalsEnabled {
+            prefsService.isIslandInTerminalsEnabled = islandInTerminals
+        }
         prefsService.activeLayoutIDs = prefs.activeLayoutIDs
         prefsService.themePreference = ThemePreference(rawValue: prefs.themePreference) ?? .system
         exceptionsService.wordExceptions = Set(backup.wordExceptions)

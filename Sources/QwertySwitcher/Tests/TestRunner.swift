@@ -128,6 +128,7 @@ enum TestRunner {
         ResyncExtendGuardTests.run()
         StorageMigrationV2Tests.run()
         IslandTests.run()
+        TerminalAppsTests.run()
         ShortTokenTests.run()
         BigramTablesTests.run()
         UpdatesTests.run()

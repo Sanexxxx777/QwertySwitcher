@@ -97,6 +97,18 @@ final class PreferencesService {
         set { defaults.set(newValue, forKey: keyPrefix + "verboseLog") }
     }
 
+    /// Island (restore the layout after a single corrected foreign word) in
+    /// terminals (`TerminalApps.bundleIDs`). Default on — field 25.09: 12 of
+    /// 14 lone ru→en corrections in Ghostty were followed by a return to
+    /// Russian, 0 continued in English. No UI toggle: rollback valve is
+    /// `defaults write tech.sasha.qwertyswitch tech.sasha.qwertyswitch.islandInTerminals -bool false`
+    /// (domain = the installed bundle id, NOT `QwertySwitcher`, which is the
+    /// unbundled `swift run` binary's domain).
+    var isIslandInTerminalsEnabled: Bool {
+        get { defaults.object(forKey: keyPrefix + "islandInTerminals") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: keyPrefix + "islandInTerminals") }
+    }
+
     /// Exactly two supported layouts take part in detection and manual switching.
     var activeLayoutIDs: [String] {
         get { defaults.stringArray(forKey: keyPrefix + "activeLayoutIDs") ?? [] }

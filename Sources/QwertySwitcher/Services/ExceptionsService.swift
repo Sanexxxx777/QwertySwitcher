@@ -150,14 +150,7 @@ final class ExceptionsService {
         }
     }
 
-    private let defaultAppExceptions = [
-        "com.apple.Terminal",
-        "net.kovidgoyal.kitty",
-        "com.googlecode.iterm2",
-        "io.alacritty",
-        "co.zeit.hyper",
-        "com.github.wez.wezterm",
-    ]
+    private let defaultAppExceptions = TerminalApps.defaultBlockedBundleIDs
 
     func addAppException(_ bundleID: String) {
         var profiles = appProfiles
