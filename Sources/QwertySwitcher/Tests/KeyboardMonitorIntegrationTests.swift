@@ -111,6 +111,11 @@ final class FakeTextReplacer: TextReplacing {
     func appendPhysicalChar(_ text: String) {
         screen += text
     }
+
+    /// What the app does with `count` Backspace presses (the harness's keyDown path does not model it).
+    func deleteBackward(_ count: Int) {
+        screen.removeLast(min(count, screen.count))
+    }
 }
 
 
@@ -2884,11 +2889,11 @@ enum ModelAndLearningFixesTests {
         // Smart case is gated by `finishReplacement`'s 0.2 s cooldown after any replacement.
         let pastCooldown: () -> Void = { Thread.sleep(forTimeInterval: 0.25) }
 
-        func harness(secure: SecureFlag? = nil, autoSwitch: Bool = true) -> KeyboardMonitorHarness {
+        func harness(secure: SecureFlag? = nil, autoSwitch: Bool = true, instant: Bool = false) -> KeyboardMonitorHarness {
             let detector = SecureInputDetector(secureCheck: { secure?.on ?? false }, axProbe: { false })
             let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources, secureInputDetector: detector)
             h.prefs.isAutoSwitchEnabled = autoSwitch
-            h.prefs.isInstantCorrectionEnabled = false
+            h.prefs.isInstantCorrectionEnabled = instant
             h.prefs.isYoficatorEnabled = false
             h.prefs.isSmartCaseEnabled = true
             h.prefs.activeLayoutIDs = [enLayout.id, ruLayout.id]
@@ -3037,6 +3042,39 @@ enum ModelAndLearningFixesTests {
             h.externalLayoutChange(to: ruLayout)
             TestRunner.assertEqual(h.invocationCount, 0, "3b: the own Shift switch never retypes the first burst")
             TestRunner.assertTrue(!h.monitor.swapLastWordInBuffer(), "3b: the stale half-typed word was wiped")
+        }
+
+        // Step 4: delete-and-retype teaches an exception for an INSTANT correction.
+        // The word is typed on the EN layout, instant-corrects mid-word, then the user deletes the
+        // corrected word + its space and retypes the same original keys on the EN layout.
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(instant: true)
+            h.prefs.isSmartCaseEnabled = false
+            h.type(privet); h.press(space)
+            TestRunner.assertEqual(h.screen, "привет ", "4: setup — the word was instant-corrected")
+            TestRunner.assertEqual(h.invocationCount, 1, "4: setup — exactly one replacement")
+            for _ in 0..<7 { h.press(51) } // «привет» + the space
+            h.replacer.deleteBackward(h.screen.count) // the simulated app does not model Backspace itself
+            inputSources.switchTo(enLayout) // the user switches back to retype the original
+            pastCooldown()
+            h.type(privet); h.press(space)
+            TestRunner.assertTrue(h.exceptions.isAutoLearned("ghbdtn"), "4: the retype taught the exception, keyed by the whole original word")
+            TestRunner.assertEqual(h.screen, "ghbdtn ", "4: the retyped original stays (not instant-corrected again)")
+            TestRunner.assertEqual(h.invocationCount, 1, "4: no second replacement during the retype")
+        }
+        // 4b. A DIFFERENT word typed after the deletion teaches nothing.
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(instant: true)
+            h.prefs.isSmartCaseEnabled = false
+            h.type(privet); h.press(space)
+            for _ in 0..<7 { h.press(51) }
+            h.replacer.deleteBackward(h.screen.count)
+            inputSources.switchTo(enLayout)
+            pastCooldown()
+            h.type(Array(ghbdtn.dropLast(2))); h.press(space) // "ghbd" ≠ the original
+            TestRunner.assertTrue(!h.exceptions.isAutoLearned("ghbdtn"), "4b: a different word is not a confirmed retype")
         }
     }
 }

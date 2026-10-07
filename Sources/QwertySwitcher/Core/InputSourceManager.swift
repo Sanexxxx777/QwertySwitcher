@@ -122,10 +122,10 @@ final class InputSourceManager {
         return Array(selected.prefix(2))
     }
 
-    @discardableResult
     /// `selfInitiated: false` is for a switch that is the USER's action carried out by the app
     /// (Single Shift / CapsLock): the change is then classified external, so `KeyboardMonitor`
     /// wipes the half-typed word that was typed in the old layout.
+    @discardableResult
     func switchTo(_ layout: KeyboardLayout, selfInitiated: Bool = true) -> Bool {
         if Self.layoutSwitchingIsSimulated {
             simulatedLayoutID = layout.id

@@ -1145,6 +1145,13 @@ final class KeyboardMonitor {
                 && appProfile?.blockInstantCorrection != true {
                 if instantCorrectionGate.wasCorrected {
                     logInstantSilence(.alreadyCorrected, len: buffer.count)
+                } else if autoLearnTracker.isRetypePrefix(
+                    languageDetector.lastConvertedWord(keystrokes: buffer.currentWord()) ?? ""
+                ) {
+                    // The user deleted a correction and is retyping the original: leave it alone.
+                    if buffer.count >= InstantCorrectionAnalyzer.minLength {
+                        DebugLog.shared.log("KM", "instant silent: gate=awaitingRetype len=\(buffer.count)", level: .verbose)
+                    }
                 } else if ambiguousKeyRecent {
                     logInstantSilence(.ambiguousKeyRecent, len: buffer.count)
                 } else if wordAutorepeatCount >= 3 {
@@ -1229,7 +1236,11 @@ final class KeyboardMonitor {
             ? false : sentenceStartTracker.consumeForWord(leadHasDigit: leadHasDigit)
         if captured.isEmpty { switchUndoManager.invalidate() }
         let retyped = languageDetector.lastConvertedWord(keystrokes: captured) ?? ""
+        let awaitingRetypeMatch = autoLearnTracker.isRetypePrefix(retyped)
         let learned = autoLearnTracker.confirmRetype(word: retyped, trailing: trailing)
+        if awaitingRetypeMatch {
+            DebugLog.shared.log("KM", "skip boundary correction: awaiting retype", level: .verbose)
+        }
         if let learned {
             exceptionsService.learnException(
                 original: learned.original,
@@ -1246,7 +1257,7 @@ final class KeyboardMonitor {
 
         lastRetypedTrigger = nil
         let languageReplacementStarted = !snippetStarted && canAutoCorrect
-            && learned == nil
+            && learned == nil && !awaitingRetypeMatch
             && !captured.isEmpty
             && processCurrentWord(
                 trigger: trailing, triggerKeystroke: triggerKeystroke, triggerEvent: triggerEvent,
@@ -1570,11 +1581,6 @@ final class KeyboardMonitor {
                     originalLayoutID: currentLayout.id,
                     targetLayoutID: result.layout.id
                 )
-                if !original.isEmpty {
-                    self.autoLearnTracker.recordCorrection(
-                        original: original, corrected: correctedWord, trailing: nil
-                    )
-                }
                 if self.prefsService.isLearningEnabled, !original.isEmpty {
                     // Mechanism B feed (learning_spec.md): `wasLearned`
                     // re-checked against the store here — `result.wasLearned`
@@ -1610,6 +1616,13 @@ final class KeyboardMonitor {
                 // Double Shift before the boundary can still change where it lands.
                 self.pendingIslandContext = Array(self.languageDetector.contextSlots.suffix(2))
                 self.instantCorrectionGate.markLanded(lang: result.layout.languageCode)
+                // Auto-learn needs the WHOLE word (the prefix typed so far would be disarmed by the
+                // next letter): the word's boundary arms the tracker from these layouts.
+                if !original.isEmpty {
+                    self.instantCorrectionGate.markLearnable(
+                        sourceLayoutID: currentLayout.id, targetLayoutID: result.layout.id
+                    )
+                }
                 self.pendingIslandTarget = result.layout.languageCode
                 self.pendingIslandRestore = true
             case .layoutSwitchFailed:
@@ -2455,7 +2468,19 @@ final class KeyboardMonitor {
     ) -> Bool {
         guard !isPaused else { return false }
         let instantLanded = instantCorrectionGate.landedLang
+        let instantLearn = instantCorrectionGate.learnLayouts
         if instantCorrectionGate.consumeIfCorrected() {
+            // Delete-and-retype learning for an instant correction: arm with the whole word.
+            let sources = languageDetector.inputSourceManager
+            if let instantLearn, let source = sources.layout(withID: instantLearn.source),
+               let target = sources.layout(withID: instantLearn.target) {
+                let word = buffer.currentWord()
+                autoLearnTracker.recordCorrection(
+                    original: sources.convertKeystrokes(word, toLayout: source),
+                    corrected: sources.convertKeystrokes(word, toLayout: target),
+                    trailing: trigger
+                )
+            }
             // The word's one ring slot: it landed in the instant correction's target.
             if let instantLanded {
                 languageDetector.recordLandedWord(lang: instantLanded, corrected: true, replacingLast: false)

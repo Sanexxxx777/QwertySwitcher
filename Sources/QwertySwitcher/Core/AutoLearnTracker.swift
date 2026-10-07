@@ -19,6 +19,13 @@ struct AutoLearnTracker {
         return false
     }
 
+    /// True while a retype is awaited and `typed` (the letters so far, as they render in the layout
+    /// they are typed in) is a prefix of the pending original — the correction must stand down.
+    func isRetypePrefix(_ typed: String) -> Bool {
+        guard case .awaitingRetype(let original, _) = state, !typed.isEmpty else { return false }
+        return original.lowercased().hasPrefix(typed.lowercased())
+    }
+
     mutating func recordCorrection(original: String, corrected: String, trailing: String?) {
         guard !original.isEmpty, !corrected.isEmpty else {
             state = .idle

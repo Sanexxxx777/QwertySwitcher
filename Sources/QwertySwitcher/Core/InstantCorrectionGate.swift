@@ -12,11 +12,16 @@ struct InstantCorrectionGate {
     /// when the word lands) — not mid-word, where a Backspace or a Double Shift could still
     /// change the outcome. Cleared with `wasCorrected` everywhere.
     private(set) var landedLang: String?
+    /// The layouts (source, target) of an instant correction that succeeded, kept so the word's
+    /// boundary can arm `AutoLearnTracker` with the WHOLE word (the instant path only knows the
+    /// prefix typed so far). Same lifetime as `landedLang`.
+    private(set) var learnLayouts: (source: String, target: String)?
 
     /// Call when a letter starts a brand-new word (buffer was empty before it).
     mutating func startNewWord() {
         wasCorrected = false
         landedLang = nil
+        learnLayouts = nil
     }
 
     /// Call when instant correction fires for the word currently in the buffer.
@@ -30,6 +35,11 @@ struct InstantCorrectionGate {
         landedLang = lang
     }
 
+    /// Call at the same moment as `markLanded`: remember the layouts for the boundary's auto-learn.
+    mutating func markLearnable(sourceLayoutID: String, targetLayoutID: String) {
+        learnLayouts = (sourceLayoutID, targetLayoutID)
+    }
+
     /// Call from the word-boundary handler. Returns true (and clears the
     /// gate) exactly once per instantly-corrected word, so the boundary path
     /// knows to skip its own correction attempt.
@@ -37,6 +47,7 @@ struct InstantCorrectionGate {
         guard wasCorrected else { return false }
         wasCorrected = false
         landedLang = nil
+        learnLayouts = nil
         return true
     }
 
@@ -44,5 +55,6 @@ struct InstantCorrectionGate {
     mutating func reset() {
         wasCorrected = false
         landedLang = nil
+        learnLayouts = nil
     }
 }
