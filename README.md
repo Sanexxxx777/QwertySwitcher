@@ -19,12 +19,13 @@ you (see Privacy below). Free and offline since 0.10.0 — no license/trial.
   intercepts every keydown / flags-changed event system-wide — the same
   low-level mechanism used by hotkey managers and accessibility tools.
 - Each candidate word is scored against every installed keyboard layout by a
-  **4-level detector**:
-  1. Bloom filter membership check (714K-word combined EN+RU dictionary,
-     ~480 KB in memory, FNV-1a double hashing)
-  2. `NSSpellChecker` fallback for words outside the bundled dictionary
-  3. N-gram scoring (common/forbidden letter bigrams per language)
-  4. Word-frequency bonus + a context bias toward the previous word's language
+  **3-level detector**:
+  1. Dictionary membership (≈697K-word combined EN+RU list): a Bloom filter
+     (FNV-1a double hashing) answers first, and every hit is confirmed against
+     the exact sorted word list once its background index is ready, so a Bloom
+     false positive never counts as a word
+  2. N-gram scoring (common/forbidden letter bigrams per language)
+  3. Word-frequency bonus + a context bias toward the previous word's language
 - On a confident match, the word is erased with synthetic backspace events and
   retyped through `TISSelectInputSource` + `UCKeyTranslate`, one character per
   `CGEvent` — batching more than that silently drops keystrokes in

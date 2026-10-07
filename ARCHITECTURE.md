@@ -14,7 +14,7 @@
 | Язык и сборка | Swift tools 5.9, SwiftPM, AppKit + SwiftUI |
 | Перехват ввода | `CGEventTap` с Accessibility и Input Monitoring |
 | Раскладки | Carbon TIS + `UCKeyTranslate` |
-| Определение языка | Bloom filter, `NSSpellChecker`, n-gram и частотный/context score |
+| Определение языка | Bloom filter с точной сверкой по отсортированному списку слов, n-gram и частотный/context score |
 | Хранение | `UserDefaults`, локальный Bloom-кэш и локальный debug log |
 | Дистрибуция | self-signed beta, Developer ID DMG, отдельная App Store sandbox-ветка |
 
