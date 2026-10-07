@@ -146,6 +146,25 @@ final class KeyboardMonitor {
     private var autoCorrectionCooldownUntil: CFAbsoluteTime = 0
     private let autoCorrectionCooldownInterval: CFAbsoluteTime = 0.2
 
+    // MARK: - Chorded comma (plan 013, step B)
+
+    /// How long after a kc44 "." a Shift-down still counts as the chord's late Shift.
+    /// Field max 105 ms; 0 negatives inside 250 ms in 24 h of typing — the bare-tap gate
+    /// (Shift released with no key pressed while held) is the real discriminator, the window
+    /// only bounds how stale a candidate may be.
+    private let chordCommaWindow: CFAbsoluteTime = 0.120
+
+    /// A kc44 "." typed without Shift on a layout where Shift+kc44 is "," — the keyboard
+    /// sometimes delivers the key a hair BEFORE its Shift (field: 20 of 206 commas, Shift
+    /// 2-105 ms later, always released as a bare tap). `shiftDownAt` is set once a
+    /// Shift-down inside the window marked it; the repair itself waits for that Shift's release.
+    private struct ChordCommaCandidate {
+        let armedAt: CFAbsoluteTime
+        let layoutID: String
+        var shiftDownAt: CFAbsoluteTime?
+    }
+    private var chordComma: ChordCommaCandidate?
+
     /// Count of `.tapDisabledByTimeout` events seen this run — a live-log
     /// counter (task: "защита от повторения") so a regression shows up as a
     /// rising number, not just individual log lines a human has to notice.
@@ -445,6 +464,8 @@ final class KeyboardMonitor {
         // completion handlers (RC-3). A manual/bot-driven switch still resets
         // context exactly as before (v0.2.0 feature).
         let selfInitiated = (notification.userInfo?[InputSourceManager.selfInitiatedKey] as? Bool) ?? false
+        // Plan 013 B: a chord candidate belongs to ONE layout — any change, ours or not, voids it.
+        chordComma = nil
         guard !selfInitiated else { return }
         logContextWipe("layout-changed-externally")
         buffer.clear()
@@ -676,10 +697,17 @@ final class KeyboardMonitor {
 
         if event.type == .flagsChanged {
             hotkeyManager?.handleFlagsChanged(keycode: UInt16(event.keycode), flags: event.flags)
+            // AFTER the hotkey manager: its Shift-down resets `anyKeyBetweenShifts`, so the
+            // "this Shift is not a bare tap" mark must come last (plan 013 B).
+            noteChordCommaFlags(keycode: UInt16(event.keycode), flags: event.flags)
             return
         }
 
         guard event.type == .keyDown else { return }
+        // Any keyDown voids a pending chord candidate (a later key means the "." was a period).
+        // This single line covers backspace, navigation keys, secure input and every ordinary
+        // key; `kc44` re-arms it at the end of its own branch below.
+        chordComma = nil
 
         let keycode = event.keycode
         let flags = event.flags
@@ -992,6 +1020,7 @@ final class KeyboardMonitor {
                 // already sitting in front of it).
                 lastCompletedWord = nil
                 pendingLeadingSymbols.append(BufferedKeystroke(keycode: keycode, flags: flags))
+                armChordCommaIfEligible(keycode: keycode, flags: flags, canAutoCorrect: canAutoCorrect)
                 return
             }
             let digit = languageDetector.inputSourceManager.trailingCharacter(
@@ -1010,6 +1039,7 @@ final class KeyboardMonitor {
                 triggerKeystroke: BufferedKeystroke(keycode: keycode, flags: flags),
                 wordAutorepeatCount: autorepeatCountAtBoundary
             )
+            armChordCommaIfEligible(keycode: keycode, flags: flags, canAutoCorrect: canAutoCorrect)
         } else {
             logContextWipe("navigation-key-\(keycode)")
             switchUndoManager.invalidate()
@@ -1713,6 +1743,8 @@ final class KeyboardMonitor {
     }
 
     private func invalidateEditingContext(reason: String = "unspecified") {
+        // Plan 013 B: before the isPaused early return — a click/app switch mid-pause must void it too.
+        chordComma = nil
         if isPaused {
             invalidateAfterReplacement = true
             textReplacer.cancelCurrentReplacement()
@@ -2578,6 +2610,103 @@ final class KeyboardMonitor {
             self.finishReplacement()
         }
         return true
+    }
+
+    // MARK: - Chorded comma repair (plan 013, step B)
+
+    /// Arms the candidate right after a kc44 keyDown was handled — only for a plain "." that
+    /// the boundary logic did not already turn into a replacement. Decided by what the layout
+    /// actually prints (`characterForKeycode`), never by a layout name: EN/ABC prints "/" and "?"
+    /// there and is excluded by the same check.
+    private func armChordCommaIfEligible(keycode: UInt16, flags: CGEventFlags, canAutoCorrect: Bool) {
+        guard keycode == 44, canAutoCorrect, !isPaused,
+              flags.intersection([.maskShift, .maskCommand, .maskControl, .maskAlternate]).isEmpty,
+              let layout = languageDetector.inputSourceManager.currentLayout else { return }
+        let sources = languageDetector.inputSourceManager
+        guard sources.characterForKeycode(keycode, layout: layout, flags: []) == ".",
+              sources.characterForKeycode(keycode, layout: layout, flags: .maskShift) == "," else { return }
+        chordComma = ChordCommaCandidate(
+            armedAt: CFAbsoluteTimeGetCurrent(), layoutID: layout.id, shiftDownAt: nil
+        )
+    }
+
+    /// Shift transitions for a pending chord candidate (called from `handle` after the hotkey
+    /// manager saw the same event). Down within the window → mark the candidate and tell the
+    /// hotkey manager this Shift is not a bare tap; release of that same Shift with no key
+    /// pressed in between (any keyDown cleared the candidate) → repair.
+    private func noteChordCommaFlags(keycode: UInt16, flags: CGEventFlags) {
+        guard var candidate = chordComma else { return }
+        let isShiftKey = keycode == 56 || keycode == 60
+        let otherModifiers = flags.intersection([.maskCommand, .maskControl, .maskAlternate])
+        guard isShiftKey, otherModifiers.isEmpty, !isPaused else {
+            chordComma = nil
+            return
+        }
+        let shiftHeld = flags.contains(.maskShift)
+        if candidate.shiftDownAt == nil {
+            let now = CFAbsoluteTimeGetCurrent()
+            guard shiftHeld, now - candidate.armedAt <= chordCommaWindow else {
+                chordComma = nil
+                return
+            }
+            candidate.shiftDownAt = now
+            chordComma = candidate
+            hotkeyManager?.markKeyPressed()
+        } else if shiftHeld {
+            // A second Shift joined — not the plain gesture this repair is for.
+            chordComma = nil
+        } else {
+            chordComma = nil
+            repairChordComma(candidate)
+        }
+    }
+
+    /// Erases the "." and types "," through the ordinary replacement machinery (keys typed
+    /// meanwhile are queued, then analysed and replayed by `finishReplacement`). The layout is
+    /// never touched: target = the layout the "." was typed in.
+    private func repairChordComma(_ candidate: ChordCommaCandidate) {
+        guard let shiftDownAt = candidate.shiftDownAt else { return }
+        let dtMs = Int(((shiftDownAt - candidate.armedAt) * 1000).rounded())
+        guard !isPaused,
+              let layout = languageDetector.inputSourceManager.currentLayout,
+              layout.id == candidate.layoutID else {
+            DebugLog.shared.log("KM", "chord comma: skipped dt=\(dtMs)ms (replacement active or layout changed)")
+            return
+        }
+        isPaused = true
+        textReplacer.replaceCurrentWord(
+            length: 1, replacement: ",", targetLayout: layout,
+            trailing: nil, trailingAlreadyOnScreen: false
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                // The model must read the symbol as it now is on screen: a "," ends no sentence.
+                self.sentenceStartTracker.reobserveTrailing(",")
+                let shifted = { (key: BufferedKeystroke) -> BufferedKeystroke in
+                    var flags = key.flags
+                    flags.insert(.maskShift)
+                    return BufferedKeystroke(keycode: key.keycode, flags: flags)
+                }
+                if let history = self.lastCompletedWord, history.trailing == ".",
+                   history.trailingKeystroke?.keycode == 44, let key = history.trailingKeystroke {
+                    self.lastCompletedWord?.trailing = ","
+                    self.lastCompletedWord?.trailingKeystroke = shifted(key)
+                }
+                if let last = self.runKeystrokes.last, last.keycode == 44 {
+                    self.runKeystrokes[self.runKeystrokes.count - 1] = shifted(last)
+                }
+                if let last = self.pendingLeadingSymbols.last, last.keycode == 44 {
+                    self.pendingLeadingSymbols[self.pendingLeadingSymbols.count - 1] = shifted(last)
+                }
+                DebugLog.shared.log("KM", "chord comma: repaired dt=\(dtMs)ms")
+            case .layoutSwitchFailed:
+                DebugLog.shared.log("KM", "chord comma: aborted dt=\(dtMs)ms (layout verification failed)")
+            case .cancelled:
+                DebugLog.shared.log("KM", "chord comma: cancelled dt=\(dtMs)ms (editing context changed)")
+            }
+            self.finishReplacement()
+        }
     }
 
     private func finishReplacement() {

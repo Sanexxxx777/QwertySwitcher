@@ -227,6 +227,16 @@ final class KeyboardMonitorHarness {
         dispatch(KeyEventSnapshot(type: .keyDown, keycode: keycode, flags: flags, autorepeat: autorepeat ? 1 : 0))
     }
 
+    /// Simulates a Shift transition (kc56 left / kc60 right). A flagsChanged event is never
+    /// queued by the tap (`queueIfReplacementActive`), so it goes straight to `handle`.
+    func shiftDown(keycode: UInt16 = 56) {
+        monitor.handle(KeyEventSnapshot(type: .flagsChanged, keycode: CGKeyCode(keycode), flags: .maskShift))
+    }
+
+    func shiftUp(keycode: UInt16 = 56) {
+        monitor.handle(KeyEventSnapshot(type: .flagsChanged, keycode: CGKeyCode(keycode), flags: []))
+    }
+
     func press(_ stroke: BufferedKeystroke) { press(stroke.keycode, flags: stroke.flags) }
     func type(_ strokes: [BufferedKeystroke]) { strokes.forEach { press($0) } }
 
@@ -1826,6 +1836,186 @@ enum ReplayBurstAndFailureTests {
                 h.screen, "ghbdtn кто",
                 "the re-queued letter was analyzed AFTER the undo cleared the buffer, so it is in the buffer"
             )
+        }
+    }
+}
+
+
+// MARK: - Plan 013 step B: chorded comma ("." typed a hair before Shift becomes ",")
+//
+// Field log: on Russian – PC kc44 unshifted is ".", Shift+kc44 is ",". In 20 of 206 commas the
+// keyboard delivered the kc44 keyDown BEFORE Shift (2–105 ms), and Shift was then released with
+// no key in between. The switcher repairs that bare-tap shape; every other order stays untouched.
+enum ChordCommaRepairTests {
+    static func run() {
+        TestRunner.section("Chorded comma — kc44 a hair before a bare Shift tap is repaired to \",\" (plan 013 B)")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the chorded-comma fixtures")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+        TestRunner.assertEqual(
+            inputSources.characterForKeycode(44, layout: ruLayout, flags: []), ".",
+            "sanity: the simulated RU layout maps kc44 to \".\" unshifted"
+        )
+        TestRunner.assertEqual(
+            inputSources.characterForKeycode(44, layout: ruLayout, flags: .maskShift), ",",
+            "sanity: ...and to \",\" with Shift"
+        )
+
+        let environment = KeyboardMonitorTestEnvironment(inputSources: inputSources)
+        defer { environment.restore() }
+
+        func harness(layout: KeyboardLayout) -> KeyboardMonitorHarness {
+            inputSources.switchTo(layout)
+            let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
+            h.prefs.isAutoSwitchEnabled = true
+            h.prefs.isInstantCorrectionEnabled = true
+            h.prefs.isYoficatorEnabled = false
+            h.prefs.isSmartCaseEnabled = true
+            h.prefs.activeLayoutIDs = [enLayout.id, ruLayout.id]
+            h.exceptions.appExceptions = []
+            h.exceptions.wordExceptions = []
+            h.exceptions.autoLearned = [:]
+            return h
+        }
+
+        // Synthetic words of the same shape as the field ones.
+        guard let privet = InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse),
+              let kak = InstantCorrectionFixtures.keystrokes(for: "как", reverse: ruReverse),
+              let ak = InstantCorrectionFixtures.keystrokes(for: "ак", reverse: ruReverse),
+              let hello = InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse) else {
+            TestRunner.assertTrue(false, "chorded-comma fixtures must type every character")
+            return
+        }
+        // Past `finishReplacement`'s 0.2 s post-replacement cooldown (smart case is gated by it).
+        let pastCooldown: () -> Void = { Thread.sleep(forTimeInterval: 0.25) }
+
+        // 1. kc44, Shift down +8 ms, Shift up → "," on screen; the next word is NOT capitalised.
+        do {
+            let h = harness(layout: ruLayout)
+            h.type(privet)
+            h.press(44)
+            Thread.sleep(forTimeInterval: 0.008)
+            h.shiftDown()
+            h.shiftUp()
+            TestRunner.assertEqual(h.screen, "привет,", "1: the late-Shift \".\" is repaired to \",\" on screen")
+            TestRunner.assertEqual(h.invocationCount, 1, "1: exactly one replacement (the repair)")
+            pastCooldown()
+            h.press(49)
+            h.type(kak)
+            h.press(49)
+            TestRunner.assertEqual(
+                h.screen, "привет, как ",
+                "1: smart case sees \",\" — the next word stays lowercase (was \"привет. Как \")"
+            )
+        }
+
+        // 2. Shift down FIRST, then kc44 — an ordinary comma, untouched.
+        do {
+            let h = harness(layout: ruLayout)
+            h.type(privet)
+            h.shiftDown()
+            Thread.sleep(forTimeInterval: 0.008)
+            h.press(44, flags: .maskShift)
+            h.shiftUp()
+            TestRunner.assertEqual(h.screen, "привет,", "2: a normal Shift-first comma stays as typed")
+            TestRunner.assertEqual(h.invocationCount, 0, "2: no replacement for a normal comma")
+        }
+
+        // 3. kc44, Space, Shift+letter — a real period then a capital: stays ".", capitalised as today.
+        do {
+            let h = harness(layout: ruLayout)
+            h.type(privet)
+            h.press(44)
+            h.press(49)
+            h.shiftDown()
+            h.press(kak[0].keycode, flags: .maskShift)
+            h.shiftUp()
+            h.type(ak)
+            h.press(49)
+            TestRunner.assertEqual(h.screen, "привет. Как ", "3: period + Space + Shift-letter stays \".\" with the capital")
+            TestRunner.assertEqual(h.invocationCount, 0, "3: nothing replaced")
+        }
+
+        // 4. kc44, Shift down, a letter while held, Shift up — "." then a capital letter.
+        do {
+            let h = harness(layout: ruLayout)
+            h.type(privet)
+            h.press(44)
+            Thread.sleep(forTimeInterval: 0.008)
+            h.shiftDown()
+            h.press(kak[0].keycode, flags: .maskShift)
+            h.shiftUp()
+            TestRunner.assertEqual(h.screen, "привет.К", "4: a key typed while Shift is held cancels the repair")
+            TestRunner.assertEqual(h.invocationCount, 0, "4: no replacement")
+        }
+
+        // 5. kc44, Shift down 200 ms later — outside the window.
+        do {
+            let h = harness(layout: ruLayout)
+            h.type(privet)
+            h.press(44)
+            Thread.sleep(forTimeInterval: 0.2)
+            h.shiftDown()
+            h.shiftUp()
+            TestRunner.assertEqual(h.screen, "привет.", "5: a Shift 200 ms after the key is not a chord")
+            TestRunner.assertEqual(h.invocationCount, 0, "5: no replacement")
+        }
+
+        // 6. EN layout: kc44 is "/" — a late bare Shift is just a Shift tap.
+        do {
+            let h = harness(layout: enLayout)
+            h.type(hello)
+            h.press(44)
+            Thread.sleep(forTimeInterval: 0.008)
+            h.shiftDown()
+            h.shiftUp()
+            TestRunner.assertEqual(h.screen, "hello/", "6: EN \"/\" followed by a bare Shift is untouched")
+            TestRunner.assertEqual(h.invocationCount, 0, "6: no replacement")
+        }
+
+        // 7. The repaired Shift must not count as a bare tap: one more bare tap right after
+        //    must not complete a Double Shift.
+        do {
+            let h = harness(layout: ruLayout)
+            let suite = "QwertySwitcher.ChordComma.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let wasDouble = h.prefs.isDoubleShiftEnabled
+            h.prefs.isDoubleShiftEnabled = true
+            defer { h.prefs.isDoubleShiftEnabled = wasDouble }
+            var actions: [String] = []
+            let manager = HotkeyManager(
+                inputSourceManager: inputSources,
+                languageDetector: LanguageDetector(
+                    dictionary: dictionary, inputSourceManager: inputSources, prefsService: h.prefs
+                ),
+                textReplacer: TextReplacer(inputSourceManager: inputSources),
+                statsService: StatisticsService(), prefsService: h.prefs,
+                exceptionsService: h.exceptions, gameMode: GameModeState(defaults: defaults),
+                actionScheduler: { branch, _ in actions.append(branch) }
+            )
+            h.monitor.hotkeyManager = manager
+            h.type(privet)
+            h.press(44)
+            Thread.sleep(forTimeInterval: 0.008)
+            h.shiftDown()
+            h.shiftUp()
+            TestRunner.assertEqual(h.screen, "привет,", "7: setup — the chorded comma was repaired")
+            h.shiftDown()
+            h.shiftUp()
+            TestRunner.assertTrue(
+                !actions.contains("doubleShift"),
+                "7: the repaired Shift does not count as a tap — no Double Shift (got \(actions))"
+            )
+            h.monitor.hotkeyManager = nil
         }
     }
 }
