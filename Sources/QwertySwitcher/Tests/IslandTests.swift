@@ -297,7 +297,8 @@ enum IslandStructuralGuardTests {
                 if trimmed.hasSuffix("pendingIslandContext = nil") { chunks[chunks.count - 1].context += 1 }
             }
             let resetting = chunks.filter { $0.target > 0 }
-            TestRunner.assertTrue(resetting.count >= 5, "sanity: at least 5 functions reset pendingIslandTarget (found \(resetting.count))")
+            // Plan 007: the context-ending resets now live in ONE executor (`resetTypingContext`); the other is `restoreIsland`.
+            TestRunner.assertTrue(resetting.count >= 2, "sanity: at least 2 functions reset pendingIslandTarget (found \(resetting.count))")
             for chunk in resetting {
                 TestRunner.assertEqual(
                     chunk.context, chunk.target,

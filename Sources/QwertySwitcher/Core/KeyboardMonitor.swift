@@ -530,20 +530,8 @@ final class KeyboardMonitor {
     }
 
     private func wipeContextAfterExternalLayoutChange() {
-        logContextWipe("layout-changed-externally")
-        buffer.clear()
-        pendingLeadingSymbols.removeAll()
-        runKeystrokes.removeAll()
-        wordAutorepeatCount = 0
-        lastCompletedWord = nil
-        instantCorrectionGate.reset()
-        sentenceStartTracker.reset()
-        languageDetector.resetContext()
         // Mechanism B reset point 2/7: external layout change.
-        feedbackTracker.reset()
-        pendingIslandRestore = false
-        pendingIslandTarget = nil
-        pendingIslandContext = nil
+        resetTypingContext(.externalLayoutChange)
     }
 
     /// The text before a UTF-16 caret offset (clamped to the string).
@@ -909,20 +897,9 @@ final class KeyboardMonitor {
 
         // Secure fields are never buffered, including while auto-switch is off.
         if secureInputDetector.isSecureInput {
-            buffer.clear()
-            pendingLeadingSymbols.removeAll()
-            runKeystrokes.removeAll()
-            wordAutorepeatCount = 0
-            lastCompletedWord = nil
-            autoLearnTracker.cancel()
             // A secure field is a new context: no sentence start / island ring carries over.
-            sentenceStartTracker.reset()
-            languageDetector.resetContext()
             // Mechanism B reset point 3/7: secure input.
-            feedbackTracker.reset()
-            pendingIslandRestore = false
-            pendingIslandTarget = nil
-            pendingIslandContext = nil
+            resetTypingContext(.secureInput)
             health = .secureInput
             DebugLog.shared.log("KM", "skip: secure input")
             return
@@ -933,16 +910,8 @@ final class KeyboardMonitor {
         let now = CFAbsoluteTimeGetCurrent()
         if (!buffer.isEmpty || !pendingLeadingSymbols.isEmpty || !runKeystrokes.isEmpty)
             && (now - lastKeyTime) > staleBufferTimeout {
-            logContextWipe("stale-\(Int((now - lastKeyTime).rounded()))s")
-            buffer.clear()
-            pendingLeadingSymbols.removeAll()
-            runKeystrokes.removeAll()
-            wordAutorepeatCount = 0
             // Mechanism B reset point 4/7: stale-buffer eviction (10s idle).
-            feedbackTracker.reset()
-            pendingIslandRestore = false
-            pendingIslandTarget = nil
-            pendingIslandContext = nil
+            resetTypingContext(.stale(seconds: Int((now - lastKeyTime).rounded())))
         }
         lastKeyTime = now
 
@@ -977,7 +946,6 @@ final class KeyboardMonitor {
             if !pendingLeadingSymbols.isEmpty || lastCompletedWord != nil {
                 logContextWipe("backspace")
             }
-            switchUndoManager.invalidate()
             // Nothing of the current word left to delete = the backspace eats
             // what came before it. With no leading symbols pending that is the
             // gap or the very period that armed smart case ("спасиб." ⌫ "о."
@@ -989,29 +957,23 @@ final class KeyboardMonitor {
                 sentenceStartTracker.reset()
             }
             buffer.removeLast()
-            lastCompletedWord = nil
+            autoLearnTracker.registerDeletion()
             // Conservative: we can't tell from here whether the deleted
             // character was a letter or one of the tracked leading symbols,
-            // so drop the run entirely rather than risk an over/under
-            // backspace count on a later correction.
-            pendingLeadingSymbols.removeAll()
-            runKeystrokes.removeAll()
-            wordAutorepeatCount = 0
-            autoLearnTracker.registerDeletion()
+            // so the run is dropped entirely rather than risk an over/under
+            // backspace count on a later correction. The same reset also clears
+            // history and the undo record.
             // Mechanism B reset point 5/7: backspace.
-            feedbackTracker.reset()
-            pendingIslandRestore = false
-            pendingIslandTarget = nil
-            pendingIslandContext = nil
             // Bug fix (bugfixes-diag-20260831.md Bug B): the buffer isn't
             // necessarily empty after a backspace (only its LAST keystroke
             // was dropped), so the ordinary `buffer.isEmpty` → `startNewWord()`
-            // path below never runs here — without this, an instant
-            // correction earlier in the same word left `wasCorrected == true`
-            // and silently gated the eventual word-boundary evaluation too
-            // ("skip boundary correction: already instant-corrected" on a
-            // word the owner had since edited by hand).
-            instantCorrectionGate.reset()
+            // path below never runs here — without the instant-gate reset in
+            // this scope, an instant correction earlier in the same word left
+            // `wasCorrected == true` and silently gated the eventual
+            // word-boundary evaluation too ("skip boundary correction:
+            // already instant-corrected" on a word the owner had since edited
+            // by hand).
+            resetTypingContext(.backspace)
             return
         }
 
@@ -1206,22 +1168,9 @@ final class KeyboardMonitor {
             )
             armChordCommaIfEligible(keycode: keycode, flags: flags, canAutoCorrect: canAutoCorrect)
         } else {
-            logContextWipe("navigation-key-\(keycode)")
-            switchUndoManager.invalidate()
-            autoLearnTracker.cancel()
-            buffer.clear()
-            pendingLeadingSymbols.removeAll()
-            runKeystrokes.removeAll()
-            wordAutorepeatCount = 0
-            lastCompletedWord = nil
             // The caret moved: the sentence start before it is no longer the one before the next word.
-            sentenceStartTracker.reset()
-            languageDetector.resetContext()
             // Mechanism B reset point 6/7: navigation keys.
-            feedbackTracker.reset()
-            pendingIslandRestore = false
-            pendingIslandTarget = nil
-            pendingIslandContext = nil
+            resetTypingContext(.navigationKey(keycode))
         }
     }
 
@@ -1976,24 +1925,10 @@ final class KeyboardMonitor {
             textReplacer.cancelCurrentReplacement()
             return
         }
-        logContextWipe(reason)
-        buffer.clear()
-        pendingLeadingSymbols.removeAll()
-        runKeystrokes.removeAll()
-        wordAutorepeatCount = 0
-        lastCompletedWord = nil
-        autoLearnTracker.cancel()
-        switchUndoManager.invalidate()
-        instantCorrectionGate.reset()
-        sentenceStartTracker.reset()
-        languageDetector.resetContext()
         // Mechanism B reset point 1/7 (learning_spec.md): covers every
         // reason routed through here — app-activated, mouse-click,
         // modifier-shortcut, paste-no-format, blocked-app-hotkey.
-        feedbackTracker.reset()
-        pendingIslandRestore = false
-        pendingIslandTarget = nil
-        pendingIslandContext = nil
+        resetTypingContext(.editingInvalidated(reason))
     }
 
     /// Island feature (v0.11.0, CLAUDE.md "остров"): snap the layout back to
@@ -2821,16 +2756,12 @@ final class KeyboardMonitor {
         ) else { return false }
         _ = switchUndoManager.consume()
         // Mechanism B reset point 7/7 (learning_spec.md).
-        feedbackTracker.reset()
-        pendingIslandRestore = false
-        pendingIslandTarget = nil
-        pendingIslandContext = nil
         // Undo already switches the layout back to `originalLayout` below —
         // island policy has no business layering another switch on top of
         // it, but the CONTEXT it reads must not still think the (now
         // reverted) correction happened, or the next real correction could
         // misjudge the words around it.
-        languageDetector.resetContext()
+        resetTypingContext(.undo)
 
         isPaused = true
         textReplacer.replaceCurrentWord(
