@@ -50,7 +50,7 @@ enum LearnedWordsStoreTests {
             TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
             return
         }
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { TestRunner.discardDefaultsSuite(suite) }
         let store = LearnedWordsStore(defaults: defaults)
 
         // record -> count, not yet active
@@ -129,7 +129,7 @@ enum LearnedWordsStoreTests {
             TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
             return
         }
-        defer { evictionDefaults.removePersistentDomain(forName: evictionSuite) }
+        defer { TestRunner.discardDefaultsSuite(evictionSuite) }
         let evictionStore = LearnedWordsStore(defaults: evictionDefaults)
 
         for i in 0..<299 {
@@ -178,7 +178,7 @@ enum LearnedWordsStoreTests {
             TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
             return
         }
-        defer { persistDefaults.removePersistentDomain(forName: persistSuite) }
+        defer { TestRunner.discardDefaultsSuite(persistSuite) }
         let writer = LearnedWordsStore(defaults: persistDefaults)
         writer.recordManualFix(word: "clear", lang: "en", originApp: "com.app.terminal", at: t0)
         writer.recordManualFix(word: "clear", lang: "en", originApp: "com.app.terminal", at: t0.addingTimeInterval(day))
@@ -203,7 +203,7 @@ enum PersonalFrequencyStoreTests {
             TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
             return
         }
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { TestRunner.discardDefaultsSuite(suite) }
         let store = PersonalFrequencyStore(defaults: defaults)
 
         // length gate is the store's own guard (junk/mixed-script/projection gates are
@@ -273,7 +273,7 @@ enum PersonalFrequencyStoreTests {
             TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
             return
         }
-        defer { persistDefaults.removePersistentDomain(forName: persistSuite) }
+        defer { TestRunner.discardDefaultsSuite(persistSuite) }
         let writer = PersonalFrequencyStore(defaults: persistDefaults)
 
         writer.bump(word: "raz", lang: "ru", isDictionaryWord: true, at: t0)
@@ -303,7 +303,7 @@ enum PersonalFrequencyStoreTests {
             TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
             return
         }
-        defer { capDefaults.removePersistentDomain(forName: capSuite) }
+        defer { TestRunner.discardDefaultsSuite(capSuite) }
         let capStore = PersonalFrequencyStore(defaults: capDefaults)
         for i in 0..<1_999 {
             let base = t0.addingTimeInterval(TimeInterval(i) * day)
@@ -583,7 +583,7 @@ enum InstantLearningBypassTests {
             TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
             return
         }
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { TestRunner.discardDefaultsSuite(suite) }
         let store = LearnedWordsStore(defaults: defaults)
         store.recordManualFix(word: "clear", lang: "en", originApp: nil, at: Date())
         let count1Result = analyzer.evaluate(
@@ -734,7 +734,7 @@ enum LearningKeyboardMonitorIntegrationTests {
     )? {
         let suite = AppIdentity.bundleIdentifier + ".tests.kmLearning." + UUID().uuidString
         guard let defaults = UserDefaults(suiteName: suite) else { return nil }
-        defaults.removePersistentDomain(forName: suite) // clean slate, this suite name is fresh anyway
+        TestRunner.discardDefaultsSuiteAtEndOfRun(suite) // fresh UUID name; no teardown point here, swept at end of run
         let prefs = PreferencesService(defaults: defaults)
         let exceptions = ExceptionsService(defaults: defaults)
         let learnedWords = LearnedWordsStore(defaults: defaults)
@@ -882,7 +882,7 @@ enum LearningReplayChainTests {
             TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
             return
         }
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { TestRunner.discardDefaultsSuite(suite) }
         let store = LearnedWordsStore(defaults: defaults)
         let exceptions = ExceptionsService(defaults: defaults)
         let t0 = Date(timeIntervalSince1970: 1_700_000_000)

@@ -15,6 +15,7 @@ enum TestRunner {
         if CommandLine.arguments.contains("--test-release-safety") {
             DebugLogTests.run()
             UpdatesTests.run()
+            sweepDefaultsSuites()
             print("Release safety: \(passed) passed, \(failed) failed, \(skipped) skipped")
             return failed == 0 ? 0 : 1
         }
@@ -23,6 +24,7 @@ enum TestRunner {
             ShiftTapResolverTests.run()
             ShiftTapModifierDisqualifierTests.run()
             ComboWindowGuardTests.run()
+            sweepDefaultsSuites()
             print("Hotkeys: \(passed) passed, \(failed) failed, \(skipped) skipped")
             return failed == 0 ? 0 : 1
         }
@@ -138,9 +140,53 @@ enum TestRunner {
         UpdatesTests.run()
         SingleInstanceLockTests.run()
         DictionaryIndexTests.run()
+        sweepDefaultsSuites()
         print("---")
         print("\(passed) passed, \(failed) failed, \(skipped) skipped")
         return failed == 0 ? 0 : 1
+    }
+
+    /// Throwaway UserDefaults suites created by this run, deleted by
+    /// `sweepDefaultsSuites()` before `run()` returns.
+    private static var knownDefaultsSuites: [String] = []
+
+    /// Marks a throwaway UserDefaults suite for deletion of its
+    /// `~/Library/Preferences/<suite>.plist`. Why not delete right here:
+    /// measured (scratch probe) — cfprefsd writes a dirty domain's plist
+    /// ~7–11 s AFTER the last `set`/`removePersistentDomain`, even if the file
+    /// was deleted in between (12 of 12 suites reappeared), so `removePersistentDomain`
+    /// alone leaves an empty 42-byte plist per suite and an immediate delete
+    /// loses the race. The sweep waits for those writes to land, then deletes.
+    /// 🔴 Only names under `<bundle id>.tests.` are accepted — never the real
+    /// `<bundle id>.plist`.
+    static func discardDefaultsSuite(_ suiteName: String) {
+        guard suiteName.hasPrefix(AppIdentity.bundleIdentifier + ".tests."),
+              !suiteName.contains("/") else {
+            assertTrue(false, "discardDefaultsSuite refused a non-test suite name: \(suiteName)")
+            return
+        }
+        knownDefaultsSuites.append(suiteName)
+    }
+
+    /// Same as `discardDefaultsSuite` — name kept for fixtures that have no
+    /// teardown point (their owner just registers the suite on creation).
+    static func discardDefaultsSuiteAtEndOfRun(_ suiteName: String) {
+        discardDefaultsSuite(suiteName)
+    }
+
+    /// Waits for cfprefsd's delayed writes, then deletes every tracked plist.
+    private static func sweepDefaultsSuites() {
+        guard !knownDefaultsSuites.isEmpty else { return }
+        Thread.sleep(forTimeInterval: 15)
+        let prefsDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Preferences")
+        for suite in knownDefaultsSuites {
+            let plist = prefsDir.appendingPathComponent("\(suite).plist")
+            if FileManager.default.fileExists(atPath: plist.path) {
+                try? FileManager.default.removeItem(at: plist)
+            }
+        }
+        knownDefaultsSuites.removeAll()
     }
 
     static func assertTrue(_ cond: @autoclosure () -> Bool, _ message: String, file: StaticString = #file, line: UInt = #line) {

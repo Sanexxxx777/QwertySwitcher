@@ -695,12 +695,12 @@ enum UpdatesTests {
     private static func lastSeenBuildFloor() {
         TestRunner.section("Updates — UpdateStartupGuard anti-rollback floor uses max(), never lowers")
 
-        let suite = "qsw-test-lastseen-floor-\(UUID().uuidString)"
+        let suite = AppIdentity.bundleIdentifier + ".tests.updatesLastSeenFloor." + UUID().uuidString
         guard let defaults = UserDefaults(suiteName: suite) else {
             TestRunner.skip("could not create isolated UserDefaults suite for lastSeenBuildFloor")
             return
         }
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { TestRunner.discardDefaultsSuite(suite) }
         let prefs = PreferencesService(defaults: defaults)
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("qsw-updates-floor-\(UUID().uuidString)")
@@ -774,12 +774,12 @@ enum UpdatesTests {
         )
         try? marker.write(to: markerURL)
 
-        let suite = "qsw-test-cleanup-\(UUID().uuidString)"
+        let suite = AppIdentity.bundleIdentifier + ".tests.updatesCleanup." + UUID().uuidString
         guard let defaults = UserDefaults(suiteName: suite) else {
             TestRunner.skip("could not create isolated UserDefaults suite for startupStageCleanup")
             return
         }
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { TestRunner.discardDefaultsSuite(suite) }
         let prefs = PreferencesService(defaults: defaults)
 
         UpdateStartupGuard.onNormalLaunchStarted(prefs: prefs, currentBuild: currentBuild)

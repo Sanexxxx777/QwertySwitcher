@@ -117,9 +117,9 @@ enum ShiftTapModifierDisqualifierTests {
 enum ComboWindowGuardTests {
     static func run() {
         TestRunner.section("L+R Shift — only a completed bare gesture toggles auto-switch")
-        let suite = "QwertySwitcher.ComboReplay.\(UUID().uuidString)"
+        let suite = AppIdentity.bundleIdentifier + ".tests.comboReplay." + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { TestRunner.discardDefaultsSuite(suite) }
         let prefs = PreferencesService(defaults: defaults)
         prefs.isSplitShiftEnabled = true
         let sources = InputSourceManager()

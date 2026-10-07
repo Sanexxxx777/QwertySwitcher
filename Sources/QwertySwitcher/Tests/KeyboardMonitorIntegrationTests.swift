@@ -146,9 +146,9 @@ final class KeyboardMonitorHarness {
         )
         let analyzer = InstantCorrectionAnalyzer(dictionary: dictionary)
         let perApp = PerAppLayoutService(inputSourceManager: inputSources, prefsService: prefs)
-        let snippetDefaults = UserDefaults(
-            suiteName: AppIdentity.bundleIdentifier + ".tests.keyboard-monitor-snippets"
-        )!
+        let snippetSuite = AppIdentity.bundleIdentifier + ".tests.keyboard-monitor-snippets." + UUID().uuidString
+        TestRunner.discardDefaultsSuiteAtEndOfRun(snippetSuite)
+        let snippetDefaults = UserDefaults(suiteName: snippetSuite)!
         let snippets = SnippetService(defaults: snippetDefaults)
         snippets.snippets = [:]
         monitor = KeyboardMonitor(
@@ -1411,7 +1411,7 @@ enum DoubleShiftInapplicableLogTests {
         func promotedInapplicable(word: String) -> Bool? {
             let suite = AppIdentity.bundleIdentifier + ".tests.bugA." + UUID().uuidString
             guard let defaults = UserDefaults(suiteName: suite) else { return nil }
-            defer { defaults.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             let learnedWords = LearnedWordsStore(defaults: defaults)
             let h = KeyboardMonitorHarness(
                 dictionary: dictionary, inputSources: inputSources, learnedWordsStore: learnedWords
@@ -1475,7 +1475,7 @@ enum ProviderSingleReadGuardTests {
             TestRunner.assertTrue(false, "isolated counting UserDefaults suite constructs")
             return
         }
-        defer { counting.removePersistentDomain(forName: suite) }
+        defer { TestRunner.discardDefaultsSuite(suite) }
 
         let prefs = PreferencesService(defaults: counting)
         let exceptions = ExceptionsService(defaults: counting)
@@ -2055,9 +2055,9 @@ enum ChordCommaRepairTests {
         //    must not complete a Double Shift.
         do {
             let h = harness(layout: ruLayout)
-            let suite = "QwertySwitcher.ChordComma.\(UUID().uuidString)"
+            let suite = AppIdentity.bundleIdentifier + ".tests.chordComma." + UUID().uuidString
             let defaults = UserDefaults(suiteName: suite)!
-            defer { defaults.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             let wasDouble = h.prefs.isDoubleShiftEnabled
             h.prefs.isDoubleShiftEnabled = true
             defer { h.prefs.isDoubleShiftEnabled = wasDouble }
@@ -2092,9 +2092,9 @@ enum ChordCommaRepairTests {
         //    (+8 ms), right Shift down, release both → the split-shift toggle fires, "." stays.
         do {
             let h = harness(layout: ruLayout)
-            let suite = "QwertySwitcher.ChordComma.\(UUID().uuidString)"
+            let suite = AppIdentity.bundleIdentifier + ".tests.chordComma." + UUID().uuidString
             let defaults = UserDefaults(suiteName: suite)!
-            defer { defaults.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             let wasSplit = h.prefs.isSplitShiftEnabled
             h.prefs.isSplitShiftEnabled = true
             defer { h.prefs.isSplitShiftEnabled = wasSplit }

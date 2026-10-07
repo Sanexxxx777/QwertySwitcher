@@ -23,13 +23,12 @@ enum StorageMigrationV2Tests {
             "only our own licence/trial rows are selected — settings and foreign domains untouched"
         )
 
-        let suiteName = prefix + "tests.migration.v2"
+        let suiteName = prefix + "tests.migration.v2." + UUID().uuidString
         guard let defaults = UserDefaults(suiteName: suiteName) else {
             TestRunner.assertTrue(false, "throwaway UserDefaults suite could not be created")
             return
         }
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.removePersistentDomain(forName: suiteName)
+        defer { TestRunner.discardDefaultsSuite(suiteName) }
 
         defaults.set("2026-08-09", forKey: prefix + "licenseFirstSeen.TEST-UUID")
         defaults.set(true, forKey: prefix + "autoEnabled")

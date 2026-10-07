@@ -260,7 +260,7 @@ enum GameModeStateTests {
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date })
-            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             state.noteActivation(bundleID: "com.example.declared", infoDictionary: declaredInfo, bundlePath: nil)
             TestRunner.assertTrue(
                 state.isActive(bundleID: "com.example.declared"),
@@ -272,7 +272,7 @@ enum GameModeStateTests {
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date })
-            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             state.noteActivation(bundleID: "com.example.longrun", infoDictionary: nil, bundlePath: nil)
             TestRunner.assertTrue(!state.isActive(bundleID: "com.example.longrun"), "an undeclared app starts inactive")
             state.note(.longRun)
@@ -285,7 +285,7 @@ enum GameModeStateTests {
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date })
-            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             state.noteActivation(bundleID: "com.example.heldkeys", infoDictionary: nil, bundlePath: nil)
             state.note(.heldKeys)
             TestRunner.assertTrue(
@@ -297,7 +297,7 @@ enum GameModeStateTests {
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date })
-            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             state.noteActivation(bundleID: "com.mitchellh.ghostty", infoDictionary: nil, bundlePath: nil)
             state.note(.heldKeys)
             state.note(.longRun)
@@ -310,7 +310,7 @@ enum GameModeStateTests {
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date })
-            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             let bundleID = "com.example.prose"
             state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
             state.note(.longRun)
@@ -325,7 +325,7 @@ enum GameModeStateTests {
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date })
-            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             let bundleID = "com.example.prosereset"
             state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
             state.note(.longRun)
@@ -349,7 +349,7 @@ enum GameModeStateTests {
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date })
-            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             let bundleID = "com.example.hysteresis"
             state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
             state.note(.longRun)
@@ -367,7 +367,7 @@ enum GameModeStateTests {
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date })
-            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             state.noteActivation(bundleID: "com.example.ttl", infoDictionary: declaredInfo, bundlePath: nil)
             state.noteActivation(bundleID: "com.example.other", infoDictionary: nil, bundlePath: nil)
             clock.advance(29 * 60)
@@ -385,7 +385,7 @@ enum GameModeStateTests {
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date })
-            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             let bundleID = "com.example.denied"
             state.deny(bundleID)
             state.noteActivation(bundleID: bundleID, infoDictionary: declaredInfo, bundlePath: nil)
@@ -402,7 +402,7 @@ enum GameModeStateTests {
                 TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
                 return
             }
-            defer { defaults.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             let clock = GameModeTestClock(t0)
             let bundleID = "com.example.notpersistedanymore"
 
@@ -432,7 +432,7 @@ enum GameModeStateTests {
                 TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
                 return
             }
-            defer { defaults.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             let staleKey = AppIdentity.keyPrefix + "gameModeAuto"
             defaults.set("{\"com.example.stale\":1.0}".data(using: .utf8), forKey: staleKey)
 
@@ -453,7 +453,7 @@ enum GameModeStateTests {
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date }, isEnabled: { false })
-            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             let bundleID = "com.example.disabled"
             state.noteActivation(bundleID: bundleID, infoDictionary: declaredInfo, bundlePath: nil)
             TestRunner.assertTrue(
@@ -473,7 +473,7 @@ enum GameModeStateTests {
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date })
-            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             let bundleID = "com.example.dsrelease"
             state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
             state.note(.longRun)
@@ -498,7 +498,7 @@ enum GameModeStateTests {
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date })
-            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             let bundleID = "com.example.dsreleasewindow"
             state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
             state.note(.longRun)
@@ -523,7 +523,7 @@ enum GameModeStateTests {
         do {
             let clock = GameModeTestClock(t0)
             let (state, suite) = freshState(now: { clock.date })
-            defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+            defer { TestRunner.discardDefaultsSuite(suite) }
             let bundleID = "com.example.dsnotgame"
             state.noteActivation(bundleID: bundleID, infoDictionary: nil, bundlePath: nil)
             TestRunner.assertTrue(

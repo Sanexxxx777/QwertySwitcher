@@ -32,7 +32,7 @@ enum ExceptionsTests {
             TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
             return
         }
-        defer { isolatedDefaults.removePersistentDomain(forName: suite) }
+        defer { TestRunner.discardDefaultsSuite(suite) }
         isolatedDefaults.set(["legacy.example"], forKey: AppIdentity.keyPrefix + "appExceptions")
         let isolated = ExceptionsService(defaults: isolatedDefaults)
         TestRunner.assertTrue(
@@ -64,7 +64,7 @@ enum ExceptionsTests {
             TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
             return
         }
-        defer { cacheDefaults.removePersistentDomain(forName: cacheSuite) }
+        defer { TestRunner.discardDefaultsSuite(cacheSuite) }
         let cached = ExceptionsService(defaults: cacheDefaults)
 
         cached.wordExceptions = ["alpha"]
@@ -101,7 +101,7 @@ enum ExceptionsTests {
             TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
             return
         }
-        defer { capDefaults.removePersistentDomain(forName: capSuite) }
+        defer { TestRunner.discardDefaultsSuite(capSuite) }
         let capped = ExceptionsService(defaults: capDefaults)
         for i in 0..<1000 {
             capped.learnException(original: "word\(i)", corrected: "target\(i)")
@@ -127,7 +127,7 @@ enum TimedPauseTests {
             TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
             return
         }
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { TestRunner.discardDefaultsSuite(suite) }
 
         let prefs = PreferencesService(defaults: defaults)
         prefs.isAutoSwitchEnabled = true
@@ -178,7 +178,7 @@ enum SettingsBackupTests {
             TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
             return
         }
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { TestRunner.discardDefaultsSuite(suite) }
 
         let prefs = PreferencesService(defaults: defaults)
         let exceptions = ExceptionsService(defaults: defaults)
@@ -330,7 +330,7 @@ enum SnippetTests {
             TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
             return
         }
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { TestRunner.discardDefaultsSuite(suite) }
         let service = SnippetService(defaults: defaults)
 
         TestRunner.assertTrue(service.isValidTrigger("addr"), "letter-only trigger is valid")
