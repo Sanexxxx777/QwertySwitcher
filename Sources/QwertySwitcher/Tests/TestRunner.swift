@@ -143,6 +143,7 @@ enum TestRunner {
         UpdatesTests.run()
         SingleInstanceLockTests.run()
         DictionaryIndexTests.run()
+        SourceContractHelperTests.run()
         sweepDefaultsSuites()
         print("---")
         print("\(passed) passed, \(failed) failed, \(skipped) skipped")
