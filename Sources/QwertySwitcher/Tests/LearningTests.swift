@@ -187,6 +187,72 @@ enum LearnedWordsStoreTests {
         TestRunner.assertTrue(reader.isActive(word: "clear", lang: "en"), "a promoted entry survives a flush + reload")
         TestRunner.assertEqual(reader.allEntries["en:clear"]?.originApp, "com.app.terminal", "originApp round-trips")
         writer.flush(now: t0) // dirty flag already false — no-op, must not crash
+
+        // Plan 005 step 5: a promoted entry is never un-learned by a later fix.
+        do {
+            let suite = AppIdentity.bundleIdentifier + ".tests.learnedPromoted." + UUID().uuidString
+            guard let d = UserDefaults(suiteName: suite) else {
+                TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+                return
+            }
+            defer { TestRunner.discardDefaultsSuite(suite) }
+            let store = LearnedWordsStore(defaults: d)
+            store.recordManualFix(word: "clear", lang: "en", originApp: nil, at: t0)
+            store.recordManualFix(word: "clear", lang: "en", originApp: nil, at: t0.addingTimeInterval(day))
+            TestRunner.assertTrue(store.isActive(word: "clear", lang: "en"), "5: day 0 + day 1 → active")
+            store.recordManualFix(word: "clear", lang: "en", originApp: nil, at: t0.addingTimeInterval(40 * day))
+            TestRunner.assertTrue(store.isActive(word: "clear", lang: "en"), "5: a fix on day 40 keeps the promoted word active")
+            TestRunner.assertEqual(store.allEntries["en:clear"]?.count, 3, "5: ...and counts it (3), no reset to 1")
+            // Undo still works: two revokes bring it back to count 1 = not active.
+            store.revokeRecord(word: "clear", lang: "en")
+            store.revokeRecord(word: "clear", lang: "en")
+            TestRunner.assertTrue(!store.isActive(word: "clear", lang: "en"), "5: revoking below 2 deactivates a promoted word")
+            // After that it is an ordinary unpromoted entry: the window rule applies again.
+            store.recordManualFix(word: "clear", lang: "en", originApp: nil, at: t0.addingTimeInterval(41 * day))
+            TestRunner.assertEqual(store.allEntries["en:clear"]?.count, 1, "5: a revoked word restarts under the normal window rule")
+            store.recordManualFix(word: "clear", lang: "en", originApp: nil, at: t0.addingTimeInterval(42 * day))
+            TestRunner.assertTrue(store.isActive(word: "clear", lang: "en"), "5: ...and can be promoted again")
+
+            // Never promoted: count 1 at day 0, fixed again at day 40 → restarts at 1 (today's rule).
+            store.recordManualFix(word: "fresh", lang: "en", originApp: nil, at: t0)
+            store.recordManualFix(word: "fresh", lang: "en", originApp: nil, at: t0.addingTimeInterval(40 * day))
+            TestRunner.assertEqual(store.allEntries["en:fresh"]?.count, 1, "5: an unpromoted entry restarts at count 1 after the window")
+            TestRunner.assertTrue(!store.isActive(word: "fresh", lang: "en"), "5: ...and is not active")
+
+            // promotedAt survives flush + reload; the word then also survives a late fix.
+            store.flush(now: t0)
+            let reloaded = LearnedWordsStore(defaults: d)
+            reloaded.recordManualFix(word: "clear", lang: "en", originApp: nil, at: t0.addingTimeInterval(100 * day))
+            TestRunner.assertTrue(reloaded.isActive(word: "clear", lang: "en"), "5: promotion survives flush + reload + a late fix")
+        }
+        // 5b. Entries persisted by the CURRENT format (no promotedAt) load unchanged, and an
+        // old active entry is recognised as promoted on its first touch.
+        do {
+            let suite = AppIdentity.bundleIdentifier + ".tests.learnedLegacy." + UUID().uuidString
+            guard let d = UserDefaults(suiteName: suite) else {
+                TestRunner.assertTrue(false, "isolated UserDefaults suite constructs")
+                return
+            }
+            defer { TestRunner.discardDefaultsSuite(suite) }
+            let first = t0.timeIntervalSince1970
+            let json: [String: [String: Any]] = [
+                "en:oldactive": ["count": 2, "firstConfirmed": first, "lastConfirmed": first + 5 * day, "originApp": "com.app.one"],
+                "en:oldsingle": ["count": 1, "firstConfirmed": first, "lastConfirmed": first],
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: json) else {
+                TestRunner.assertTrue(false, "legacy JSON builds")
+                return
+            }
+            d.set(data, forKey: AppIdentity.keyPrefix + "learnedWords")
+            let store = LearnedWordsStore(defaults: d)
+            TestRunner.assertEqual(store.allEntries["en:oldactive"]?.count, 2, "5b: a legacy entry decodes (count)")
+            TestRunner.assertEqual(store.allEntries["en:oldactive"]?.originApp, "com.app.one", "5b: ...and originApp")
+            TestRunner.assertTrue(store.isActive(word: "oldactive", lang: "en"), "5b: a legacy active entry is still active")
+            TestRunner.assertTrue(!store.isActive(word: "oldsingle", lang: "en"), "5b: a legacy single entry is still inactive")
+            store.recordManualFix(word: "oldactive", lang: "en", originApp: nil, at: t0.addingTimeInterval(60 * day))
+            TestRunner.assertTrue(store.isActive(word: "oldactive", lang: "en"), "5b: a late fix does not un-learn a legacy active entry")
+            TestRunner.assertEqual(store.allEntries["en:oldactive"]?.count, 3, "5b: ...it is counted")
+        }
     }
 }
 

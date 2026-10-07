@@ -9,6 +9,10 @@ struct LearnedWordEntry: Equatable {
     var firstConfirmed: Date
     var lastConfirmed: Date
     var originApp: String?
+    /// When the entry first became active. A promoted word stays learned: a later fix past the
+    /// 30-day window no longer resets it. Nil = never promoted, or stored before this field existed
+    /// (set lazily on the first touch if the old rule says it is active).
+    var promotedAt: Date? = nil
 }
 
 /// Result of `LearnedWordsStore.recordManualFix`.
@@ -69,8 +73,10 @@ final class LearnedWordsStore {
             return enforceCap() ? .capped : .recorded
         }
 
+        // Entries stored before `promotedAt` existed: recognise an active one on first touch.
+        if entry.promotedAt == nil, isEntryActive(entry) { entry.promotedAt = entry.lastConfirmed }
         let gap = at.timeIntervalSince(entry.firstConfirmed)
-        if gap > promotionWindow {
+        if gap > promotionWindow, entry.promotedAt == nil {
             entries[key] = LearnedWordEntry(count: 1, firstConfirmed: at, lastConfirmed: at, originApp: originApp)
             recomputeActive(key: key)
             markDirty()
@@ -81,6 +87,7 @@ final class LearnedWordsStore {
         entry.count += 1
         entry.lastConfirmed = at
         entry.originApp = originApp
+        if entry.promotedAt == nil, entry.count >= 2 { entry.promotedAt = at }
         entries[key] = entry
         recomputeActive(key: key)
         markDirty()
@@ -99,6 +106,7 @@ final class LearnedWordsStore {
             entries.removeValue(forKey: key)
             activeSet.remove(key)
         } else {
+            if entry.count < 2 { entry.promotedAt = nil } // undone below the threshold: not promoted any more
             entries[key] = entry
             recomputeActive(key: key)
         }
@@ -157,7 +165,8 @@ final class LearnedWordsStore {
                 count: entry.count,
                 firstConfirmed: entry.firstConfirmed.timeIntervalSince1970,
                 lastConfirmed: entry.lastConfirmed.timeIntervalSince1970,
-                originApp: entry.originApp
+                originApp: entry.originApp,
+                promotedAt: entry.promotedAt?.timeIntervalSince1970
             )
         }
         guard let data = try? JSONEncoder().encode(payload) else { return }
@@ -172,7 +181,8 @@ final class LearnedWordsStore {
                 count: p.count,
                 firstConfirmed: Date(timeIntervalSince1970: p.firstConfirmed),
                 lastConfirmed: Date(timeIntervalSince1970: p.lastConfirmed),
-                originApp: p.originApp
+                originApp: p.originApp,
+                promotedAt: p.promotedAt.map { Date(timeIntervalSince1970: $0) }
             )
         }
         recomputeAllActive()
@@ -183,6 +193,7 @@ final class LearnedWordsStore {
         let firstConfirmed: TimeInterval
         let lastConfirmed: TimeInterval
         let originApp: String?
+        let promotedAt: TimeInterval? // absent in entries persisted before plan 005 → nil
     }
 
     // MARK: - Helpers
@@ -198,7 +209,8 @@ final class LearnedWordsStore {
     }
 
     private func isEntryActive(_ entry: LearnedWordEntry) -> Bool {
-        entry.count >= 2 && entry.lastConfirmed.timeIntervalSince(entry.firstConfirmed) <= promotionWindow
+        entry.count >= 2
+            && (entry.promotedAt != nil || entry.lastConfirmed.timeIntervalSince(entry.firstConfirmed) <= promotionWindow)
     }
 
     private func recomputeActive(key: String) {
