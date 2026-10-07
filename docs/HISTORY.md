@@ -1,0 +1,479 @@
+# Qwerty Switcher — history, incidents, per-version notes
+
+Chronicle moved out of `CLAUDE.md` (which now holds only the current-state map and the invariants).
+Everything below is the previous `CLAUDE.md` from its first incident section (`🔴 Git-состояние`) to
+its end: order, headings and Russian text are kept verbatim. The only edit is the owner's name, written
+in full (the repo is public). Sections here may describe a superseded state — the licence block, the old
+`Key Features` list, the `TODO` list, early-version notes; `CLAUDE.md` wins on any conflict.
+Code comments cite a section as `docs/HISTORY.md "<heading prefix>"`.
+
+---
+
+## 🔴 Git-состояние: НИКОГДА не трогать (инцидент 05.08.2026)
+
+**Запрещены полностью, и агентам в том числе:** `git stash`, `git reset`, `git checkout -- .`, `git restore`, `git clean`. Работа этого проекта копится большими незакоммиченными кусками, и одна такая команда сносит её молча.
+
+Что случилось 05.08: агент выполнил `git stash`, чтобы «привести дерево в порядок». Из рабочей папки исчезли **3399 строк в 29 файлах** (вся работа 0.4.3–0.4.9, включая 1438 строк тестов). Дальше параллельные агенты продолжили писать код поверх версии двухдневной давности — то есть чинили уже починенное и переделывали UI, у которого не было ни тем, ни вкладок. Обнаружилось только по косвенному признаку: пропали механизмы, которые точно работали в установленной сборке.
+
+**Правила, снимающие этот класс аварий:**
+1. **Коммит ПЕРЕД делегированием.** Прежде чем запускать агента, который будет править файлы, — локальный коммит. Точка возврата важнее красоты истории.
+2. **Дерево «грязное» — это норма здесь, а не беспорядок.** Не «прибираться» в нём.
+3. **Разные агенты — непересекающиеся файлы**, список файлов выдавать явно в промпте. Тесты живут в одном `TestRunner.swift` — значит правит его РОВНО ОДИН агент за раз.
+4. Заметил, что из дерева пропал код, который точно работал → **`git stash list` и `git fsck --lost-found` ПЕРЕД любыми правками**. Восстановление дешёвое, переписывание заново — нет.
+
+## 🔴 Обновление установленной копии — ТОЛЬКО `./Scripts/install.sh` (инвариант, 04.08.2026)
+
+Ручное копирование в `/Applications` сбрасывало Accessibility/Input Monitoring. Две независимые причины, обе лечатся одним `rsync -a --delete` внутри `install.sh`:
+1. **`rm -rf "/Applications/Qwerty Switcher.app"` перед копированием = деинсталляция для macOS.** Исчезновение каталога → tccd удаляет строку в TCC.db (ключ = bundle id + csreq, НЕ CDHash). Доказано A/B на этом Маке: пересозданный каталог → `perms accessibility=false`; тот же каталог обновлён на месте с ДРУГИМ CDHash → `perms accessibility=true`. ⇒ каталог-назначение обязан пережить обновление.
+2. **`ditto src dst` поверх существующего бандла МЕРЖИТ, не удаляет.** Один файл-сирота от прошлого релиза внутри `Contents/` ломает печать ресурсов → приложение перестаёт удовлетворять своему Designated Requirement → tccd не матчит сохранённый csreq → разрешения спрашиваются заново. ⇒ копия обязана подчищать (`--delete`).
+3. **Сохранённый csreq НАЗЫВАЕТ signing identity** (`identifier "tech.sasha.qwertyswitch" and certificate leaf = H"a80cd00f…"` — это leaf-хэш сертификата «SashaSwitcher Developer» из login-keychain). Сборка с ДРУГОЙ identity сбрасывает гранты, даже если каталог и его inode целы. Главный реальный путь сюда: `build.sh` при отсутствии сертификата в связке молча падает в ad-hoc (`build.sh:117-124`, DR становится cdhash-based и меняется каждую пересборку). ⚠️`codesign --verify` такое НЕ ловит в принципе — он проверяет бандл против DR, вшитого в его же подпись, поэтому ad-hoc сборка честно «satisfies its Designated Requirement». ⇒ identity источника сверяется с установленной копией отдельным гейтом ДО синка (`install.sh` шаг [2/5], отказ = exit 7, ничего не тронуто). Осознанная смена identity — `--allow-identity-change`, и тогда скрипт прямо пишет, что разрешения будут запрошены заново.
+
+```bash
+./Scripts/build.sh && ./Scripts/install.sh     # единственный правильный путь
+```
+`install.sh` идемпотентен: гасит только процесс, запущенный из целевого бандла (ДО подмены файлов — иначе новый код не подхватится), обновляет содержимое на месте, и **блокирующим гейтом** гоняет `codesign --verify --deep --strict` по установленной копии. Провал гейта = разрешения будут потеряны, установку не считать успешной. В выводе печатается inode до/после — совпал = гранты целы.
+
+**Граница покрытия (не расширять заявление):** `install.sh` — путь разработчика на ЭТОЙ машине. Пользовательское обновление из DMG (перетаскивание с «Заменить») удаляет каталог бандла руками Finder'а = причина №1 в чистом виде, гранты слетают, и install.sh тут ни при чём. Смягчение — не установщик, а онбординг: окно «Добро пожаловать» + пункт меню «Настройка разрешений…» (`OnboardingWindowController`), плюс п.4 в `ПРОЧТИ_МЕНЯ.txt` внутри DMG. Полное решение = in-app updater — есть с 0.11.0 (`Services/Updates/`): хелпер (наш бинарь в режиме `--install-update`) гоняет КОПИЮ этого же `install.sh` из Resources стейджа, поэтому инварианты выше действуют и для пользовательских обновлений; `build.sh`/`make-dmg.sh` обязаны запечатывать `install.sh` в бандл ДО подписи (контракт). Также вся сохранность висит на leaf-хэше одного self-signed сертификата в login-keychain: потеря связки или переход на Developer ID (Stage 2) = гарантированный сброс у всех, у кого стоит текущая сборка.
+
+**Don't:** `ditto`/`cp -R`/`rm -rf` по `/Applications/Qwerty Switcher.app` руками; гоняться за стабильным CDHash (csreq содержит `identifier` + `certificate leaf`, CDHash в нём нет — но identity есть, см. причину №3, поэтому менять её нельзя). Контракт установщика — `Tests/ReleaseScripts/install_contract.sh`, гоняется из `test.sh`.
+
+## Spotlight — исключение снято (08.08.2026)
+
+Автокоррекция была отключена в `com.apple.Spotlight` флагом `isSpotlight`. Записанной причины у исключения не было (расследовано 04.08 — история git доходит только до squashed-коммита), держалось из осторожности к live-поиску. Снято по отчёту владельца: «sw» показывало «ыц» и так и оставалось. Именно там неверная раскладка бесполезнее всего — запрос просто ничего не находит. Вместе с флагом убран `NSWorkspace.frontmostApplication` из горячего пути: он вызывался на КАЖДОМ нажатии только ради этой проверки. Если Spotlight когда-нибудь начнёт конфликтовать с backspace+перепечаткой — это исключения по приложению (`ExceptionsService`), а не хардкод.
+
+## 🟢 Терминальный класс артефактов РАЗГАДАН (09.08.2026, v0.6.9 — байтовый замер)
+
+Финальная причина «копящихся точек» (`...../exit`): **наша же Cmd+C-проба выделения**, которую Double Shift стрелял ПЕРВОЙ на каждый жест. В kitty-protocol терминалах (Claude Code включает `CSI >1u`) Ghostty доставляет Cmd+C прямо во ввод приложения как `CSI 99;9u`/`CSI 1089;9u` (лат./кир. «c», mod 9=Cmd) — парсер Клода спотыкается и съедает соседний backspace. Пойман бит-в-бит байтовым логгером (`/tmp/qsw_byte_probe.py` → `/tmp/qsw_bytes.log`, 2 сессии: legacy чисто, kitty — CSI перед каждой серией). Сами серии замен чистые в обоих режимах.
+**Фиксы (все три в 0.6.9):**
+1. Приоритет DS: AX selection → **run/buffer** → clipboard probe → caret word → undo. Cmd+C не шлётся, когда есть свежий набор. Конфликт «выделение vs run» исключён — клики/навигация чистят run.
+2. `TextReplacer` AX-проба перед заменой: поле «читаемо» только если `len>=need && caret>=need` (Ghostty отвечает ПУСТЫМ AXValue формально успешно, а иногда всем скроллбеком с caret=0 — nil-проверки мало); нечитаемо → пейсинг 2.5мс→15мс (`carefulKeystrokeDelay`).
+3. Overlay-доставка: Spotlight-класс полей берёт фокус НЕ становясь frontmost → синтетика с session tap летит в чужое окно (терминал получал «прив», «с»). `AXTextSelectionService.overlayTargetPid(element)` → замена, Cmd+C-проба и Cmd+V уходят через `CGEvent.postToPid(focusedPid)`. Подтверждено владельцем: Spotlight работает.
+**Don't:** не возвращать clipboard-пробу раньше run-конверсии; не «оптимизировать» careful-пейсинг; не ослаблять критерий AX-читаемости до nil-проверки.
+
+## 🔴 В Ghostty сверка с экраном НЕДОСТУПНА — `ax=none` (08.08.2026, доказано логом)
+
+Строка `run check: model=N ax=none → model kept` в живом логе (19:43:38, 19:46:45) значит: **терминал не отдаёт ни значения поля, ни позиции курсора**, поэтому механизм «экран решает сколько стирать» там не работает вообще и программа опирается на модель. В той же паре строк `model=1` при двух реально набранных клавишах — модель отставала.
+
+Это объясняет, почему весь класс артефактов (`пgmail`, `йq1`, `ЙQ1`, `./exit`, `Смотри оги,снова`) живёт именно в терминале, а не в обычных полях: там сверка ловит расхождение и лечит, здесь — нет.
+
+**Следствие для следующей работы:** в приложениях без AX единственная защита — не терять клавиши в самой модели. Известные утечки закрыты (backspace, secure input, простой, границы, смена раскладки), но остаётся минимум одна: чистый набор `й1`/`./exit` в тестах конвертируется верно, а в поле модель короче экрана. **Не угадывать причину** — сначала воспроизвести в Ghostty с включённым `Подробный лог` и посмотреть, на какой клавише `run` перестаёт расти.
+**Don't** пытаться прочитать текст терминала синтетическим Cmd+C — запрет на синтетические каретко-двигающие клавиши стоит с v0.2.0 (см. историю ниже), он ровно об этом.
+
+## 🔴 Модель ввода дрейфует — экран решает СКОЛЬКО, клавиши ЧТО (08.08.2026)
+
+Мы ведём модель напечатанного (`buffer`, `runKeystrokes`), но текст живёт на экране. Любое расхождение немедленно превращается в неверное число backspace, и пользователь видит обрубок или лишний символ. Три полевых артефакта одного класса за одну сессию: `пgmail` (модель 5 клавиш, экран 6 символов), `йq1` (прогон на клавишу короче; лог `keys=2 net=0` — сама замена отработала штатно, врал СЧЁТ), `Смотри оги,снова`.
+
+- **Перед заменой Double Shift сверяет прогон с реальным текстом под курсором** (`AXTextSelectionService.valueAndCaret` + `CaretWordExtractor.wordBeforeCaret`). Разошлись → мерим экран, в лог идёт `run resynced from screen: model=N screen=M`. AX молчит (часть терминалов/Electron) → работаем по модели.
+- **Конвертируем по keycodes, пока модель согласна с экраном.** `LayoutTextConverter` (текст→текст) — только на ресинке: у него нет обратного отображения для `/`, `-`, `=` и он превратил бы `/exit` в `.exit`. Поймано тестом на первой, слишком широкой версии перехвата.
+- **`runKeystrokes` обязан сбрасываться везде, где экран меняется мимо нас:** пробел/Enter/Tab, навигация, backspace, secure input, отбрасывание по простою, смена раскладки, `invalidateEditingContext`. Пропустил одно место — получил дрейф. Это уже случалось.
+- **Don't:** судить `net=` по сырым `bs=`/`pay=` — подавленный триггер даёт законную разницу в 1 символ (мониторинг на этом дал три ложные тревоги подряд). `net` считает чистое изменение длины и обязан быть 0.
+
+## 🔴 macOS шлёт уведомление о смене раскладки ДВАЖДЫ (08.08.2026)
+
+`kTISNotifySelectedKeyboardInputSourceChanged` приходит парами через 1–3 мс (в `debug.log`: `07:36:24.072 (self)` + `07:36:24.074` без метки). `pendingSelfSwitchID` одноразовый, поэтому совпадало только первое, а второе шло как ВНЕШНЕЕ переключение — то есть «пользователь ушёл, забудь контекст» через 2 мс после нашей же коррекции. Стирало буфер, историю и `instantCorrectionGate`; отсюда «Double Shift сразу после коррекции отвечает no buffer/history» и повторная коррекция уже исправленного слова.
+Лечится `InputSourceManager.classifyChange`: уведомление о **уже активной** раскладке = `.duplicate`, до `KeyboardMonitor` не доходит. **Don't** возвращать одноразовый `pendingSelfSwitchID` как единственный признак «своего» переключения.
+
+## 🔴 Замена текста атомарна после первого backspace
+
+Отмена принимается только ДО первого разрушающего действия. Раньше `sendBackspaces`/`typeStringFast` проверяли токен внутри цикла — обрыв на середине оставлял текст стёртым и ненапечатанным, то есть **терял символы навсегда**. Всё медленное (переключение раскладки и его верификация) происходит до этой точки, так что полезное окно отмены не пострадало. Инвариант держит `ReplacementAtomicityGuardTests` — он читает исходник через `#filePath`, потому что гонять живой `TextReplacer` в тестах = постить CGEvent в реальный ввод владельца (ровно та авария 05.08).
+
+## Контраст — числом, не на глаз (08.08.2026)
+
+`StatusInk` полгода существовал, но тема брала сырые `.systemGreen/.systemOrange/.systemRed` — это и был нечитаемый зелёный заголовок. Значения считаются против **худшей из двух поверхностей** каждой темы (окно `#ECECEC`/`#1E1E1E`, карточка `#FFFFFF`/`#323232`): прежний набор проходил на карточке и падал на окне. Гейт — `StatusInkContrastTests` (формула WCAG в `Contrast.ratio`), порог 4.5:1.
+⚠️Поверхности заморожены константами сознательно: `NSColor.windowBackgroundColor` резолвится по-разному в зависимости от того, есть ли в процессе NSApplication, и тест начинал зависеть от способа запуска, а не от цветов.
+
+## Канон имён и путей (стандарт 03.08.2026 — НЕ плодить копии)
+- **Установленная копия ОДНА: `/Applications/Qwerty Switcher.app`** — обновлять ТОЛЬКО через `./Scripts/install.sh` (см. секцию выше), НЕ запускать из build/.
+- `build` — симлинк на `build.noindex/` (Spotlight не индексирует сборки; лечит расплод «Qwerty Switcher.previous-*» в поиске). Не переименовывать обратно.
+- Previous-копия сборки/DMG хранится РОВНО одна: `build/previous/` (скрипты сами ротируют). Таймстампованных `.previous-*` больше не существует — их появление = регресс скриптов.
+- Публичное имя `Qwerty Switcher`, bundle `tech.sasha.qwertyswitch` (AppIdentity.swift — единственный источник). Внутренний модуль/binary переименован из `SashaSwitcher` в `QwertySwitcher` 03.08.2026; signing identity осталась "SashaSwitcher Developer" — НЕ переименовывать: смена identity сбросит TCC-разрешения.
+- Скрипты — bash 3.2 (системный): пустые массивы раскрывать ТОЛЬКО как `${ARR[@]+"${ARR[@]}"}`, иначе `set -u` роняет сборку после стадии компиляции (пойман 03.08: codesign не выполнялся).
+
+Debug logs: `~/Library/Logs/QwertySwitcher/debug.log` (rotation at 1MB).
+Menu → "Показать логи" / "Открыть папку логов".
+
+## Key Features
+- 4-level scoring: Dictionary + SpellCheck + N-gram + WordFrequency + Context
+- Hotkeys: Single Shift, Double Shift, L+R Shift toggle (✅/❌ indicator), CapsLock, Cmd+Shift+V, **Cmd+Option+Z** undo
+- Minimum word length 3 (avoids false positives on 2-letter particles)
+- Liquid Glass UI (NFA design system, dark only — auto appearance)
+- Per-app layout memory, exceptions (word + app + auto-learn with per-entry delete), Ёфикатор
+- Onboarding window — живёт всю сессию в `OnboardingWindowController` (сильная ссылка из AppDelegate). `.floating` + `[.canJoinAllSpaces, .stationary]` + `orderFrontRegardless()` на каждой активации + `.regular` activation policy на время онбординга: без этого окно уходило ПОД System Settings и было недостижимо (app = accessory, нет Dock/Cmd+Tab). Возврат из меню статус-бара «Настройка разрешений…». Опрос TCC — таймер в `.common` mode, не глохнет на onDisappear. Кнопки «Проверить снова» и «Перезапустить приложение» (последняя только в шаге `.stalled`). Логика шагов — `Services/OnboardingState.swift` (чистая, покрыта тестами)
+- ⚠️**Перезапуск после выдачи разрешения НЕ нужен** и в UI так не писать: гранты подхватываются в том же процессе (`AppDelegate.startHealthPolling` → `KeyboardMonitor.refreshHealth`, доказано в debug.log — `perms accessibility=false` → `[KM] event tap started` через 30с, тот же PID). Алерт macOS «Завершить и открыть снова» → «Позже». Restart предлагается ТОЛЬКО когда оба гранта есть, а перехват не поднялся дольше `restartGraceSeconds`
+- ⚠️Не звать `request*()` и `open*Settings()` подряд — это поднимает ДВЕ чужие поверхности поверх нашего окна. Порядок: `PermissionsService.request*ThenSettings()` (промпт → через 0.7с System Settings только если не помогло → колбэк возвращает наше окно вперёд). Второй путь того же кода — `MainViewModel.openPermissionRepair()`
+- ⚠️Input Monitoring — производная от Accessibility: отдельной строки `kTCCServiceListenEvent` для `tech.sasha.qwertyswitch` в TCC.db нет вообще, `CGPreflightListenEventAccess()` возвращает true за счёт Accessibility. Поэтому сначала просим Accessibility, и оба флага всегда меняются синхронно
+- Бесплатно с 0.10.0 (лицензии/подписки нет — секция v0.10.0); офлайн, пока пользователь сам не включит проверку обновлений (0.11.0, opt-in, раз в сутки один JSON с shulgin.is-a.dev)
+- Learning (0.8.0): DS-обучение + откат-исключение + личный частотник — см. секцию v0.8.0 и спеку
+- Secure input detection, Spotlight skip, 300ms self-capture cooldown
+- Context reset on layout change (manual or by bot)
+- Privacy: 100% local, 0 telemetry, audit on launch
+
+## Signing & Distribution (see docs/SIGNING.md)
+- **Stage 1 (current):** persistent self-signed identity "SashaSwitcher Developer" in login keychain → stable CDHash → TCC permissions survive rebuilds. Run once: `./Scripts/setup-signing.sh` (asks for login password once to unlock keychain + set partition list). Free.
+- **Stage 2:** Developer ID + notarization для публичного DMG. Финальный путь: `make-dmg.sh developerid` → `notarize.sh dmg`; и `.app`, и DMG получают timestamped Developer ID signature.
+- **Stage 3:** отдельная App Store sandbox-сборка и `.pkg` pipeline подготовлены. Нужны реальные Apple certificate/profile, чистый Mac test и App Review; статический реверс sandboxed Caramba/Lang не заменяет этот live-test.
+
+## Лицензирование (v0.4.0, 03.08.2026) — ⛔СНЯТО в 0.10.0 (08.09.2026), ниже только история
+⚠️Клиентского кода лицензии в приложении больше нет (см. секцию v0.10.0); серверная часть остановлена 08.09, код сохранён. Абзац ниже — история.
+- Модель: подписка по ключам `QSW-XXXX-XXXX-XXXX` + триал 14 дней, привязка к hardware UUID (IOPlatformUUID) — переустановка не сбрасывает срок.
+- Сервер: Flask за nginx, наружу открыт только префикс `/qsw/v1/*`, админ-ручка отвечает лишь с самой машины. Адреса, пути, порты и команды администрирования держим в памяти (`project_qwerty_payments_next_session`), а не в публичном репозитории.
+- Крипта: ответы сервера подписаны Ed25519; приватный ключ лежит только на сервере (chmod 600, Мак его не видел); публичный вшит в `Services/LicenseService.swift`. Канонизация payload = python `json.dumps(sort_keys=True,separators=(",",":"))` — Swift собирает строку руками, НЕ JSONEncoder.
+- Клиент: состояние в Keychain (`tech.sasha.qwertyswitch.license`, переживает переустановку); check-in при старте + каждые 12ч; офлайн-грейс 14 дней; первый запуск офлайн → provisional-триал до первого контакта с сервером; откат часов ловится maxSeen. Enforcement: `canAutoCorrect` и Double Shift гейтятся `LicenseService.shared.isEntitled`; Single Shift и Undo сознательно НЕ гейтятся.
+- Приватность честно: ввод локально, на сервер уходит ТОЛЬКО hwid + версия (формулировка в UI/About обновлена; «0 телеметрии» больше не заявляем).
+- Граница защиты (уточнена 27.08.2026 аудитом, прежняя формулировка была НЕВЕРНА): переустановка и откат часов закрыты; **чистка локального состояния закрыта только при наличии сети** — сервер помнит триал по hwid. Офлайн-путь: `license.json` (обычный файл в Application Support) + якорь `licenseFirstSeen` жили в двух легко стираемых местах, поэтому `rm license.json` + `defaults delete` без сети начинали provisional-триал заново. Закрыто двумя мерами: якорь дублируется в **Keychain** (переживает удаление приложения, его настроек и файла состояния; при чтении берётся САМОЕ РАННЕЕ из известных значений) и офлайн-окно сокращено **14 дней → 3 дня** — полные 14 выдаёт только сервер. Патч бинарника реверсом по-прежнему НЕ закрыт (нативное приложение без обфускации, честный предел).
+
+## Current v0.6.3 (2026-08-08) — 374 passed, 0 failed, 1 skipped
+
+Символы и прогоны: клавиша `, . ; [ ] ' \`` больше не закрывает слово в момент нажатия (39.6% русских слов ≥3 букв содержат хотя бы одну из `б ю х ж ё э ъ` — измерено по словарю), решение отложено до пробела; детектор разбирает набранное на ведущие знаки + буквенное ядро + хвостовые знаки, оценивает словарём только ядро, **>1 ядра → кандидат отвергается** (это и защищает терминал: `model/path`, `--flag=value`, `./script.sh`).
+Ложные срабатывания: `contextBias` 5 при `collisionGap` 10 (было 15 — подсказка «до этого был русский» в одиночку изготавливала победителя) + `incumbentGap` 25 — перебить текст, который уже читается как настоящее слово, можно только с большим отрывом. Мгновенная коррекция не трогает прогоны со спорной клавишей (`runHasAmbiguousKey`): она срабатывает до появления улик и своих защит не имеет.
+Double Shift: конвертирует **весь прогон** (`runKeystrokes` — буквы + цифры + символы) клавиша-в-клавишу без словаря, когда в прогоне есть не-буква. Явный жест — не запрос на суждение.
+
+## v0.6.17 (19.08.2026) — 528/0/1; junk-гейт instant-пути + капля в таб-баре + акцент = янтарь иконки
+
+- **Junk-гейт мгновенной коррекции** (`InstantCorrectionAnalyzer.evaluate`, ранний выход после `shouldSkip`): own-прочтение набранного префикса CLEAN по `JunkMeter.isClean` → instant молчит, слово чинит boundary-путь по пробелу или Double Shift. Закрывает полевой класс «ложный instant на внесловарном наборе» (эпизод «забанят» 19.08: instant ru→en len=5 увёл раскладку посреди русского жаргона/опечатки — ru-префикс-гейт на внесловарном молчит, en-словарный кандидат выигрывал). Числа стенда `Scripts/research/instant_junk_gate_sim.py`: −93.5% ложных ru→en (обрубки+опечатки), −87.5% en→ru; цена — 40.4%/26.5% словарных слов противоположного языка теряют МГНОВЕННОСТЬ (не коррекцию: 97.5-100% чинятся на границе, hard loss ~1%). «работа» (hf,jnf) и «привет» (ghbdtn) стреляют мгновенно как раньше (их own-прочтение junk). `possibleBigrams` nil (индекс строится) → гейт молчит. ⚠️Порт и Swift меняются синхронно; 3 старых теста скорректированы под этот trade-off с комментарием-обоснованием — не «чинить» их откатом гейта.
+- **Таб-бар переписан после двух жалоб на плывущую строку**: ползунок — отдельный слой ПОД лейблами (позиция = индекс × ширина ячейки), лейблы вне анимаций структурно; matchedGeometryEffect + контейнерная `.animation(value:)` сняты (transaction-подавление НЕ спасало — не возвращать). Капля: края ползунка едут на разных пружинах (передний 0.20/0.72 со всплеском-проскоком, хвост липнет 50мс и догоняет на 0.40/0.66 с колыханием); клэмп краёв к бортикам трека — на крайних вкладках проскок читается как прижатие к стенке. Ресайз окна = snap без анимации. `KeycapPressStyle` — вкладка проседает scale 0.965.
+- **Акцент = янтарь иконки «Й→Q»** (решение владельца: «в окне нет намёка на цвета иконки»): dark #F2A24B (цвет иконки), light #C9761A (≥3:1 на светлых поверхностях для 24pt-bold цифр); `controlAccentColor` больше НЕ следуем. ⚠️Производные тона (deep/light/hover) — только через `NSColor(name:provider:)`-обёртку `brandDerived`: `blended` на dynamic-цвете резолвится один раз и замораживает тему. StatusInk — отдельная система, не тронут.
+- Меню статус-бара: «Автопереключение: включено/выключено» + state-галочка (вместо «Пауза/Возобновить» — пункт называет фичу и состояние, не действие). Ambient-янтарь 3-5% в правом верхнем углу окна; статус-слово 19→22pt.
+- ⚠️**Урок оркестрации:** не гонять `test.sh`/`install.sh`, пока субагент правит `Sources/` в этом же дереве — смешанная установка (ловили 19.08).
+
+## Пост-0.6.17 фиксы, не выпущены (21.08.2026) — instant-наблюдаемость + залипание L+R Shift
+
+Версия/DMG сознательно НЕ бампались — оба фикса ждут полевого подтверждения (не «сразу после установки заработало», а замер по свежему логу). Установлено на разработческом Маке, тесты 532/0/1. История и числа диагностики → память `project_qwerty_switch`.
+
+- **`InstantCorrectionAnalyzer.evaluate()`** теперь возвращает `(Result?, SilenceReason?)` вместо голого `Result?` — причина отказа пишется в verbose как `instant silent: gate=X len=N` (раньше в логе не было НИ ОДНОЙ строки об отказе, только об успехе). `ambiguousKeyRecent` (`KeyboardMonitor`) сужен с блокировки на 2 нажатия после спорной клавиши до 1 — по реальному корпусу владельца (26ч verbose-лога, не синтетическому списку): junk-гейт держит 62% отказов instant, `ambiguousKeyRecent` — 31%; сужение даёт +165 recall при 0 новых ложных срабатываний на `false_switch_sim.py`. Коммиты `97a38a9`/`17146bd`.
+- **L+R Shift combo (тоггл автопереключения) залипал**: `ShiftStateTracker` не сверяется с реальными флагами события — только чередует свой булев флаг по keycode. Одно потерянное `keyUp` (secure input/Cmd+Tab/Spaces с зажатым Shift — наш tap их принципиально не видит) инвертирует модель НАВСЕГДА, следующий одиночный Shift читается как «оба зажаты» → тихий тоггл без действий владельца (полевой инцидент 21.08: до 2.5ч простоя, доказано по `auto-switch → OFF` без предшествующего второго нажатия — пауза 1.4–3.3с перед каждым). Фикс в `HotkeyManager`: комбо принимается, только если второй Shift пришёл в пределах **500мс** от первого (`comboWindow`/`firstComboShiftTime` — захватывается ТОЛЬКО на первом down, `shiftDownTime` для этого не годится, его перезаписывает сам второй down раньше проверки). Промах окна логируется `combo rejected: dt=Nms`, `shiftState` НЕ трогается (`suppressComboReleases()` тут вредна — застрявшая клавиша при следующем честном нажатии съелась бы как призрачный release). ⚠️Root cause (сверка с device-dependent битами события вместо угадывания) НЕ закрыт — 500мс лечит симптом, не причину; это шаг 3 отложенного плана, ждёт подтверждения, что биты вообще отражают физическое состояние на этой версии macOS. Коммит `1b18f5a`.
+- 🔴**verboseLog ВКЛЮЧЁН, новый срок выключения ~23.08** (продлевался 19→21.08 дважды за один день ради поля обоих фиксов выше): `defaults write tech.sasha.qwertyswitch tech.sasha.qwertyswitch.verboseLog -bool false`.
+
+## v0.7.0 (21.08.2026) — 480/0/6; per-app профили, сниппеты, умный регистр, бэкап настроек (сделано Codex, аудит Алисой)
+
+Коммит `b4833ab`. Проверено построчным диффом + реальным прогоном `test.sh` + `codesign -dv` на установленной копии — не только заявленным числам.
+
+- **Per-app профили** (`ExceptionsService.AppProfile`): три независимых флага вместо старого всё-или-ничего — `blockAutoSwitch`/`blockInstantCorrection`/`blockHotkeys`. Старые `appExceptions` мигрируют лениво при первой мутации. `KeyboardMonitor.canAutoCorrect` теперь читает профиль через `activeAppBundleID` — кэш, обновляемый по `didActivateApplicationNotification` (тот же паттерн, что уже был в `LanguageDetector` для junk-гейта), а НЕ синхронным `NSWorkspace.frontmostApplication` внутри `canAutoCorrect` на каждом слове, как было раньше через `isCurrentAppExcepted()` — это и был реальный hot-path фикс, не только новая фича. Хоткей-гейт (`areHotkeysBlockedForCurrentApp`) по-прежнему читает `NSWorkspace` синхронно, но только на уже редких жестах (Single/Double/L+R Shift, Cmd+Opt+Z, Cmd+Shift+Opt+V, CapsLock) — не на каждой букве, приемлемо.
+- **Текстовые сниппеты** (`SnippetService`) и **умный регистр** (`SmartCaseNormalizer`, выключен по умолчанию) — оба гейтятся тем же `canAutoCorrect`/лицензией, что и языковая коррекция; порядок в `handleWordBoundary`: сниппет → языковая замена → smart case (взаимоисключающе).
+- **Пауза на таймер** (`TimedPauseService`, 15/60/120 мин) и **экспорт/импорт настроек** (`SettingsBackupService`, версионированный JSON с валидацией лимитов; лицензия и логи сознательно не экспортируются).
+- **Privacy-манифест починен по факту**: `PrivacyInfo.xcprivacy` раньше заявлял пустой `NSPrivacyCollectedDataTypes`, хотя лицензия шлёт hwid — теперь задекларировано (`NSPrivacyCollectedDataTypeDeviceID`, tracking=false). Лог активации ключа больше не хранит префикс (`redacted()` убран). Новый `Scripts/release-secret-scan.sh` — блокирующий гейт во всех трёх сборочных скриптах + свой контракт-тест.
+- **Тесты 532/0/1 → 480/0/6 — НЕ регрессия кода.** Mac теперь на macOS 27.0 beta, где синтетический `CGEvent` виснет в SkyLight (см. `TestRunner.swift:13` и `ARCHITECTURE.md`) — 5 интеграционных сьютов (~97 ассертов: `KeyboardMonitorIntegrationTests` и др.) скипаются гейтом `syntheticKeyboardEventsAreSafe`, чистая state-machine логика по-прежнему покрыта. Восстановится само на не-бета macOS.
+- Публикация на `~/Projects/web/store` (карточка Qwerty Switcher, новый DMG-линк) — **по прямой команде Александра**, не самоуправство Codex (уточнено 21.08 вечером — моё первое чтение диффа было неверным).
+- `ExceptionsService.isCurrentAppExcepted()`/`isInstantCorrectionBlockedForCurrentApp()` при первом ревью выглядели мёртвыми (0 вызовов в проде) — вместо удаления докручены до пользы (коммит `4660020`): `SwitchBlockReason` получил случай `.blockedForApp(kind, appName:)`, `StatusBarController.currentBlockReason()` зовёт оба метода в уже существующем non-hot-path health-refresh (~500мс таймер, тот же бюджет, что у `secureInputAppName()`). Закрывает реальную дыру: раньше бейдж/меню/тултип молчали (`.none`), даже если для текущего приложения профиль блокировал автопереключение или только мгновенную коррекцию — пользователь не понимал, почему «не работает». Приоритет внутри `resolve()`: глобальные причины (health/toggle/лицензия) выше app-профиля; `autoSwitch`-блок выше `instantCorrectionOnly`. Тесты 480→485 (+5 на новый кейс), `swift build`/`install.sh` прогнаны вручную (test.sh не компилирует `StatusBarController.swift`).
+
+## v0.7.1 (21.08.2026, вечер) — докрутка задеплоена; лог за день чист; L+R Shift снова тоггалил, но НЕ рецидив бага
+
+Коммит `9c7239d` (Info.plist 0.7.0→0.7.1). Витрина обновлена и запушена (коммит `550de23` в `Sanexxxx777/store`, по прямой команде Александра).
+
+- **Полный лог 21.08 (11:50–16:21, оба debug.log/debug.1.log) проверен на ошибки** — нашлось ровно одно безобидное `WARNING: slow toggleAutoSwitch action 103ms` (задокументированная особенность первой загрузки звука). Настоящих ошибок нет.
+- **Александр снова заметил самопроизвольное отключение автопереключения** — 4 тоггла за 15:31–15:57 (OFF/ON/OFF/ON). Проверила каждый: **это НЕ рецидив бага залипания от утра 21.08** (тот давал фантомный тоггл от ОДНОГО нажатия спустя часы тишины). Все 4 сегодняшних — genuine: обе физические клавиши Shift нажаты в реальности почти одновременно (8–241мс друг от друга по `[HK] shift:`-логу), удержаны вместе ~180-230мс, и это подтверждено **сырыми битами события от самой macOS** (`bits=0x06` = обе клавиши физически зажаты по данным ОС, не только нашей моделью на алтернации keycode). Между нажатиями обеих клавиш — ноль других событий. 500мс-окно (`1b18f5a`) работает верно: для рецидива старого бага условие `dt ≤ 500ms` не выполнилось бы (застрявшая модель держит первый шифт МНОГО дольше 500мс), а тут выполняется потому что нажатие правда одновременное.
+- ⏳**Открыто, ждёт подтверждения Александра**: сам ли он нажимал L+R Shift в эти 4 момента (возможно машинально/не глядя) — прислал скриншот в момент диагностики, но файл лежал в песочнице `TemporaryItems/NSIRD_screencaptureui_*`, ни `Read`, ни `cp` до него не достали (`find` видит, открыть нельзя — известное ограничение доступа к чужим `NSIRD_*`-папкам). Попросила переслать иначе. **Не чинить код по этой линии, пока не будет либо repro, либо подтверждения, что жест был непреднамеренным** — данные сегодняшнего дня говорят «код сработал верно на реальном двойном нажатии», не «баг».
+
+## v0.11.5 (07.10.2026) — 1310/0/1; plan 013 (replayed keys analysed, chorded comma, first-burst retype), island in terminals, sound off the main thread
+- 🔴**Sound never plays on main.** The event tap lives on the main run loop; `-[NSSound play]` blocked ~10 s inside CoreAudio when the output device failed to start IO (26.09: Dell monitor over DisplayPort, `StartAndWaitForState` 'stop') → tap disabled on timeout, everything typed meanwhile skipped analysis and landed in the already-switched layout. `SoundService.enqueue` dispatches every play to one serial queue (AppKit allows NSSound off main, one thread at a time), drops a cue while the previous `play()` has not returned (`[SND] sound skipped`), logs `[SND] WARNING: sound play slow Nms` over 200 ms. Each play is a COPY of `NSSound(named:)` — the named object is shared, so a correction's volume 0.35 used to leak into the next switch cue. Don't: call NSSound from main again, or queue cues behind a stuck play (they would sound seconds late). Test: `SoundServiceQueueTests`.
+- Island in terminals: on by default (`islandInTerminals`, hidden switch via `defaults`), one terminal list `TerminalApps.bundleIDs`.
+- 🔴**Replayed keys never re-enter our tap.** `replaySink` posts at `.cgAnnotatedSessionEventTap`, DOWNSTREAM of our `.cgSessionEventTap`. Queued keys are analysed in `KeyboardMonitor.drainPendingUserEvents` (shortcut check → `handle(asReplayed)` → suppress → deliver), popping ONE at a time. Don't: drain the queue into a local array first — the island restore's `queueNonEmpty` guard reads the queue, and an empty-looking queue switched the layout under still-queued letters (Codex review).
+- **Chorded comma:** on a layout where kc44 is "." and Shift+kc44 is ",", a plain kc44 followed by a bare Shift tap (down ≤120 ms after, held ≤0.4 s, no key while held) becomes ",". The late Shift is excluded from Single/Double Shift via `HotkeyManager.suppressBareTapForCurrentShiftCycle()` — NOT `markKeyPressed()`, which kills a following L+R Shift. Log `[KM] chord comma: repaired dt=`.
+- **First-burst retype:** 1–2 letters typed ≤80 ms before an EXTERNAL layout change (macOS per-document input source flips after the first key in a just-activated app) are retyped in the new layout — only for the first keyDowns ≤5 s after app activation, and only if AX text before the caret ends with them (unreadable field = old wipe). Log `[KM] first-burst retype: n= dt=`.
+
+## v0.11.4 (23.09.2026) — one copy only, smart case judges the on-screen symbol, replay/modifier fixes, honest texts
+
+Released 23.09 (DMG + appcast + GitHub Release v0.11.4). Tests 1210/0/1, 12 contracts, 44 golden vectors. Field examples in this repo are synthetic — never paste reconstructed owner text here.
+- 🔴**Three copies ran at once (23.09 evening).** Each had a live event tap and corrected text on its own: one Double Shift typed its payload three times interleaved, a retype came out doubled, a hidden copy converted a word the logging copy never saw (its log went to the test log dir). Spawner = our own test suite: `update_helper_contract.sh` case 6 → helper refusal path → async `/usr/bin/open` on a fixture carrying the REAL bundle id, racing the contract's cleanup → LaunchServices sometimes launched a NEW copy of `/Applications` with the test environment (2 of ~30 runs). Fixed twice: the helper's `open()` is a no-op in test mode (and `HelperLog` honours `QSW_LOG_DIR`), and `SingleInstanceLock` — `flock` on `Application Support/QwertySwitcher/instance.lock`, `O_CLOEXEC` so the update helper never inherits it, 5 s wait for relaunches, `.unavailable` starts anyway. Diagnose with `CGGetEventTapList`: exactly one QwertySwitcher tap is the only healthy state. **Don't:** hand LaunchServices a bundle with the real bundle id from any test.
+- Smart case: `observeBoundary` gets the trigger as re-rendered for the TARGET layout (`lastRetypedTrigger`); the Double Shift history and whole-run paths call `SentenceStartTracker.reobserveTrailing`. Field shape: RU comma = Shift+kc44 = "?" in EN → the word converted to "…," but the tracker saw "?" and capitalized the next word.
+- Smart case gap rule (earlier the same day, 4 wrong capitals of 22): `.!?` arms the tracker, an empty `proseBoundary` (Space/Enter/Tab) confirms it, so a word glued to the period stays lowercase («дела.т» — RU "." hit instead of "ю"; «т.е»). Digits among `pendingLeadingSymbols` veto/reset; Backspace with an empty current word resets unless the pending leading symbols are digit-free.
+- Replay correctness (plan 004): smart case/yoficator/snippet skip the 0.2 s post-replacement cooldown; a failed replacement re-queues its trigger `.asOurs` (reaches the app, never re-analyzed); instant `.cancelled` resets its gate; synthetic key events carry no modifier flags (a held Option turned a backspace into delete-word).
+- Release gate (plan 009): `release.sh` refuses a dirty tree (exit 4, `--allow-dirty`) and a red suite (exit 5); `build.sh` and `make-dmg.sh` stamp `QSWSourceCommit` into the bundle's Info.plist; Python ports pinned by `PortParityTests` + `Scripts/research/golden_decisions.json` (`test.sh` runs `--check-golden`).
+- Perf/observability (plan 006): ExceptionsService caches (invalidated on the main queue), DebugLog stamps at CALL time (line dt is evidence again), no dictionary re-sort, NSSpellChecker removed. Tests only in DEBUG builds (plan 001), key-event seam `KeyEventSnapshot` (plan 002), updater re-verifies the staged bundle at use time (plan 003).
+- Texts (plan 010): the privacy policy names the Double Shift clipboard path and both learning stores; About says ≈697 000 words; guards in `privacy_text_contract.sh` + `UITests`.
+- Open: `finishReplacement` sets `isPaused=false` before draining the queue (sub-ms overtake window, not observed); `applyYoficator` logs nothing on success.
+
+## v0.11.3 (20.09.2026) — 942/0/10, 11 контрактов; безусловный остров 0.11.2 откачен, терминал не входит в игровой режим
+
+Источник — жалоба Александра «после 0.11.2 стало хуже» + лог 19.09 16:57 → 20.09 18:17.
+- 🔴**Остров на граничной правке снова за гейтом `pendingUserEvents.isEmpty`** (островные хунки `3d38b9e` откачены, `queuedReplay`/`switchToAndVerify` из `restoreIsland` убраны; коды клавиш и «нфт» оставлены). Поле: ветка `island: restored … path=boundary queued=1` сработала 4 раза, помогла 0. Дважды «uni hub»: английское идёт сериями, остров вернул ru после «uni», «hub» лёг как «руб» (словарное слово → детектор молчит → DS/learned), следом русское слово правилось обратно. Один раз en←ru после «не» при ctx=[en,en], когда владелец уходил в русский. Один раз по смыслу верно, но слово после него было стёрто и набрано заново — подозрение, что проигранная из очереди клавиша рисуется в СТАРОЙ раскладке (`switchToAndVerify` видит только наш TIS, приложение узнаёт о смене асинхронно); не доказано. **Непустая очередь = владелец уже печатает следующее слово; переключать раскладку под пальцами нельзя.** Умный остров = знание о сериях, не более раннее переключение. Структурный тест `IslandTests` снова пинит гейт.
+- **Терминал не входит в GAME по поведению** — `GameModeState.note` выходит сразу при `LanguageDetector.isTerminalBundle`. Поле 20.09 18:10: «рррр» (4 автоповтора) в Ghostty → `game mode ON src=behavior ev=heldKeys`, автоисправление молчало 4,5 мин до второго DS. Гейт `heldKeys` на само слово остался.
+- `WordDictionary.waitUntilPrefixIndexReady` 5 → 60 с (зовут только тесты): индекс строится на `.utility`, при загрузке Мака ≈6 русская половина не успевала, и `InstantLearningBypassTests` («омск») падал не по своей теме.
+- **Открыто, не трогали:** learned `en:hub` (count=3) на границе перебивает настоящее «руб» — в `detect()` learned-хит даёт 80+ и у него нет own-word-гарда, какой есть на instant-пути (`own.wordLevel == 0`). Решение Александра.
+
+## v0.11.2 (19.09.2026) — 943/0/10, 11 контрактов; остров на граничной правке, коды клавиш вернулись в лог, «нфт»
+
+Источник — полевая приёмка 0.11.0/0.11.1 по суточному логу (18.09 10:39 → 19.09 10:51, 42 события правок/DS против 144 в базе 10.09; выборка втрое меньше, поэтому абсолютные пороги приёмки не решают — мерить долями).
+- 🔴**Остров на граничной правке больше не гасится очередью.** Было: `.success` в `processCurrentWord` восстанавливал раскладку только при пустом `pendingUserEvents`, иначе ставил `pendingIslandRestore` и ждал СЛЕДУЮЩЕЙ границы слова. Замер: 8 `island: skipped reason=queueNonEmpty path=boundary` из 8 — ни один не спасён, потому что отложенная попытка приходит через целое слово, набранное в той самой раскладке, которую остров должен был отменить, и упирается в `secondInRun`. Стало: `restoreIsland(path:"boundary", queuedReplay:)` вызывается безусловно, ДО `finishReplacement()`. Это безопасно и в этом весь смысл: очередь держит собственные клавиши владельца (перехвачены `queueIfReplacementActive` ещё до `handleEvent`, то есть не проанализированы), они принадлежат следующему слову и должны отрисоваться в возвращённой раскладке; исправленное слово ушло литеральным Unicode (`TextReplacer.typeStringFast`, virtualKey 0), поэтому ни один символ «в полёте» от раскладки не зависит.
+- **Единственное исключение из «не спать в hot path»:** при `queuedReplay > 0` остров переключает раскладку через `switchToAndVerify`, а не `switchTo` — клавиши полетят через микросекунды и отрисуются в той раскладке, которая реально успела встать. Эта ветка идёт только из завершения замены (свой `DispatchQueue.main.async`), никогда из колбэка CGEventTap, поэтому прежний запрет (3×8 мс сна в колбэке) в силе. Структурный тест `IslandTests` (e) пинит именно это: `switchToAndVerify` достижим только за гейтом `queuedReplay`.
+- В строке `island: restored` появилось `queued=N` — сколько клавиш ждало проигрывания. Это и есть полевой замер, сработал ли фикс.
+- 🔴**Коды клавиш вернулись в подробный лог** (решение Александра 19.09). 0.11.1 убрал их ради приватности и заодно убил word-level анализ: по логу без `key kc=` нельзя ответить, на настоящем слове сработала правка или на мусоре, а это единственный вопрос, ради которого лог существует. Producer в `KeyboardMonitor` + сток-гейт в `DebugLog.log` сняты; защита осталась той, что и была: лог выключен по умолчанию, файл 0600 в каталоге 0700, а «Собрать отчёт» эти строки вырезает (`DiagnosticsExportService.filterReportLog`). Текст приватности в `PrivacyService` и подпись тумблера в «Логи» переписаны честно — приложение не должно врать о себе.
+- **«нфт» → «yan» — ложная правка, подтверждена Александром** (дважды 18.09 в Ghostty). Причина не в остовe: слово без гласной, на русской стороне 0 очков, а `yan` есть в `en_US.txt` (355k слов, скрабблный список). Фикс — `нфт` в `ru_RU.txt`; регрессия `OwnerAbbreviationRegressionTests` держит обе стороны: «нфт» не правится, «ьщвуд» по-прежнему становится «model».
+- **Не сделано намеренно:** чистка `en_US.txt` от подобных трёхбуквенных редкостей (системная работа, отдельная задача), короткие токены (`learned: fired len=2|3` в поле так и не наблюдался — Александр бьёт DS ДО пробела, авто-починке по границе шанса не было).
+
+## v0.11.0 (10.09.2026) — 848+/0/10, 8 контрактов; остров, короткие токены, две таблицы биграмм, opt-in автообновление
+
+Источник — разбор verbose-лога 08–10.09 (1,5 суток): главная боль = пинг-понг раскладки после английского слова в русском тексте (50 обратных правок из 144 событий; после 71 коррекции ru→en следующее русское слово чинили 49 раз). План и спеки после двух ревью deep-reasoner: `~/.claude/plans/graceful-nibbling-lecun.md`. Скрипты полевого анализа (приватно, реконструируют набранный текст): `~/.claude/backups/qsw-field-analysis/`.
+- **Остров** (`Core/IslandPolicy.swift` чистая политика + кольцо 3 слотов `{lang, corrected}` в `LanguageDetector.contextSlots`, пишется в обёртке `detect()` по фактическому результату, `detectResolved` = прежнее тело байт-в-байт): после instant/boundary/DS-via-buffer|history коррекции слова в T при двух предыдущих словах на L без коррекций — на ПРОЗАИЧЕСКОЙ границе (пробел/Enter/Tab) при пустой `pendingUserEvents` раскладка возвращается в L (`island: restored L←T path=…`). 🔴Не на пунктуации (триггер отрисовался бы в L — баг v0.6.12 с обратного конца), не при непустой очереди (реплей сырых CGEvent уехал бы в L), не для DS via run/selection/clipboard/caret. **Терминалы — по настройке `islandInTerminals` (по умолчанию ВКЛ, без тумблера в UI; откат `defaults write tech.sasha.qwertyswitch tech.sasha.qwertyswitch.islandInTerminals -bool false`):** остров не правит текст, только меняет раскладку на границе, а ошибку чинит та же instant/boundary-правка. Поле 25.09 (Ghostty, 29 ч): после 14 одиночных ru→en правок 12 раз следом был возврат в русский, 0 раз продолжение на английском. В терминале строка `island: restored … term=1`. Единый список терминалов — `Core/TerminalApps.swift` (`bundleIDs` + `defaultBlockedBundleIDs`; оба id Alacritty; Ghostty/Warp/VS Code/Cursor по умолчанию не заблокированы). Второе подряд английское слово = ран, restore запрещён. Флаг гасится во всех 7 точках сброса контекста + `undoLastCorrection` (undo сам возвращает `originalLayout`). Принятая цена: после restore контекст ru ⇒ OOV-английское слово следом junk-override не чинит. Структурные guard'ы в `IslandTests`.
+- **Короткие личные токены** (полевой факт: 21 из 38 DS — bsc/okx/xrp/sc/hh): `learnedHitApplies` — порог 3→2 и `!isMixedScript` вместо `isClean` (без гласной bsc/xrp/hh не применялись бы никогда); write-гейт `KeyboardMonitor.learnableCoreDecision` (чистый): для len 2 own-прочтение не должно быть словарным (jy↔он), reserved-пары не учатся, односимвольные нет. Instant остаётся с 4 (отклонено 16.08) — токены чинятся по пробелу. Два legacy-теста TestRunner развёрнуты с обоснованием.
+- **Две таблицы биграмм** (`WordDictionary.buildBigramTables`, `plausibleMinWords = 8`): `possibleBigrams` (≥1 слова, только `isJunk` own-прочтения в junk-override) и `plausibleBigrams` (≥8 слов: `isClean` цели override, `isCleanReading`, junkGate instant-пути). Причина: из 676 латинских биграмм 646 были «возможны» (yj в 10 словах, jd в 7) → «yjds»=«новы» считалось чистым английским, instant молчал 1372 раза против 72 срабатываний. Стенд `false_switch_sim.py` (теперь `PLAUSIBLE_MIN_WORDS`, счёт по словам, дефолт 8): FP на честных корпусах 0, подавление ложных instant 89.2/86.3 % (порог 85), boundary-метрики без изменений, probe-recall полевых слов 4/15 → 11/15; K=13+ проваливает подавление. 🔴Одной таблицей нельзя: рост порога делает `isJunk` агрессивнее (класс порчи 08.09). Побочный эффект: «сдуфк»→clear теперь чинится instant без обучения (фк в 6 словах) — пять тестов развёрнуты, откат защищён проверкой исключений в KeyboardMonitor.
+- **Мелкое по логу:** `shouldExtendToScreen` расширяет стирание только если лишний экранный префикс — буквы того же скрипта (net=-1 07:37: Latin «r» перед «у» съедался); окно Double Shift 450→600 мс (15 тапов в 450–600 мс, 7 повторены удачным DS); verbose-строка `app activated: app=<bundle id>` на каждую активацию (per-app анализ); миграция v2 стирает остатки лицензии из prefs (`licenseFirstSeen.*`).
+- **Автообновление opt-in** — `Services/Updates/` (см. секцию «Обновление установленной копии»: хелпер = наш бинарь `--install-update`, тот же `install.sh` из Resources стейджа, rsync в тот же inode, identity-гейт, откат из бэкапа). Фид `store/downloads/qwertyswitcher/appcast.json` = `{keyId, manifestBase64, signature}` Ed25519 над сырыми байтами манифеста, ключи k1/k2 вшиты (`UpdateKeyRing`), приватники `~/.claude/secrets/qsw_update_ed25519_{k1,k2}.key`; anti-rollback по build; стейдж 0700 + лимиты + `codesign --strict` + DR == установленному. Оба тумблера по умолчанию ВЫКЛ, вопрос один раз при первом запуске. Релиз: `./Scripts/release.sh k1` (DMG+zip+appcast → store) + `gh release create`. Витрина/README честно: «в сеть не ходит, пока не включите проверку обновлений» (контракт `privacy_text_contract.sh`). ⚠️Главный неизвестный — App Management macOS при записи в бандл, поставленный из карантинного DMG (у мамы/Дани): EPERM → режим «только уведомить».
+- `docs/KEYRAY_CLEANROOM.md` удалён перед публичностью репо (реверс чужого бинарника).
+- **Выпуск 10.09 (коммиты `37745c5`…`3348c2f`):** `./Scripts/release.sh k1` → universal DMG + zip + подписанный appcast на витрине, GitHub Release v0.11.0, репо PUBLIC. **e2e апдейтера пройден на Маке владельца по авто-пути** (простой 120 с → `installing build 38` → `install.sh exit=0` → inode 313981072 прежний → перезапуск новой версией с `perms accessibility=true`); подделанный манифест → `check failed: badSignature`; живой откат из бэкапа наблюдён (`invalid Info.plist` → `rolled back`). Три полевых фикса, которых не видели ни тесты, ни ревью: (1) `UpdateStager` жил локальной переменной, замыкание загрузки с `[weak self]` обнулялось до прихода zip — тишина в «Загружаю» (структурный гард в `UpdatesTests`); (2) заблокированный экран: `loginwindow` держит secure input весь сеанс → автоустановка откладывалась часами → `UpdatePolicy.shouldInstallNow(screenLocked:)` через `ScreenLockState` (CGSessionCopyCurrentDictionary) + verbose `install deferred: idle=… secureInput=… screenLocked=…`; (3) 🔴`rsync -a` quick-check (размер + секунда mtime) пропустил перепечатанный бинарник того же размера — Info.plist заменился, бинарник нет → «invalid Info.plist» → откат; теперь `rsync -a --checksum --delete` в `install.sh`, контракте и откате хелпера. **Don't:** `install.sh` без `--checksum`; AppleScript `quit` не срабатывает, пока на экране модальный NSAlert — хелпер на него не полагается.
+
+## v0.10.0 (08.09.2026) — 685/0/10; подписка, триал и ключи СНЯТЫ — приложение бесплатное и офлайн, вместо лицензии блок ссылок автора
+
+Решение владельца 08.09.2026 («убери платную подписку, давай лучше сделаем маленький рекламный блок»). Коммит исполнителя `4f2b3d8` → слияние `b5763d5`. Установлена 08.09, витрина/портфолио переведены на «бесплатно», DMG 0.10.0 на витрине.
+- **Удалены целиком:** `Services/LicenseService.swift`, `Services/DeviceIdentity.swift` (hwid, `KeychainStore`), `UI/Views/LicenseView.swift`; гейты `isEntitled` сняты в `canAutoCorrect`, сниппетах, `swapLastWordInBuffer`, всех путях Double Shift; `SwitchBlockReason` без `.subscriptionExpired`. 🔴**Приложение больше не ходит в сеть вообще** — `grep -rn 'URLSession\|nip.io' Sources` = 0, `PrivacyInfo.xcprivacy` снова с пустым `NSPrivacyCollectedDataTypes` (контракт `secret_scan_contract.sh` теперь требует ОТСУТСТВИЯ `DeviceID` в манифесте). Тексты About/PrivacyService/аудит-лог AppDelegate — «ввод локально, сетевых вызовов нет».
+- **Блок автора** `UI/Views/AuthorLinksView.swift` (окно 400×360 из футера «Автор и проекты», хостится `StatusBarController.openAuthorLinks`): «Портфолио: просто» → `shulgin.is-a.dev/store/prosto/`, «Портфолио: профи» → `shulgin.is-a.dev/`, «Витрина» → `shulgin.is-a.dev/store/`, «Написать в Telegram» → `t.me/Aleksandr_NFA`; ссылки в `static let links`, структурный тест `AuthorLinksViewTests` проверяет все четыре URL и хэндл. Атрибуция по правилу владельца: Aleksandr_NFA + GitHub Sanexxxx777.
+- ⛔**Сервер лицензий ОСТАНОВЛЕН 08.09 по команде Александра** (процесс остановлен, порт закрыт, код сохранён; оставшаяся nginx-локация отдаёт 502 — снять при следующем касании конфига; порядок команд и откат — в памяти `project_qwerty_payments_next_session`). Следствие: старые сборки 0.8.x–0.9.x у Дани и на мамином Маке через 3 дня офлайн-окна перестанут корректировать — им нужен DMG 0.10.0 с витрины (Дане прислать, маму Александр обновляет сам). Откат: `pm2 start qsw-license`.
+- Тесты 711 → 685 (−26: три лицензионных сьюта и пять `guard isEntitled` в интеграционных тестах); `swift build` всего таргета чист.
+
+## v0.9.2 (08.09.2026) — 711/0/10; игровой режим без вечного вердикта, Bloom подтверждается точно, ведущая буква не становится запятой
+
+Коммиты `d8e75b6` (игровой режим) + `bb33a3f` (детектор) → слияния `014eb14`/`158b2ba` → бамп `3c13b5d`. Источник — verbose-лог владельца 07–08.09 (19,7K строк), разбор → память `project_qwerty_switch` (секция 08.09). Установлена 08.09 09:30 (inode 313981072 цел, `v0.9.2 started`, perms true); витрина/DMG НЕ обновлены — ждут слова владельца.
+- 🔴**Персист поведенческого вердикта игры (`gameModeAuto`) УДАЛЁН.** Brave получил его 06.09 и 1,5 суток жил с выключенной коррекцией и мёртвым Double Shift (17 нажатий в пустоту). Улика приходит за секунды в каждой сессии (цена пропуска ≈ 0), ложный вечный вердикт убивает приложение целиком. `load()` одноразово стирает старый ключ; `recognizedGames` = только текущая сессия; `deny` как был. **Don't:** не возвращать персист «для скорости узнавания» — узнавание и так с первой улики.
+- **Выход по прозе: 2 словарных слова ≥4 букв за 30с (было 4), словарность считается в ЛЮБОЙ из двух активных раскладок, граница = пробел/Enter/Tab** (`handleWordBoundary(proseBoundary:)`). Полевой факт: 13 русских слов в EN-раскладке под GAME — own reading словарным не бывает ровно тогда, когда свитчер нужен, старый выход был недостижим структурно.
+- **Second-press хатч Double Shift:** первое нажатие под GAME блокируется с логом `[HK] doubleShift blocked: game mode — press again within 8s to release`, второе в 8с снимает режим (`[GM] game mode OFF … reason=doubleShift`) и выполняет жест (`GameModeState.noteDoubleShiftWhileActive`). Профильная блокировка хоткеев (`blockHotkeys` в per-app профиле) — по-прежнему молча; в `HotkeyManager` единственный прямой вызов `areHotkeysBlockedForCurrentApp()` живёт в `profileBlocksHotkeys()` (структурный тест).
+- **`longRun`-улика только из чистых букв** (`InputBuffer.isGameControlRun`): ран с цифрой, `/`, `-`, `=` или Cyrillic-only клавишей (`. , ; [ ] ' \``) — это URL/путь/токен/пароль, не игра.
+- 🔴**Bloom-фильтр давал ложные словарные попадания на hot-path** (0,5 % по конструкции): за 1,5 суток три коррекции русских опечаток в латинский мусор (`оптимизированнро`→`jgnbvbpbhjdfyyhj`, `пропрцию`→`ghjghwb.`, instant `указщыва`→`erfposdf`) — все три строки проходят живой `en.ssbf`, ни одной нет в `en_US.txt`. Фикс — `isConfirmedWord` в `LanguageDetector.scoreWord` и `InstantCorrectionAnalyzer.wordLevelScore`. Python-стенды уже считали точным `set` — порт менять не пришлось, числа `false_switch_sim.py` байт-в-байт прежние (3+3 / OOV en 46% / nonling 0/624).
+- **`projections()` отбрасывает чтение, где первая набранная БУКВА становится ведущим знаком** (`боут`→`,jen`: `,`=«б», «jen» словарное). Зеркало (en-typed `,jn`→«бот») не тронуто; порт `detect_boundary` в `false_switch_sim.py` синхронизирован. Побочный эффект, принятый сознательно: «беру» под en-контекстом теперь `.noSwitch` (раньше `,the`) — тест допускал оба исхода.
+- Не баг (проверено по логу): 4 тоггла L+R Shift 07.09 честные (bits=0x06, dt 22–82мс) — реакция владельца на ложные коррекции; DS-via-run с len<буфера = конверсия символьного рана `00;`→`00$` после цифровой границы.
+- ⏳**Полевая приёмка за владельцем:** в Brave/Safari коррекция и DS работают с первого раза; в логе 0 строк `src=persisted`; при ложном GAME — `reason=prose` после 2 слов или `reason=doubleShift` после второго DS; 0 коррекций `ru→en` в латинский мусор. После приёмки выключить verbose (`defaults write tech.sasha.qwertyswitch tech.sasha.qwertyswitch.verboseLog -bool false`).
+
+## v0.9.1 (01.09.2026) — 668/0/10; вкладка «Ещё» свёрнута в шесть блоков
+
+Коммит `89863a8`. Вкладка была сплошной колонкой всех переключателей: на ноутбучном экране нижняя половина вместе с футером уходила за край, поиск одной настройки требовал прочесть все.
+- **`UI/Components/CollapsibleSection.swift`** — заголовок-кнопка (иконка · название · сводка состояния · шеврон) над раскрывающимся контентом; метрики те же, что у `SettingToggleRow` (20pt колонка иконки, `Space.md`/`Space.sm`), чтобы закрытая группа и открытая строка читались как одна семья. Сводка на закрытом заголовке («включено 4 из 5», «мелодия «Pop»») — состояние группы видно не раскрывая. Раскрытый заголовок получает подложку `bgInput` + акцентную кромку 3pt слева: это единственная управляющая строка в карточке, без выделения она читается как первая строка списка настроек (замечание владельца 01.09).
+- 🔴**Раскрытие НЕ анимировать внутри SwiftUI.** Окно подгоняется под контент (`MainView` заканчивается `.fixedSize`), поэтому анимированная высота шлёт AppKit новый фрейм на КАЖДОМ тике анимации: `SmoothResizeWindow` запускает свою 0.24s на первом кадре, а остальные (пока `isAnimatingResize`) идут через `super.setFrame` скачками — это и есть «дёрганое, резко увеличивается» из полевого отчёта. Одно мгновенное изменение layout = один ресайз = одна плавная анимация окна. Анимировать можно только то, что не меняет высоту (поворот шеврона, подложка hover).
+- 🔴**Не оборачивать вкладки в `ScrollView` с высотой из `PreferenceKey`.** Попытка ограничить окно высотой экрана таким способом (`HeightCappedScroll`, снята в тот же день) совпала с тремя падениями `BUG IN CLIENT OF LIBMALLOC: memory corruption` внутри SwiftUI (`Material.ResolvedMaterial.platformLayers`, `NSHostingView.swiftui_addManagedSubview`) на macOS 27 beta. Причинность не доказана — падения ловились и после снятия обёртки, все три раза сразу после обхода окна через System Events. Если крэши повторятся у владельца БЕЗ AX-автоматизации — искать здесь.
+- Группы: Исправления · Игровой режим · Звук · Программа · Логи · Резервная копия. Состояние раскрытия живёт в `@State` на `MainView` (переживает смену вкладок, сбрасывается на «всё закрыто» с новым окном — это и есть компактный вид, в котором вкладку положено встречать).
+
+## v0.9.0 (01.09.2026) — 668/0/10; игровой режим + Keychain выпилен из триала + фиксы обучения
+
+Коммиты `9456c4c`(фича+фиксы) → `f96ba71`(лицензия без Keychain) → бамп. Дизайн — ТОЛЬКО по спекам `~/.claude/plans/qwerty-gamemode-spec-20260831.md` + `~/.claude/plans/qwerty-bugfixes-diag-20260831.md` (не переизобретать).
+- **GameModeState** (`Core/GameModeState.swift`): детект = Info.plist (`*-games`/LSSupportsGameMode/GCSupportsGameMode/`steamapps` в пути, кэш по bundleID) + поведение (run≥32 без границы слова ИЛИ ≥3 автоповтора в слове). Вход по 1 улике; выход — 4 словарных слова ≥4 букв за 30с; ~~персист вердикта при ≥3 уликах (`gameModeAuto`, cap 50)~~ — СНЯТ в 0.9.2 (убил Brave, см. секцию v0.9.2); `deny` («Это не игра») — навсегда. Гейт — одна точка `canAutoCorrect && !gameActive` + обёртка `hotkeysBlocked()` (все 5 вызовов `areHotkeysBlockedForCurrentApp` только через неё). 🔴«не-AX ⇒ игра» ЗАПРЕЩЕНО (Spotlight/терминалы дают тот же `careful pacing`). 🔴Модель ввода (buffer/run/автоповторы) в игре НЕ выбрасывать — «модель == экран». Game Mode API macOS публичного НЕТ.
+- **Санити-кап автокоррекции 20 нажатий** (`InstantCorrectionAnalyzer.maxLength` + гейт в processCurrentWord ДО `detect()` — порт false_switch_sim не менять). DS сознательно не капится (легитимный len=21 по AX-выделению).
+- **Keychain выпилен из firstseen** (решение Александра 01.09): self-signed подпись меняется каждой сборкой → парольные диалоги у владельца и покупателей при апдейтах; ценность мала (офлайн 3 дня + сервер помнит hwid). Якорь = файл лицензии + UserDefaults. `KeychainStore` остался ТОЛЬКО для fallback-UUID: read с `kSecUseAuthenticationUISkip` (по SDK-заголовку флаг работает только в SecItemCopyMatching), write через тихий probe. 🔴Тесты в реальную связку юзера НЕ писать (тесты фикса 27.08 писали — это был источник части диалогов; вычищено `security delete-generic-password -s tech.sasha.qwertyswitch.firstseen`).
+- **Фиксы обучения:** inapplicable теперь проверяет own-сторону в sourceLang (был target/target, лог-онли); backspace сбрасывает `instantCorrectionGate` (boundary-страховка после ручной правки неверного instant); `learnedWordsProvider` — один снапшот `autoLearned` + `promotedNonDictionaryKeys` (был hot-path регресс: N чтений UserDefaults на слово, 0.67мс→7.2мс при росте store; 135/142 словарных промоушенов механизма C — no-op по равенству формул `max(dictionaryScore, 80+min(20,len*2))`).
+- ⚠️4 поведенческих теста (heldKeys/кап/backspace/inapplicable) скипаются на macOS 27 beta (`syntheticKeyboardEventsAreSafe`) — реальный red/green даст не-бета macOS или поле.
+- ⏳Полевая приёмка: `[GM] game mode ON` в игре, ноль correction/DS за сессию, `game mode OFF reason=prose` в чате; подтвердить `keyboardEventAutorepeat` (фолбэк dt<120мс — в спеке, не реализован).
+
+## v0.8.0 (25.08.2026) — 611/0/6; обучение на паттернах поведения (механизмы A/B/C)
+
+Коммиты `47018ea`(волна 1: модули) → `75e1c26`(волна 2: интеграция) → `5b2e99a`(лог) → `0109cab`(волна 3: UI) → `b8450f6`(бамп). Дизайн — ТОЛЬКО по спеке `~/.claude/plans/qwerty-learning-spec-20260824.md` (22 правки адверсариального ревью уже внесены — не переизобретать по памяти). Витрина обновлена и запушена (по прямой команде Александра).
+
+- **Механизм A (DS-обучение):** пара lang:слово после ≥2 Double Shift-починок в окне 30 дней чинится сама. Instant-путь: байпас junkGate/floor/margin, но `ownIsWord`(wordLevel==0) и mixedScript НЕ байпасятся (`InstantCorrectionAnalyzer.evaluate(learnedActive:)`). Boundary: learnedHit в цикле кандидатов `detect()` = inDictionary + score `max(dict, 80+min(20,len*2))`, len≥3, сам хит гейтится JunkMeter.
+- **Решение владельца: learned-слова обходят терминальный блок junk-override** — флагманский кейс «сдуфк»→clear живёт именно в терминале; изучено и принято сознательно, НЕ «чинить» как баг.
+- **Механизм B (откат=исключение):** главный хук — `undoLastCorrection` (Cmd+Opt+Z), НЕ только DS; classify на всех 6 путях Double Shift (`CorrectionFeedbackTracker`, revert ≤8с / toggle ≤10с одноразовый слот / revert-of-revert ≤15с снимает исключение). При revert learned-коррекции — `learnException` + `unlearn` в обоих store.
+- **Механизм C (личный частотник):** bump подтверждённых слов, count≥5 → словарный статус boundary-only. Anti-#19: проекция на другую раскладку словарна/learned → НЕ бампать (отказ гейта ≠ подтверждение). Скоринговый буст сознательно ВЫРЕЗАН ревью (+10==collisionGap — тот же класс бага, что contextBias 15→5).
+- **Privacy-инварианты (Don't):** слова из store НИКОГДА не в DebugLog (только lang/len/count — тест на это есть); механизм C НЕ входит в SettingsBackupService (ни поля, ни кода — структурно, тест `backup has no Mechanism C field`); count=1 не персистится (только в памяти).
+- **Тумблер «Учиться на моих исправлениях»** (MainView, default ON): запись и instant-путь перечитывают `prefsService.isLearningEnabled` живьём, но boundary-провайдер зависит от `store.isEnabled` — потому `didSet` в MainViewModel обязан звать `KeyboardMonitor.setLearningEnabled()`. UI/бэкап получают ЖИВЫЕ store из KeyboardMonitor (`let`, не private) — второй `LearnedWordsStore()` был бы гоняющейся копией.
+- **Персист вне hot path:** dirty-flag + flush-таймер 30с + `applicationWillTerminate`. Ключи UserDefaults: `learnedWords` (cap 300), `personalFreq` (cap 2000).
+- **Гарантия дефолта:** при пустых store все три research-стенда байт-в-байт с базой (проверено stash-сравнением на приёмке). Непокрытый тестом угол: ветка «resynced → skip» в `normalizedLearnableCore` (проверена ревью, не изолированным тестом — требует живого CGEvent).
+
+## v0.6.16 (19.08.2026) — 522/0/1; verified erase: оверлеи Spotlight/Siri AI больше не теряют backspace вслепую
+
+Полевой рецидив 19.08 на 0.6.15 (видео+лог 07:20 сверены покадрово): оверлей «Siri AI» (новый Spotlight macOS 27) терял ровно 1 backspace на КАЖДУЮ серию **даже при careful 15мс** — гипотеза темпа (фикс 0.6.15) неверна. Payload не теряется никогда; выживает крайняя левая буква («gпри», «пghbdtn»). **Причина потери НЕ установлена** — три живые гипотезы (автокомплит вне AX-value / просыпание процесса на первом postToPid-событии / переключение раскладки перед серией); фикс обходит все три.
+- **`sendBackspacesVerified` (TextReplacer, только оверлеи):** backspace по одному, между каждым читается `kAXSelectedTextRange` (новый `AXTextSelectionService.selectionRange` — БЕЗ требования нулевой длины; `caretOffset` не тронут, на его контракт завязаны valueAndCaret/lengthAndCaret); досыл только при доказанном «каретка не сдвинулась», потолок count+2, no-progress×2→stop, бюджет 120мс (AX замолчал → слепой добив остатка), каретка 0→stop. Атомарность цела: единственная проверка cancellation ДО первого события, после — всегда `return true`. Payload сознательно не верифицируется (ретрай дублирует символы). Не-оверлейный путь байт-в-байт прежний.
+- **Асимметричный overlay-guard:** mismatch отменяет замену только при `ax < model` (стёрли бы чужой текст); `ax > model` → лог `overlay screen longer than model` и продолжаем — раньше молчаливая отмена ОБОИХ направлений убивала DS навсегда (5 подряд `overlay replacement skipped` в логе 07:20).
+- **Ресинк по свежести, не по происхождению:** ремень `source == "buffer"` (KeyboardMonitor:1101) выбрасывал свежее измерение экрана, когда DS шёл через историю (а после успешного DS буфер чист → ВСЕ повторы шли source=history) — это и было залипание. Теперь `shouldClampToScreen` (короче — всегда) + `shouldExtendToScreen` (длиннее — только суффикс-гейт по `pendingRunResyncWord` + дельта ≤2), pure static func, юнит-тесты без AX.
+- ⚠️При ресинке `net=-1` — ЗАКОННОЕ значение (стёрли экранных 6, напечатали модельных 5), не сигнал бага — оговорка к правилу «net обязан быть 0».
+- Лог-маркеры: `erase verified: requested=N sent=M extra=K` (extra≥1 = дефект пойман и дожат), `overlay selection before erase: loc= len=` (полевые данные по гипотезе автокомплита).
+- **Don't:** не верифицировать payload; не добавлять isCancelled в цикл verified erase; не возвращать симметричную отмену в overlay-guard; не поднимать maxExtra выше 2 (каждый лишний backspace при неверной гипотезе = съеденный символ пользователя).
+
+## v0.6.15 (16.08.2026) — 501/0/1; мусорность прочтения стала сигналом, словари отремонтированы
+
+**Принцип владельца:** «русский коряво написан ⇒ я пишу на английском — программа должна это понимать». Правило «победитель обязан быть в словаре» блокировало ЛЮБОЕ внесловарное целевое слово (имена, жаргон, редкие формы не чинились никогда).
+- **Junk-override** (`Core/JunkMeter.swift` + `LanguageDetector.detect`): junk = нет гласной ИЛИ биграмма не встречается ни в одном словарном слове языка (`WordDictionary.possibleBigrams`, строится вместе с префикс-индексом; nil ⇒ override молчит); clean = обратное. Две точки входа: ветка пустых кандидатов и место бывшего `guard best.inDictionary`. Гейты (все обязательны, найдены адверсариальным ревью ДО кода): own core существует (**`don't`/`config.yml` дают nil-core — это reject, не «мусор»**), own внесловарный и junk, len own≥3 / target≥4, **контекст НЕ свой язык явно** (иначе `tmp`/`cfg` в английском потоке улетали бы в кириллицу), target clean и не mixed-script, арбитраж проекций (пунктуация владельца не съедается: «src.» остаётся с точкой), **выключен в терминалах/редакторах** (`ax=none` — ошибку там нечем починить; bundle id из кеша по `didActivateApplicationNotification`, ⚠️НЕ `NSWorkspace` в hot path). Под `--test` кеш принудительно nil — иначе терминал, запустивший тесты, блокировал бы все фикстуры.
+- **Ремонт словарей** (`Scripts/research/dict_repair.py`, бэкап оригиналов там же): ru_RU.txt **не содержал базовых форм** («последний», «случилось», «поговорить» — 24% частотного топ-10000 вне словаря), зато содержал обрубки и 775 двухбуквенных пар. Удалены все записи len≤2 и len 3-5 «нет в частотном 50K И отвергнуто NSSpellChecker» (ru −14170, en −13277), добавлены частотные формы ru (+9823) и техно-токены/сокращения обоих языков (`http`, `psql`, `cfg`, `спс`, `крч` — как легитимные слова ввода: словарная запись own-прочтения глушит и словарный путь, и override).
+- **Конфликтная пара «ща»/`of` — с обратного конца:** own русское словарное слово против выигрывающего по очкам английского. Блок 0.6.14 эту сторону не ловит (он ключуется по `best.core`, а таблица — по русскому слову). При nil-контексте оставляем набранное; ru-контекст закрыт native lock.
+- **Оверлеи всегда получают careful-пейсинг** (`TextReplacer`): полевые «ccccara»/«cchr»/«ccfhf» шли со строкой `overlay pacing: fast axReadable=true` — оверлей глотает 1 backspace на 2.5мс даже при читаемом AX, а предохранитель model/screen молчит, потому что дрейф происходит ВО ВРЕМЯ доставки. ⚠️Don't: не возвращать развилку пейсинга по `axReadable` для оверлеев.
+- **Числа стенда** (`Scripts/research/false_switch_sim.py` — порт detect, 3 замера): ложные смены 8+5 → **3+3**; nonling FP (техно-токены/CLI/сокращения) 24 → **0**; dict-recall ru 75% → **100%**; OOV-цели en 0% → **46%**. ⚠️Порт и Swift обязаны меняться синхронно.
+- **`minLength` мгновенной коррекции 4→3 — ОТКЛОНЁН по числам** (`Scripts/research/instant_minlen_sim.py`): nonling чист (0/276), но честный английский набор даёт 4 FP, среди них реальные `duh` и `cctv`. Выигрыш был бы ~1 буква на 80-86% слов — не окупает порчу. ⚠️Защита «bbc→иис» теперь держится ТОЛЬКО на записи `bbc` в en_US.txt («иис» жива как префикс «иисус») — из словаря не удалять.
+- MainView переведён на токены `Space`/`Radius` (29 замен, значения бит-в-бит).
+
+## v0.6.14 (15.08.2026) — 474/0/1; конфликтные пары решаются контекстом, не списком
+
+Статический размен «vs/kb/dj в `twoLetterWords["en"]` ⇒ «мы»/«ли»/«во» не чинятся никогда» владельцем ОТКЛОНЁН как костыль. Вместо него `conflictPairs` (`LanguageDetector.swift`, ru-слово → en-токен, пополняемая): решение по сигналам — контекст en → `.noSwitch` (латиница живёт), контекст ru → конвертируем, контекста нет → **капитализация первой клавиши** (Shift = «Vs» → начало предложения → «Мы»; строчное → пропуск, DS чинит).
+⚠️**AX-проба текста перед кареткой для nil-контекста НЕ реализована сознательно:** `detect` выполняется СИНХРОННО в CGEventTap-callback (`processCurrentWord` ← `handleEvent` ← `eventTapCallback`; порог WARNING 15мс, AX-round-trip до 0.15с), а единственная существующая async-точка (`TextReplacer.replacementQueue`) работает ПОСЛЕ финализации решения и на ветке `.noSwitch` не достигается вовсе. Нужен рефакторинг «отложенное решение», не переиспользование. Идея записана как кандидат — она же закроет строчное «мы» первым словом.
+Верификация числом: `scratchpad/false_switch_sim.py` — ложные смены 8+5 (было 8+6), vs/kb/dj исчезли из обоих направлений.
+
+## v0.6.13 (15.08.2026) — 463/0/1; ложные и несработавшие смены, волна 2
+
+- 🔴**Словари замусорены на длине 2: en_US.txt — ВСЕ 650 пар (aa..zy), ru_RU.txt — 774.** Следствия: двухбуквенные русские слова не корректировались НИКОГДА («yf» словарное → структурный потолок против incumbentGap: max 118 < 119 при en-контексте), а мусор конвертировался («zx»→«яч»). Фикс: `scoreWord` на len==2 НЕ доверяет Bloom — закрытые списки `twoLetterWords` (по прецеденту oneLetterWords). ⚠️vs/kb/dj в en-списке сознательно (живые токены владельца) ⇒ «мы»/«ли»/«во» — принятый пропуск, чинится DS. 3-буквенный слой словаря чист.
+- **Native-context incumbent lock** (`detect`): словарное слово ТЕКУЩЕЙ раскладки при УЖЕ установленном контексте того же языка непробиваемо ничем — без этого частотный бонус+биграммы en пробивали ров: «руку»→here, «рук»→her, «беру»→the, «берут»→then. Нейтральный/чужой контекст не затронут (слепая печать жива).
+- **Однобуквенный гейт по контексту**: одинокая буква флипается только если контекст НЕ противоположный язык явно (все 7 багов симулятора — d/c/e/b/f/j/r при en-контексте → в/с/у/и/а/о/к; у своей стороны 0 баллов, рва нет). Нейтральный контекст сознательно пропущен — это полевая фича 0.6.8 («b»+space→«и»), тест :2989 остался зелёным.
+- **Словари пополнены**: ru += баг бага багам багами багах баге баги багов багу бля оу (кейс «баги»→«,fub»: родное слово вне словаря проигрывало en-редкости fub); en += bbc ceo abi. Имена (эми/эдди/хэнк/брук/rene/iet) — сознательный скоуп-аут.
+- **Верификация числом**: порт detect в `scratchpad/false_switch_sim.py` (⚠️маппинг в старом instant_corr_research.py БИТЫЙ — zip теряет «ё») — ложные смены на топ-10000×2: 23+13 → 8+6, остаток только имена/шум корпуса.
+
+## v0.6.12 (15.08.2026) — 445 passed / 0 failed / 1 skipped; иконка «Й→Q»; 5 фиксов
+
+- **Иконка**: «Й→Q» на оранжевом (утверждена Александром; исходник рендера `promo/icon-candidates-20260815/icon.html?v=6`, headless Chrome → PNG → iconutil). Вариации «с большим смыслом» отвергнуты — базовая лучше.
+- **Хвостовой знак-триггер конвертируется вместе со словом**: `,`/`?`/`&` рендерились в ИСХОДНОЙ раскладке («Да,» в EN давало «Да?»). Теперь `BufferedKeystroke` триггера хранится и пересчитывается `characterForKeycode` на ЦЕЛЕВОЙ раскладке — в processCurrentWord, undo-записи и в `lastCompletedWord` (DS через историю тоже). При `layoutSwitchFailed` сознательно исходный символ — экран не менялся.
+- **Оверлеи (Spotlight-класс «ccccara»)**: измеренная при run check длина экрана (`pendingRunResync`) теперь применяется к числу backspace в scored-пути (раньше выбрасывалась → дрейф компаундился +1/жест); при расхождении model/ax в оверлее замена отменяется (`overlay replacement skipped`); лог пейсинга для оверлеев больше не подавлен (`overlay pacing: fast|careful`).
+- **Cmd+Option+Shift+V (БЫЛ Cmd+Shift+V) — вставка без форматирования**: хоткей перенесён, потому что Cmd+Shift+V — стандартный хоткей клипборд-менеджеров (у Александра PasteNow открывается им; наш перехват делал PasteNow мёртвым). Плюс 4 фикса пути: `invalidateEditingContext(reason:"paste-no-format")` безусловно (раньше вставка не сбрасывала модель → пробел стирал хвост вставленного); `markKeyPressed` в ветке (проглоченный V выглядел чистым Shift-tap → ложный DS); пастборд не подменяется, если в нём только plain (+restore 0.15→0.4с); DebugLog-строки в пути (раньше 0).
+- **Ранняя мгновенная коррекция**: снят n-gram пре-фильтр (блокировал 10.8% на 4-й букве; спеллчекер из wordLevelScore давно убран — экономить нечего), candidateFloor 40→35, ambiguous-гейт больше НЕ латчится на всё слово — блокирует только пока спорная клавиша в последних 2 нажатиях (кейс «key.»→«луню» по-прежнему закрыт; «работа»=hf,jnf теперь чинится на 5-й букве). Числа: RU-в-EN до конца слова 59→78% слов. ⚠️`minLength 4→3` НЕ делать, пока ru_RU.txt не вычищен от обрубков («прив», «сдел», «рабо» — реальные записи словаря; из-за них bbc→иис даёт 2.2% FP). Калибровочный корпусный тест «0 FP» — тавтология для словарных слов, реальный риск живёт вне словаря.
+- **Словарь**: `qwerty` добавлен в en_US.txt (не переводилось «своё название» — победитель обязан быть словарным).
+- ⏳Полевой verify за Александром: Spotlight-артефакты («cchr»), «Да,» из EN-раскладки, PasteNow по Cmd+Shift+V, ранняя коррекция «работы».
+
+## 🔴 Ответ AX-записи — не доказательство (13.08.2026, v0.6.11)
+
+`AXUIElementSetAttributeValue` возвращает `.success`, когда приложение **приняло сообщение**, а не когда текст изменился. Electron/Chromium-поля и терминалы штатно отвечают успехом и оставляют выделение нетронутым — из-за этого Double Shift на выделении не работал, а лог рапортовал `doubleShift via AX selection` на каждое нажатие. Признак в логе: повторяющийся успех при неизменном состоянии (`target=ru` три раза подряд там, где после замены обязано стать `en`).
+Поэтому `convertAXSelection` читает выделение обратно и считает неизменившийся текст провалом. Провал записи ОТЛИЧАЕТСЯ от «выделения нет» (`AXSelectionOutcome`): живое выделение никогда не отдаётся буферу/истории — после выделения мышью там лежит несвязанное старое слово, и подмена его вместо выделенного хуже бездействия; такой случай идёт прямо в clipboard-пробу.
+**Don't:** не возвращать `Bool` из этого пути (теряется разница между «нет выделения» и «не смогли записать»); не судить об успехе AX-записи по её коду возврата — ни здесь, ни в `replaceRange`. Инварианты держит `DoubleShiftSelectionGuardTests` (живой AX в харнессе недоступен, guard читает исходник).
+
+### TODO
+- **high** — полевая приёмка 0.11.0 (1,5 суток verbose с 10.09 12:53): пары обратной правки 50 → ≤15, ручных возвратов раскладки 16 → ≤5, DS на токенах ≤3 букв 21 → ≤8, ложных instant ru→en (риск K=8) 0, `net≠0` 0, есть `island: restored` вне терминалов. Скрипты и базовые числа — `~/.claude/backups/qsw-field-analysis/`. После приёмки verbose OFF. Провал K=8 → `WordDictionary.plausibleMinWords` обратно 1 (стенд: K=1 = прежние числа).
+- **high** — App Management на копии из DMG (мама/Даня): автообновление ни разу не запускалось на бандле с карантинным provenance; худший случай = «Не могу обновить здесь» (notify-only). Первый их отчёт закрывает вопрос; при EPERM — инструкция «Системные настройки → Управление приложениями».
+- **medium** — `Scripts/e2e-local-feed.sh`: перед serve удалить `updates.lastCheckAt` и перезапустить приложение (проверка раз в сутки), после теста `reset` + `install.sh` настоящей сборки + `lastSeenBuild` обратно; фиктивная сборка обязана отличаться по СОДЕРЖИМОМУ бинарника или полагаться на `--checksum` (уже стоит).
+- **low** — стейджи e2e (`~/Library/Application Support/QwertySwitcher/updates/*`) чистятся при запуске старше 1 ч — проверить, что чистка реально сработала после первого перезапуска >1 ч.
+- ✅~~оплата / офлайн-триал / якорь первого запуска / Robokassa~~ — контур снят целиком в 0.10.0 (приложение бесплатное); сервер лицензий остановлен 08.09. **low** — снять nginx-location `/qsw/` из конфига developer-contact-api на S1 при следующем касании nginx (сейчас 502, не мешает).
+- **high** — полевой verify 0.9.2 (установлена 08.09 09:30): Brave/Safari чинят и DS с первого раза; `grep -c "src=persisted"` = 0; ложных `correction: ru→en` в мусор = 0; при GAME — `reason=prose|doubleShift`. Витрина/DMG 0.9.2 — только по слову владельца (у Дани и на мамином Маке стоит 0.8.0/0.9.x с той же дырой персиста). После приёмки — verbose OFF.
+- **high** — полевой verify 0.8.0 (обучение): дождаться в debug.log цепочку `learned: recorded` → `learned: promoted` → `learned: fired path=…` на реальных DS-починках Александра; после первых fired — снять долю срабатываний и ложных (revert → exception). На 25.08 15:50 поле ещё не началось (0.8.0 только установлена).
+- ✅~~принцип «мусорность прочтения = сигнал»~~ — сделано в 0.6.15 (junk-override, см. секцию выше).
+- **medium** — L+R Shift комбо: 500мс-окно (21.08, см. секцию «Пост-0.6.17») лечит симптом залипания, не причину. Root cause — сверить `flags.rawValue` device-dependent биты в `[HK] shift: ... bits=0xNN` (уже логируются) с физическим состоянием клавиш по полевым данным; если совпадают — `ShiftStateTracker.transition` может читать их напрямую вместо угадывания по keycode, залипание станет невозможным в принципе. Ждёт поля, не гадать заранее.
+- **high** — instant-коррекция (mid-word) в терминалах не приглушена: полевой каскад 16.08 «/com[act» начался с `instant correction en→ru len=3` в Ghostty, которая увела раскладку в ru посреди латинского набора. Junk-override там уже выключен, instant-путь — нет. Нужны числа (какая доля instant-срабатываний в терминалах ложная), потом решение.
+- **medium** — мусор словарей вычищен не весь: остались записи len≥6 (критерий чистки их не трогал) и класс «слово есть в частотном списке, но это имя собственное/иностранщина». Полные списки удалённого — `Scripts/research/removed_{ru,en}.txt`.
+- **high** — вынести финализацию решения из CGEventTap-callback (отложенное решение на `replacementQueue`) → станет доступна AX-проба текста перед кареткой; закроет nil-контекст конфликтных пар и даст источник истины там, где сейчас капитализация.
+- ✅~~5×`slow tap callback` 18-22мс~~ — разобрано 16.08 по `debug.1.log` 11:07-11:08: все 5 эпизодов случились на автоповторе клавиши (kc=13 подряд, 80мс интервал, run дорос до 64) и на редких одиночных нажатиях, между ними сотни быстрых callback'ов без предупреждений. Это всплески планировщика под нагрузкой, не деградация горячего пути; tap ни разу не отключался. Действий не требует, порог WARNING оставлен как индикатор.
+- **high** — полевой verify 0.6.10 (установлена 13.08, витрина обновлена): «b»+пробел+Double Shift и одиночная «.» там, где нужен «/», обязаны конвертироваться. Дешёвая AX-проба уже подтверждена — строка `ax probe: no char-count attribute` за 50 минут работы не появилась ни разу, значит поля отдают `kAXNumberOfCharacters` и значение поля больше не копируется.
+- **high** — полевой verify 0.6.9: «.учше»→DS×N в сессии Claude Code (точки не копятся) + предложение с однобуквенными союзами в Ghostty («пробел вместо буквы», repro не снят — лог 09.08 20:08:49 `correction len=1` кандидат). После verify выключить «Подробный лог» (включён через defaults 09.08).
+- **medium** — порог автокоррекции 3 буквы → 2 (`KeyboardMonitor`, `>= 3`), только после корпусного прогона с нулём ложных.
+- **medium** — корпусные тесты: слова × хвостовая пунктуация RU и EN, граничный `detect` дважды (контекст ru и en), 58 коллизий, ~200 токенов из реальной истории shell; recall числом, не гейтом.
+- **medium** — покрыть путь ресинка от AX (нужен фейковый AX-провайдер, сейчас не покрыт вообще).
+- **low** — не воспроизведены: `йц— Сп`, `f[?`→`ах,`, `MVS`.
+- ✅~~in-app updater отсутствует~~ — есть с 0.11.0 (opt-in). **low** — нотаризация (Stage 2) отложена решением Александра 10.09 (смена identity сбросит TCC у всех текущих установок; делать, когда автоапдейт уже стоит у людей и сможет провести миграцию).
+
+## Current v0.4.1 (2026-08-03)
+- **Мгновенная автокоррекция (как Caramba)**: срабатывает ПО МЕРЕ НАБОРА, не ждёт пробела. `Core/InstantCorrectionAnalyzer.swift` (пороги: minLength 4, candidateFloor 40, margin 30, гейт wordLevel==0 — словарный префикс своего языка всегда блокирует триггер) + `InstantCorrectionGate` (анти-двойная коррекция с boundary-путём). Тумблер «Мгновенная коррекция» (default ON). Калибровка: 0 false positives на ~3.9K частотных слов EN+RU (корпусный тест в сьюте). ⚠️NSSpellChecker.checkSpelling принимает мусор («zzzz») как валидный EN — в скоринге мгновенной коррекции НЕ используется, только свой словарь/префикс-индекс.
+- Boundary-коррекция по пробелу/пунктуации осталась как fallback.
+- Тесты: `146 passed, 0 failed, 1 GUI-only skipped`.
+
+## Current v0.4.0 (2026-08-03)
+- Переименование завершено: продукт «Qwerty Switcher», модуль/binary `QwertySwitcher`, версия `0.4.0 (4)`.
+- Лицензионный слой (см. выше). Тесты: `125 passed, 0 failed, 1 GUI-only skipped`.
+
+## Current v0.3.0 audit (2026-08-02)
+
+- Публичное имя `Qwerty Switcher`, bundle ID `tech.sasha.qwertyswitch`, версия `0.3.0 (3)`.
+- Исправлены layout-aware trailing symbols, Russian Shift+б/ю, строгая проверка Bloom cache и пустого словаря.
+- Secure Input не кэширует `false`; modifier/focus changes инвалидируют старые word/Undo state.
+- Асинхронная замена имеет cancellation token и не пишет Undo/статистику после смены контекста.
+- Developer ID/App Store prerequisites проверяются до замены существующего `.app`.
+- `111 passed, 0 failed, 1 GUI-only skipped`; universal beta и DMG пересобираются через `make-dmg.sh`.
+
+## Version 0.2.0 (2026-04-22 full audit)
+
+### Correctness
+- Info.plist + UI version synced to 0.2.0 (was stale 0.1.0)
+- Stats cards show distinct values per feature (time-saved formula from counts)
+- Yoficator: removed incorrect "вышел → вышёл" (stress on "ы", no ё)
+- Dictionary ru_RU.txt: removed 19 garbage fragments
+- Fixed clipped AboutView / ExceptionsView windows
+- UI sounds (Tink) respect isSoundEnabled everywhere
+- Version now read from Bundle
+
+### Reliability of correction
+- **Double Shift** uses KeyboardMonitor's internal buffer (was fragile clipboard hack)
+- Clipboard fallback tracks `NSPasteboard.changeCount` (was blind 100ms wait)
+- **Enter/Tab/Esc no longer trigger correction** — backspaces would land on empty
+  input field in chat apps. Only Space + punctuation trigger correction.
+- Stale buffer eviction (10s idle → clear)
+- Punctuation context-aware: `. , ; '` are boundary in en, letters in ru
+- Single Shift dedupes layouts (prefers different languageCode)
+- Min word length 3 (was 2 — false positives on "it", "oo")
+- Cmd+Z → Cmd+Option+Z (avoid conflict with host app undo)
+- resetContext on layout change
+- `TISSelectInputSource` failures logged
+
+### UX
+- StatusBar icon: EN / RU / ⁓ (paused), was just "S"
+- Onboarding window if Accessibility or Input Monitoring missing
+- Explicit system prompts (`AXIsProcessTrustedWithOptions`, `CGRequestListenEventAccess`)
+- Popup "↩ → UNDO" → "↺ Отмена"
+- Per-entry delete in auto-learned exceptions
+- Bottom "ВЕРСИЯ" button is now clickable (opens About)
+
+### Infrastructure
+- Standalone test runner: `SashaSwitcher --test` → 43 tests (no XCTest required)
+- `DebugLog.shared` → `~/Library/Logs/SashaSwitcher/debug.log`
+  - Modules: APP, KM (KeyboardMonitor), HK (HotkeyManager), IS (InputSource)
+  - Compact format `HH:mm:ss.SSS [MOD] event`
+  - Rotation at 1MB → keeps last 10KB
+  - Privacy: logs metadata only (lengths, langs), never the word
+- Menu bar: "Показать логи" / "Открыть папку логов"
+- ARCHITECTURE.md fully rewritten
+
+### Metrics
+- Bundle: 9.9 MB, ad-hoc signed
+- swift build: 0 warnings
+- Tests: 43/43 passed
+- RAM: ~7MB, startup ~0.4s (cached bloom)
+
+## Open for live testing
+- Double Shift in real apps (TG, Safari, VSCode, Terminal)
+- Onboarding flow post-fresh-permissions
+- StatusBar EN/RU update on manual layout switch
+- Buffer timeout in real long pauses
+- Regressions → check `~/Library/Logs/SashaSwitcher/debug.log`
+
+## Historical bugs (исправлены в v0.3.0)
+1. ~~**Double Shift не всегда срабатывает с первого раза**~~ ✅ 2026-04-23: Bug A — self-capture отменял `pendingSingleShift`. Перенёс `isPaused/inCooldown` гейты ДО `markKeyPressed`.
+2. ~~**Лишняя английская буква при автозамене**~~ — заменён временной cooldown на marker собственных событий; физический ввод во время замены ставится в очередь и переигрывается.
+3. ~~**Регистр теряется при автокоррекции**~~ — `BufferedKeystroke` хранит Shift/Caps flags, `UCKeyTranslate` получает их при конвертации.
+4. ~~**Одновременное удержание обоих Shifts**~~ — вынесено в `ShiftStateTracker`; combo/release edge cases покрыты регрессиями.
+
+## v0.2.0 tweak (2026-04-24) — Popup убран, TTL снят
+По просьбе Александра:
+- **Popup «EN → RU» убран**. Вызовы `SwitchPopupController.shared.show(...)` / `showUndo()` удалены из `KeyboardMonitor.swift` (автокоррекция, Double Shift, Undo). Сам класс `SwitchPopup.swift` оставлен, просто не вызывается — если захочется вернуть, достаточно раскомментировать 3 строки.
+- **5-секундный TTL истории снят**. В `swapLastWordInBuffer` убрана проверка `CFAbsoluteTimeGetCurrent() - last.timestamp < lastWordTTL` — Double Shift срабатывает на последнее введённое слово сколько угодно времени спустя (пока юзер не начал печатать новое слово / не сделал успешную конвертацию, после чего `lastCompletedWord = nil`). «Один раз на слово» сохраняется — никаких других лимитов нет.
+- StatusIndicator (✅/❌ для L+R Shift toggle) не трогал — это индикатор переключения автокоррекции, не смены раскладки.
+- 51/51 тестов, build 0 warnings, .app 11 MB.
+
+## v0.2.0 hotfix (2026-04-23) — Double Shift fix
+Симптомы от Александра: двойной Shift перестал работать. Либо **стирает слово** и ничего не вставляет, либо **сдвигает курсор влево** без изменений.
+
+**Root cause (два независимых бага):**
+- **«стирает»** = `TextReplacer.typeStringFast` батчил юникод по 20 символов в один CGEvent. Electron/веб-приложения (Telegram, Discord, VSCode, Slack) молча теряют такую пачку → backspace'ы прошли, текст удалён, ничего не набрано.
+- **«сдвигает курсор влево»** = буфер пустой (пользователь нажал пробел, потом DoubleShift) → вызывался clipboard-fallback `convertSelectedTextViaClipboard`, который слал `Shift+Option+Left` для выделения слова. В Electron/веб это «move caret word back» без выделения → copy пуст → bail, но курсор уже уехал.
+
+**Fixes (3 файла):**
+- `Core/TextReplacer.swift` — `typeStringFast` теперь шлёт **по 1 символу**, keyDown+keyUp оба с `keyboardSetUnicodeString`. Electron-safe, +2.5ms/символ — незаметно.
+- `Core/KeyboardMonitor.swift` — добавлена **history `lastCompletedWord`** (keycodes + trailing + timestamp, TTL 5s), сохраняется в word-boundary handler при пробеле/пунктуации. `swapLastWordInBuffer` использует history как fallback когда буфер пуст — после пробела DoubleShift работает ровно как в Caramba.
+- `Core/HotkeyManager.swift` — **удалён clipboard-fallback** `convertSelectedTextViaClipboard`. Путь теперь один: buffer → history → no-op с debug-логом. Если пустой буфер + пустая history → тихо ничего (никаких больше скачущих курсоров).
+
+**Тесты:** 51/51 passed. Build: 0 warnings.
+
+### Второй проход (досканальный аудит того же класса багов, 23 апр)
+По просьбе Александра пошёл искать родственные баги. Нашёл ещё 4:
+
+- **Bug A — self-capture отменял `pendingSingleShift`.** `hotkeyManager?.markKeyPressed()` в `KeyboardMonitor.handleEvent` вызывался ДО `if isPaused / inCooldown { return }`. Наши собственные retype-события прилетали в event tap, триггерили `markKeyPressed` → cancel pending single-shift. Если юзер жмёт Shift-Shift сразу после автокоррекции — первый Shift scheduled pending, self-capture (300ms cooldown) его отменяет, второй Shift видит `pendingSingleShift == nil` и DoubleShift не срабатывает. Это и есть known bug #1 «Double Shift не всегда с первого раза». **Fix:** перенёс проверки `isPaused / inCooldown` раньше `markKeyPressed`.
+- **Bug B — L+R Shift combo оставлял `shiftDownTime`.** После toggle auto-switch через L+R combo последующий shift-release давал `holdDuration ≈ 0` → `wasTap=true` → через 450ms срабатывал призрачный singleShift и переключал раскладку. **Fix:** `shiftDownTime = 0` и `lastShiftUpTime = 0` в combo-ветке.
+- **Bug C — `lastCompletedWord` не сохранялся при autoSwitch=OFF.** Word-boundary handler стоял ПОСЛЕ `if !prefsService.isAutoSwitchEnabled { return }`. **Fix:** вынес word-boundary и history-capture ДО autoSwitch-гейта; `processCurrentWord` при OFF не вызывается, но history заполняется, так что DoubleShift работает даже с выключенным автопереключением.
+- **Bug D — Cmd+V без симметричных флагов.** `handlePasteNoFormat` ставил `.maskCommand` только на keyDown. Часть Electron-клиентов нестабильно реагирует. **Fix:** `ku?.flags = .maskCommand`.
+- **Bug E (bonus) — `anyModifierWithShift` ставился навсегда.** Прошлый Option-клик (не одновременный с Shift) навсегда поднимал флаг, пока не случится shift-цикл-сброс. **Fix:** флаг ставится только если `leftShiftDown || rightShiftDown` В ДАННЫЙ МОМЕНТ, и каждый fresh shift-press (когда никакой shift до этого не держался) сбрасывает `anyKeyBetweenShifts` и `anyModifierWithShift` — чистый старт цикла.
+
+**Тесты после второго прохода:** 51/51 passed, 0 warnings.
+
+## Version 0.2.0 hotfix (2026-04-22, позже вечер)
+
+### Signing — persistent identity
+- `./Scripts/setup-signing.sh` создаёт "SashaSwitcher Developer" в login keychain (один раз). Self-signed, 10 лет. Нужен пароль от Mac
+- `build.sh dev` использует identity без `-v` (self-signed виден как CSSMERR_TP_NOT_TRUSTED — это нормально, codesign работает)
+- Результат: `Authority=SashaSwitcher Developer`, стабильный CDHash → TCC permissions переживают rebuild
+
+### Onboarding UX
+- `OnboardingView.swift`: `PermissionsWatcher` polls `AXIsProcessTrusted` + `CGPreflightListenEventAccess` каждую секунду. Кнопка "Далее" активируется когда `hasAll=true`. Auto-close убран — пользователь сам подтверждает
+- First-run: `UserDefaults "tech.sasha.switcher.onboardingSeen"` — окно показывается один раз даже если permissions уже на месте, чтобы пользователь увидел подтверждение
+
+### UI
+- Удалён переключатель Dark/Light/Auto — темы не работали, оставлен auto (`NSApp.appearance = nil`)
+- Все 4 stat-карточки теперь toggle-кнопки (как в Caramba):
+  - Автопереключение → `isAutoSwitchEnabled`
+  - Опечатки → `isTypoFixEnabled` (UI-заготовка)
+  - Single Shift → `isSingleShiftEnabled` (управляет Single Shift + CapsLock triggers)
+  - Option → `isDoubleShiftEnabled` (управляет Double Shift / Option конвертацией слова)
+- Menu bar icon: `isTemplate=true` + NSColor.black — macOS автоматически красит monochrome под цвет menubar (было цветное)
+
+### Historical notes — состояние на 2026-04-22
+- `isTypoFixEnabled` — чисто UI тумблер, логика не отвязана от главной `isAutoSwitchEnabled`. TODO: отдельная ветка для dictionary-only typo correction
+- Windows-версия — отложена на 6-12 месяцев (Rust + tauri + global-hotkey)
+- App Store (Stage 3) — требует переход с CGEventTap на IMKit
+
+### DMG для distribution (Scripts/make-dmg.sh)
+- Universal binary (arm64 + x86_64) через `swift build --triple ...` x2 + `lipo -create`
+- Подписана persistent identity + Hardened Runtime
+- В DMG: .app + symlink на Applications + `ПРОЧТИ_МЕНЯ.txt` с инструкцией для друга
+- Stage 1 caveat: первый запуск на чужом Mac требует "right-click → Open → Open" для обхода Gatekeeper (прописано в README). Stage 2 (notarization) уберёт этот шаг
