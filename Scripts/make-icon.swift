@@ -27,7 +27,7 @@
 import AppKit
 import CoreText
 
-// MARK: - Palette (matches app's graphite + systemBlue language, see CLAUDE.md)
+// MARK: - Palette (icon decision: docs/HISTORY.md "v0.6.12 (15.08.2026)")
 
 enum Palette {
     static let graphiteTop = NSColor(srgbRed: 0.145, green: 0.145, blue: 0.157, alpha: 1)   // #25252A

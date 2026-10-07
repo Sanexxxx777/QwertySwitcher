@@ -1,6 +1,6 @@
 import Foundation
 
-/// Junk-override principle (owner, 16.08.2026 TODO in CLAUDE.md): "русский
+/// Junk-override principle (owner, 16.08.2026, docs/HISTORY.md "v0.6.15 (16.08.2026)"): "русский
 /// коряво написан ⇒ я пишу на английском; программа должна это понимать" —
 /// the junk-ness of the CURRENT reading is a signal to convert, standing on
 /// its own next to the dictionary. `LanguageDetector` is the only caller;

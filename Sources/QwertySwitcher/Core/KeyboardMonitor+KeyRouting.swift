@@ -12,7 +12,7 @@ extension KeyboardMonitor {
         guard isPaused, event.route == .physical else { return false }
         // Modifier transitions (Shift/Cmd/Option/CapsLock) are deliberately
         // NEVER queued for replay — root cause of the "avalanche" incident
-        // (CLAUDE.md): a real Shift down/up captured here and replayed later,
+        // (see `CorrectionAvalancheGuard`): a real Shift down/up captured here and replayed later,
         // all at once right as the pause ends, arrives at
         // `HotkeyManager.handleFlagsChanged` with squashed, non-human timing.
         // Its Shift-tap gesture detector times taps in real wall-clock terms

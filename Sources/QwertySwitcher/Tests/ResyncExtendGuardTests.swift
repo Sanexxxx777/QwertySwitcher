@@ -11,7 +11,7 @@ import Foundation
 /// The extend rule now also requires the extra on-screen prefix to be letters
 /// of the SAME script as the model: a dropped-keystroke artifact repeats our
 /// own typing, a different script is text the user already had. Asymmetry
-/// rule (CLAUDE.md): leave a stray character behind rather than erase real
+/// rule (CLAUDE.md "stray character"): leave a stray character behind rather than erase real
 /// text.
 enum ResyncExtendGuardTests {
     static func run() {

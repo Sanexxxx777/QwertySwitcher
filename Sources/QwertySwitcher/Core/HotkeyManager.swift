@@ -559,7 +559,7 @@ final class HotkeyManager {
     /// before caret). The source layout is determined from the text's OWN
     /// script (Cyrillic vs Latin, `LanguageDetector.dominantScriptLanguageCode`)
     /// — NEVER from the currently active layout, which may have nothing to do
-    /// with what produced this text (see CLAUDE.md "марже" bug: the active
+    /// with what produced this text (see `MarzheDoubleShiftRegressionTests`: the active
     /// layout can drift between typing and pressing Double Shift). Prefers
     /// the scored `LanguageDetector.detect` path — same calibration as every
     /// other correction — by reconstructing the keystrokes that would have
@@ -708,7 +708,7 @@ final class HotkeyManager {
 /// `kAXSelectedTextAttribute` (Electron/some terminals). Sends Cmd+C, polls
 /// `NSPasteboard.changeCount` instead of a blind sleep, and never sends
 /// Shift+Option+Left or any other caret-moving combo — see the v0.2.0 hotfix
-/// notes in CLAUDE.md for why that ban stands.
+/// notes in docs/HISTORY.md "v0.2.0 hotfix (2026-04-23)" for why that ban stands.
 private enum ClipboardSelectionProbe {
     private static let pollInterval: TimeInterval = 0.02
     private static let timeout: TimeInterval = 0.12

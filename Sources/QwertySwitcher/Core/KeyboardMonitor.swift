@@ -111,7 +111,7 @@ final class KeyboardMonitor {
     /// `pendingRunResync`: set together, cleared together.
     var pendingRunResyncWord: String?
 
-    /// Island feature (v0.11.0, CLAUDE.md "остров"): a single foreign word
+    /// Island feature (v0.11.0, docs/HISTORY.md "v0.11.0 (10.09.2026)"): a single foreign word
     /// just got corrected, but its own word boundary hasn't been reached yet
     /// (instant correction) or the boundary that just fired couldn't act
     /// immediately (queue non-empty / punctuation, not prose). `restoreIsland`
@@ -263,7 +263,7 @@ final class KeyboardMonitor {
     // keycodes were typed/produced — captured at the moment this tuple is
     // written, never re-derived from "whatever is active now" when Double
     // Shift is eventually pressed (this history has no TTL, so the active
-    // layout can easily have drifted by then — see CLAUDE.md "марже" bug).
+    // layout can easily have drifted by then — see MarzheDoubleShiftRegressionTests).
     var lastCompletedWord: (
         keystrokes: [BufferedKeystroke], trailing: String, typedLayout: KeyboardLayout,
         // Layout-dependent symbols typed right before this word (e.g. "/" in
@@ -1461,7 +1461,7 @@ final class KeyboardMonitor {
         resetTypingContext(.editingInvalidated(reason))
     }
 
-    /// Island feature (v0.11.0, CLAUDE.md "остров"): snap the layout back to
+    /// Island feature (v0.11.0, docs/HISTORY.md "v0.11.0 (10.09.2026)"): snap the layout back to
     /// whatever the owner was writing in before a single foreign word got
     /// corrected — called once the correction is fully committed (its word
     /// boundary reached, or immediately for Double Shift, where the word is

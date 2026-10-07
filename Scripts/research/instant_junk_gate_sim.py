@@ -21,7 +21,7 @@ Ported pieces (read 2026-08-19 before writing this bench):
     to_keys(), convert(), ambiguous_recent() — the honest port of
     Core/InstantCorrectionAnalyzer.swift + KeyboardMonitor's ambiguousKeyRecent
     gate. minLength is 4 in the shipped 0.6.15 build (raising it to 3 was
-    measured and REJECTED — see that file's docstring / CLAUDE.md TODO).
+    measured and REJECTED — see that file's docstring / docs/HISTORY.md "v0.6.15 (16.08.2026)").
   Scripts/research/false_switch_sim.py — junk()/clean() (the existing honest
     port of Core/JunkMeter.swift, already used by the boundary-path
     junk-override and cross-checked against the Swift source below), plus

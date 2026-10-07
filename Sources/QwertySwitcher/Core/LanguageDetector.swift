@@ -21,8 +21,8 @@ final class LanguageDetector {
 
     private var previousWordLanguage: String?
 
-    /// Island feature (v0.11.0, field data 08-10.09.2026 — see CLAUDE.md
-    /// "остров"): one entry per real `detect()` outcome, freshest LAST,
+    /// Island feature (v0.11.0, field data 08-10.09.2026 — see docs/HISTORY.md
+    /// "v0.11.0 (10.09.2026)"): one entry per real `detect()` outcome, freshest LAST,
     /// capped at 3. `corrected == true` means this word was NOT typed in its
     /// own `lang` (a correction fired); `false` means it landed in `lang`
     /// untouched. `KeyboardMonitor.restoreIsland` reads this (via
@@ -145,7 +145,7 @@ final class LanguageDetector {
     ///   the active layout can drift between typing a word and acting on it
     ///   later (manual switch, another correction), and defaulting to
     ///   "whatever is active now" silently scrambles the swap direction (see
-    ///   CLAUDE.md "марже" bug). Omitted only by the live-typing callers
+    ///   MarzheDoubleShiftRegressionTests). Omitted only by the live-typing callers
     ///   (`processCurrentWord`/`tryInstantCorrection`), where the word is
     ///   still being typed and the active layout IS the typed layout.
     ///
@@ -521,7 +521,7 @@ final class LanguageDetector {
     /// typically because it's already a good word. That forced fallback is
     /// what makes a SECOND, immediate Double Shift on a word the first press
     /// just converted toggle it back predictably, instead of falling through
-    /// to the caret-word/Undo paths (see CLAUDE.md Double Shift toggle bug).
+    /// to the caret-word/Undo paths (see `MarzheDoubleShiftRegressionTests`, the toggle case).
     /// Returns nil when there's nothing sensible to do: fewer than 2 active
     /// layouts, `typedLayout` isn't one of them, or the forced fallback
     /// produces empty text. Writes nothing to the island ring — the caller
@@ -711,8 +711,8 @@ final class LanguageDetector {
         // `isSpellCheckerValid` used to be called here, confirming via
         // `NSSpellChecker.checkSpelling` — a call that can block for 100+ms
         // (macOS spell-checking IPC), which is exactly what disabled the
-        // event tap and dropped keystrokes during normal typing (CLAUDE.md
-        // perf audit). `isConfirmedWord` keeps Bloom as the cheap pre-filter
+        // event tap and dropped keystrokes during normal typing (hot-path
+        // perf audit, `HotPathStructuralGuardTests`). `isConfirmedWord` keeps Bloom as the cheap pre-filter
         // (rejects almost everything instantly) and resolves its ~0.5%
         // false-positive rate with one exact binary search ONLY on the rare
         // Bloom positive — field 07–08.09.2026: three Bloom false positives
@@ -839,7 +839,7 @@ final class LanguageDetector {
 
     /// Junk-override is disabled — ONLY for junk-override, the rest of
     /// `detect()` is unaffected — while a terminal/editor is frontmost:
-    /// `ax=none` there (CLAUDE.md) means there is no way to verify or repair
+    /// `ax=none` there (CLAUDE.md "ax=none") means there is no way to verify or repair
     /// a wrong guess, so the cost of a mistake is higher than in an
     /// AX-readable app. `currentAppBundleID` is a cache updated by
     /// `appActivatedForJunkOverrideGate`, never a live `NSWorkspace` query —
@@ -872,7 +872,7 @@ final class LanguageDetector {
     /// Latin letters, majority wins on mixed content. Never looks at the
     /// active layout: for ready-made text there are no original keystrokes,
     /// and the active layout may have nothing to do with what produced this
-    /// text (see CLAUDE.md "марже" bug). Returns nil when the text carries no
+    /// text (see MarzheDoubleShiftRegressionTests). Returns nil when the text carries no
     /// Cyrillic/Latin letters at all (pure digits/punctuation/emoji) —
     /// callers must treat that as "can't tell", never guess.
     static func dominantScriptLanguageCode(_ text: String) -> String? {

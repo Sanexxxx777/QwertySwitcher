@@ -136,7 +136,7 @@ enum CaretWordExtractor {
 /// best-effort: any failure returns nil/false and the caller falls through to
 /// the next path — never throws, never retries, never sends synthetic
 /// caret-moving keystrokes (that is what broke Double Shift in the v0.2.0
-/// hotfix; see CLAUDE.md — the ban still stands).
+/// hotfix; see docs/HISTORY.md "v0.2.0 hotfix (2026-04-23)" — the ban still stands).
 enum AXTextSelectionService {
     /// Every AX call below is a synchronous round-trip to another process. The
     /// AX default timeout is 6 seconds, and an unresponsive app spends all of

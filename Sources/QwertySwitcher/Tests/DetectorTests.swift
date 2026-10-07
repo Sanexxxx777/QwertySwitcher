@@ -168,7 +168,7 @@ enum DominantScriptLanguageTests {
     /// `LanguageDetector.dominantScriptLanguageCode` is what the AX-selection,
     /// clipboard and word-before-caret Double Shift paths use to pick the
     /// SOURCE layout — from the text's own characters, never from whatever
-    /// layout happens to be active (see CLAUDE.md "марже" bug).
+    /// layout happens to be active (see MarzheDoubleShiftRegressionTests).
     static func run() {
         TestRunner.section("LanguageDetector.dominantScriptLanguageCode — content-based direction")
         TestRunner.assertEqual(
@@ -729,7 +729,7 @@ enum ConflictPairDisambiguationTests {
 }
 
 
-/// 16.08.2026 — junk-override (owner TODO, CLAUDE.md: "русский коряво
+/// 16.08.2026 — junk-override (owner principle, docs/HISTORY.md "v0.6.15 (16.08.2026)": "русский коряво
 /// написан ⇒ пишу на английском, программа должна это понимать"). Exercises
 /// `detect()` end to end against the exact corpus-verified pairs from
 /// Scripts/research/false_switch_sim.py — pure `junk`/`clean` math is

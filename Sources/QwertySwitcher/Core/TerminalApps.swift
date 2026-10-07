@@ -1,6 +1,6 @@
 import Foundation
 
-/// The one list of terminal/editor bundle ids (`ax=none` class, CLAUDE.md).
+/// The one list of terminal/editor bundle ids (`ax=none` class — CLAUDE.md "ax=none").
 /// Before this existed, `LanguageDetector` and `ExceptionsService` each kept
 /// their own copy and disagreed (Alacritty spelled `org.alacritty` in one,
 /// `io.alacritty` in the other) — both spellings live here now.

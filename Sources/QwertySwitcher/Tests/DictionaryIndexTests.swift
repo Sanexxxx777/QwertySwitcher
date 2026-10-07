@@ -3,7 +3,7 @@ import Foundation
 
 /// Plan 006 Step 4: `WordDictionary.loadSortedWordsAsync` re-sorts and
 /// re-lowercases both bundled word lists on every launch even though
-/// CLAUDE.md already records them as "reported already sorted and lowercase
+/// an earlier note already recorded them as "reported already sorted and lowercase
 /// by `LC_ALL=C sort -c`, which is NOT Swift's `String <` order — do not
 /// rely on that". This guard settles it with the ACTUAL comparator the
 /// runtime uses (Swift `<`), not the shell's C-locale byte sort, and is the

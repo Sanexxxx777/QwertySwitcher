@@ -230,7 +230,7 @@ final class InstantCorrectionAnalyzer {
         // synchronously from there (as `contains` used to) put a 100+ms-worst-
         // case IPC call on essentially every letter of ordinary typing,
         // which is what disabled the event tap and dropped keystrokes
-        // (CLAUDE.md perf audit). `isConfirmedWord` (Bloom pre-filter + exact
+        // (hot-path perf audit, `HotPathStructuralGuardTests`). `isConfirmedWord` (Bloom pre-filter + exact
         // binary-search confirm over the same in-memory index
         // `isPrefixOfBundledWord` already uses on this hot path) and the
         // bundled-dictionary prefix index are both deterministic AND

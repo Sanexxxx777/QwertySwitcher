@@ -348,7 +348,7 @@ final class TextReplacer {
     /// keystroke per gesture on a Spotlight-class overlay regardless of
     /// pacing (field episodes "ccccara"/"cchr"/"ccfhf", 15-16.08.2026) — the
     /// root cause is one of three candidate causes, none confirmed (see
-    /// CLAUDE.md), so this works around all three by reading the caret back
+    /// docs/HISTORY.md "v0.6.16 (19.08.2026)"), so this works around all three by reading the caret back
     /// after every backspace and topping up (or stopping early) instead of
     /// trusting the count blind. Same atomicity contract as `sendBackspaces`:
     /// cancellation is checked once, before the first event, and never again

@@ -29,10 +29,10 @@ enum IslandPolicy {
         context: [LanguageDetector.ContextSlot], target: String, isTerminal: Bool
     ) -> String? {
         guard !isTerminal else { return nil }
-        // "At least 2 slots" — take the freshest 2 regardless of whether the
-        // ring holds exactly 2 or the full 3 (see `restoreIsland`'s
-        // `pendingIslandRingIncludesTarget == false` case, where the ring
-        // was never touched by the current word and may still hold 3).
+        // "At least 2 slots" — take the freshest 2 regardless of how many the
+        // caller passes (`pendingIslandContext` is captured when the island is
+        // armed, see `restoreIsland`; depending on the path it comes from a
+        // ring that holds 2 or the full 3).
         guard context.count >= 2 else { return nil }
         let previous = context.suffix(2)
         guard let older = previous.first, let newer = previous.last else { return nil }

@@ -192,7 +192,7 @@ extension KeyboardMonitor {
         // in "/exit", "$" in "$GRAF") — tracked separately from `keystrokes`
         // exactly like the boundary/instant-correction paths, and folded
         // into the SAME transaction below instead of being silently left
-        // un-converted (CLAUDE.md ".yexit" bug: this path used to ignore
+        // un-converted (the ".yexit" bug, pinned by the "/exit" cases of KeyboardMonitorIntegrationTests: this path used to ignore
         // `pendingLeadingSymbols` entirely).
         var leadingSymbols = pendingLeadingSymbols
         var source = "buffer"
@@ -201,7 +201,7 @@ extension KeyboardMonitor {
         // `buffer` that IS the layout active right now (no drift possible —
         // any layout change clears the buffer), but for a word pulled from
         // `lastCompletedWord` history (no TTL) the active layout can easily
-        // have drifted since typing — see CLAUDE.md "марже" bug.
+        // have drifted since typing — see MarzheDoubleShiftRegressionTests.
         var typedLayout = languageDetector.inputSourceManager.currentLayout
 
         // Fallback: buffer was cleared by a trailing space/punct — use the

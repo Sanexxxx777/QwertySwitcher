@@ -2,7 +2,7 @@ import Foundation
 
 /// Circuit breaker against a self-triggering correction feedback loop.
 ///
-/// Root cause (CLAUDE.md "avalanche" incident, live evidence: typing a
+/// Root cause (the "avalanche" incident, live evidence: typing a
 /// Russian word rendered as `завершftm` on screen, ~10 layout switches and 4
 /// Double Shift firings inside ONE second — physically impossible for a
 /// human): `KeyboardMonitor` deliberately still analyzes REPLAYED user

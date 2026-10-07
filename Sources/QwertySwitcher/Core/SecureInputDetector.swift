@@ -3,7 +3,7 @@ import Carbon
 import ApplicationServices
 
 /// Two-tier detector, split for a real hot-path bug found in the perf audit
-/// (CLAUDE.md): the old single-check version called `secureCheck` on EVERY
+/// (see `SecureInputCacheTests`): the old single-check version called `secureCheck` on EVERY
 /// keystroke whenever the cache held `false` (the caching only ever skipped
 /// re-checking a `true` result) — and the real check fell through to 3-4
 /// `AXUIElementCopyAttributeValue` Mach IPC round trips to the FOCUSED APP.

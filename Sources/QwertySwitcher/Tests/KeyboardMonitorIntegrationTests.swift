@@ -841,7 +841,7 @@ enum KeyboardMonitorIntegrationTests {
         }
         inputSources.switchTo(ruLayout)
         do {
-            // Named case is "$GRAF" (CLAUDE.md citation); reproduced here as
+            // Named case is "$GRAF" (field report); reproduced here as
             // "$HELLO" — "graf" itself is too short/uncommon a word for the
             // dictionary/spellchecker to confidently score at either the
             // instant or the boundary threshold (same substitution
@@ -864,7 +864,7 @@ enum KeyboardMonitorIntegrationTests {
         }
 
         // --- «марже»-class direction/drift bug, integration level -----------
-        // Named regression is «марже» (CLAUDE.md); reproduced here with
+        // Named regression is «марже» (MarzheDoubleShiftRegressionTests); reproduced here with
         // «привет» instead — «марже» contains "ж", which physically sits on
         // the ";" key, itself a real EN word-boundary trigger
         // (InputBuffer.cyrillicOnlyLetterCodes) — typing it while EN is
@@ -1454,7 +1454,7 @@ enum DoubleShiftInapplicableLogTests {
         }
 
         // "сдуфк" — the flagship non-word own-reading (its EN conversion is
-        // "clear", per learning_spec.md / CLAUDE.md v0.8.0): NOT inapplicable.
+        // "clear", per learning_spec.md / docs/HISTORY.md "v0.8.0 (25.08.2026)"): NOT inapplicable.
         if let result = promotedInapplicable(word: "сдуфк") {
             TestRunner.assertTrue(!result, "внесловарная own-сторона ('сдуфк', ru) → 'learned: inapplicable' NOT logged")
         } else {
@@ -1540,7 +1540,7 @@ enum ProviderSingleReadGuardTests {
 }
 
 
-// MARK: - Avalanche circuit breaker (CLAUDE.md "avalanche" incident: a single
+// MARK: - Avalanche circuit breaker ("avalanche" incident, see CorrectionAvalancheGuard: a single
 // mistyped Russian word cascaded into ~10 layout switches and 4 Double Shift
 // firings inside one second, visible on screen as a mangled `завершftm`).
 

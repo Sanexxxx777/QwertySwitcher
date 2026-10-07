@@ -4,7 +4,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-# Test isolation (incident 05.08.2026 — see CLAUDE.md): the --test binary
+# Test isolation (incident 05.08.2026 — see CLAUDE.md "never post real CGEvents"): the --test binary
 # below is ALREADY safe by default (DebugLog and InputSourceManager both key
 # off the --test launch argument itself), but QSW_LOG_DIR gives this run's
 # log a stable, inspectable path instead of a throwaway temp one when a test
