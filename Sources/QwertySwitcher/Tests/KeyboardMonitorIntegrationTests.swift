@@ -3162,6 +3162,7 @@ enum ContextResetPolicyTests {
             ("pendingIslandContext = nil", [
                 "resetTypingContext": "the executor (.island bit)",
                 "restoreIsland": "outcome: the armed island is consumed by the restore, not a context loss",
+                "cancelStalePendingIsland": "outcome: a deferred island is dropped because a LATER word started, not a context loss",
             ]),
         ]
         var occurrences: [String: [String: Int]] = [:]
@@ -3188,6 +3189,110 @@ enum ContextResetPolicyTests {
                 unlisted.isEmpty,
                 "`\(entry.statement)` occurs only in listed functions (unlisted: \(unlisted.joined(separator: ", ")))"
             )
+        }
+    }
+}
+
+// MARK: - Release review fixes (round 1): deferred island owner, ring ownership of Double Shift history
+enum ReleaseReviewFixesTests {
+    static func run() {
+        TestRunner.section("Release review fixes — deferred island is tied to its owning word; DS history owns its slot")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the release-review suite")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+        let environment = KeyboardMonitorTestEnvironment(inputSources: inputSources)
+        defer { environment.restore() }
+
+        guard let privet = InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse),
+              let druzya = InstantCorrectionFixtures.keystrokes(for: "друзья", reverse: ruReverse),
+              let hello = InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse),
+              let world = InstantCorrectionFixtures.keystrokes(for: "world", reverse: enReverse),
+              let longWord = InstantCorrectionFixtures.keystrokes(for: "internationalizations", reverse: enReverse) else {
+            TestRunner.assertTrue(false, "release-review fixtures must type every character")
+            return
+        }
+        let space: UInt16 = 49
+        let enter: UInt16 = 36
+
+        func harness(instant: Bool) -> KeyboardMonitorHarness {
+            let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
+            h.prefs.isAutoSwitchEnabled = true
+            h.prefs.isInstantCorrectionEnabled = instant
+            h.prefs.isYoficatorEnabled = false
+            h.prefs.isSmartCaseEnabled = false
+            h.prefs.activeLayoutIDs = [enLayout.id, ruLayout.id]
+            h.exceptions.appExceptions = []
+            h.exceptions.wordExceptions = []
+            h.exceptions.autoLearned = [:]
+            return h
+        }
+        func describe(_ slots: [LanguageDetector.ContextSlot]) -> String {
+            slots.map { "\($0.lang)\($0.corrected ? "*" : "")" }.joined(separator: ",")
+        }
+        func typeRuContext(_ h: KeyboardMonitorHarness) {
+            h.type(privet); h.press(space)
+            h.type(druzya); h.press(space)
+        }
+        func currentLang() -> String { inputSources.currentLayout?.languageCode ?? "?" }
+
+        // (1a) The reviewer's sequence: the boundary correction of `hello` is in flight, `w` is
+        // queued (island deferred with the frozen [ru, ru] context), the owner goes on with
+        // `orld` + Space. The deferred restore must NOT fire for the later word.
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(instant: false)
+            typeRuContext(h)
+            h.replacer.mode = .deferred
+            h.type(hello); h.press(space)
+            TestRunner.assertTrue(h.monitor.isPaused, "(1a) setup: the boundary correction is in flight")
+            h.press(world[0].keycode) // queued → the island restore is deferred
+            h.replacer.mode = .immediate(.success)
+            h.completePendingReplacement()
+            TestRunner.assertEqual(currentLang(), "en", "(1a) setup: hello was corrected into en and the island is still waiting")
+            h.type(Array(world.dropFirst())); h.press(space)
+            TestRunner.assertEqual(currentLang(), "en", "(1a) the second English word's boundary does not run the frozen restore")
+            h.press(hello[0].keycode)
+            TestRunner.assertTrue(h.screen.hasSuffix("hello world h"), "(1a) the next English word keeps coming out in Latin (screen tail: \(h.screen.suffix(20)))")
+        }
+
+        // (1b) Guard: instant path, the foreign word is followed by punctuation (kc44, "." on the
+        // ru layout) and then Space — no new word started in between, so the deferred restore
+        // still fires at that Space.
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(instant: true)
+            h.type(hello); h.press(space)
+            h.type(world); h.press(space)
+            h.type(privet)
+            TestRunner.assertEqual(h.invocationCount, 1, "(1b) setup: the foreign word instant-corrected")
+            TestRunner.assertEqual(currentLang(), "ru", "(1b) setup: now in ru")
+            h.press(44) // punctuation boundary: the restore waits
+            TestRunner.assertEqual(currentLang(), "ru", "(1b) setup: punctuation does not restore")
+            h.press(space)
+            TestRunner.assertEqual(currentLang(), "en", "(1b) the same word's Space after the punctuation still runs the deferred restore")
+        }
+
+        // (1c) Guard: an Enter (no letter) queued during the boundary correction → the restore
+        // fires when the drained Enter's boundary is processed.
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(instant: false)
+            typeRuContext(h)
+            h.replacer.mode = .deferred
+            h.type(hello); h.press(space)
+            TestRunner.assertTrue(h.monitor.isPaused, "(1c) setup: the boundary correction is in flight")
+            h.press(enter) // queued
+            h.replacer.mode = .immediate(.success)
+            h.completePendingReplacement()
+            TestRunner.assertEqual(currentLang(), "ru", "(1c) the drained Enter closes the owner's run → island restored to ru")
         }
     }
 }

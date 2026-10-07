@@ -393,10 +393,12 @@ extension KeyboardMonitor {
                 )
                 self.pendingIslandTarget = targetLayout.languageCode
                 if source == "buffer" {
+                    self.pendingIslandOwnerEnded = false // the word's own boundary is still ahead
                     self.pendingIslandRestore = true
                 } else if !self.hasQueuedKeyDown {
                     self.restoreIsland(path: "ds")
                 } else {
+                    self.pendingIslandOwnerEnded = true // the history word is long finished
                     self.pendingIslandRestore = true
                     DebugLog.shared.log("KM", "island: skipped reason=queueNonEmpty path=ds", level: .verbose)
                 }

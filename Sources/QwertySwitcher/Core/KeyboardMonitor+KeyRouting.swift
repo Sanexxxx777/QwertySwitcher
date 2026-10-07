@@ -382,6 +382,7 @@ extension KeyboardMonitor {
                 lastAmbiguousKeyIndex = nil
                 lastLoggedInstantSilence = nil
                 instantCorrectionGate.startNewWord()
+                cancelStalePendingIsland()
                 bufferTypedLayoutID = currentLayout?.id
             } else if bufferTypedLayoutID != currentLayout?.id {
                 bufferTypedLayoutID = nil // letters from two layouts: no first-burst retype

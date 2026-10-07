@@ -131,6 +131,12 @@ final class KeyboardMonitor {
     /// path) or carries the word's own slot (boundary / Double Shift). Cleared together with
     /// `pendingIslandTarget` at every site that clears it.
     var pendingIslandContext: [LanguageDetector.ContextSlot]?
+    /// The word that ARMED the pending island has already ended (its boundary passed without
+    /// running the restore). Armed `true` by a boundary-success / Double Shift-via-history
+    /// deferral; `false` by instant arming and Double Shift via buffer (their word is still being
+    /// typed); set `true` by `handleWordBoundary` when the deferred restore does not fire. A new
+    /// word starting while this is set belongs to a LATER run → `cancelStalePendingIsland`.
+    var pendingIslandOwnerEnded = false
 
     /// The island's "owner is already typing" gate: only a queued keyDown counts. The tap queues
     /// keyUps too, and a trigger's or letter's keyUp alone is not the next word being typed.
@@ -849,9 +855,11 @@ final class KeyboardMonitor {
                     restoreIsland(path: "deferred")
                 } else {
                     DebugLog.shared.log("KM", "island: skipped reason=queueNonEmpty path=deferred", level: .verbose)
+                    pendingIslandOwnerEnded = true
                 }
             } else {
                 DebugLog.shared.log("KM", "island: skipped reason=punctBoundary path=deferred", level: .verbose)
+                pendingIslandOwnerEnded = true
             }
         }
 
@@ -1104,6 +1112,7 @@ final class KeyboardMonitor {
                     )
                 }
                 self.pendingIslandTarget = result.layout.languageCode
+                self.pendingIslandOwnerEnded = false
                 self.pendingIslandRestore = true
             case .layoutSwitchFailed:
                 self.instantCorrectionGate.reset()
@@ -1197,7 +1206,20 @@ final class KeyboardMonitor {
             pendingIslandRestore = false
             pendingIslandTarget = nil
             pendingIslandContext = nil
+            pendingIslandOwnerEnded = false
         }
+    }
+
+    /// A new word started while an island deferred by an EARLIER, finished word is still pending:
+    /// its context is frozen at that word, so the later boundary must not run it (the owner is
+    /// typing a run, not an island). Called from the letter path that starts a word.
+    func cancelStalePendingIsland() {
+        guard pendingIslandRestore, pendingIslandOwnerEnded else { return }
+        pendingIslandRestore = false
+        pendingIslandTarget = nil
+        pendingIslandContext = nil
+        pendingIslandOwnerEnded = false
+        DebugLog.shared.log("KM", "island: skipped reason=nextWordStarted", level: .verbose)
     }
 
     // MARK: - Learning on behavior patterns (Mechanisms A/B/C, learning_spec.md)
@@ -1477,6 +1499,7 @@ final class KeyboardMonitor {
         guard let target = pendingIslandTarget else {
             DebugLog.shared.log("KM", "island: skipped reason=noContext path=\(path)", level: .verbose)
             pendingIslandRestore = false
+            pendingIslandOwnerEnded = false
             return
         }
         // Read BEFORE the clear: the context was captured when this island was armed.
@@ -1484,6 +1507,7 @@ final class KeyboardMonitor {
         pendingIslandTarget = nil
         pendingIslandContext = nil
         pendingIslandRestore = false
+        pendingIslandOwnerEnded = false
 
         // Terminals: the island makes NO text edit, only switches the input
         // source at a word boundary, and a wrong one is repaired by the same
@@ -1798,6 +1822,7 @@ final class KeyboardMonitor {
                     if !self.hasQueuedKeyDown {
                         self.restoreIsland(path: "boundary")
                     } else {
+                        self.pendingIslandOwnerEnded = true // its boundary is behind us
                         self.pendingIslandRestore = true
                         DebugLog.shared.log("KM", "island: skipped reason=queueNonEmpty path=boundary", level: .verbose)
                     }

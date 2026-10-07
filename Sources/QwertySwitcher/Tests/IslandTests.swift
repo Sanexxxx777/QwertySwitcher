@@ -279,10 +279,11 @@ enum IslandStructuralGuardTests {
                 if trimmed.hasSuffix("pendingIslandContext = nil") { chunks[chunks.count - 1].context += 1 }
             }
             let resetting = chunks.filter { $0.target > 0 }
-            // Plan 007: the context-ending resets now live in ONE executor (`resetTypingContext`); the other is `restoreIsland`.
+            // Plan 007: the context-ending resets now live in ONE executor (`resetTypingContext`); the others are
+            // `restoreIsland` and `cancelStalePendingIsland` (a deferred island dropped when a LATER word starts).
             TestRunner.assertEqual(
-                resetting.count, 2,
-                "exactly 2 functions reset pendingIslandTarget: resetTypingContext, restoreIsland"
+                resetting.count, 3,
+                "exactly 3 functions reset pendingIslandTarget: resetTypingContext, restoreIsland, cancelStalePendingIsland"
                     + " (found \(resetting.map { String($0.name.prefix(40)) }); update this number if a reset site is added deliberately)"
             )
             for chunk in resetting {
