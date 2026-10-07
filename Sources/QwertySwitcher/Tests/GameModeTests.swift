@@ -26,7 +26,10 @@ enum GameModeSourceGuardTests {
     static func run() {
         TestRunner.section("Game mode — structural guards on KeyboardMonitor.swift / HotkeyManager.swift")
 
-        guard let kmText = readSource("Core/KeyboardMonitor.swift") else { return }
+        guard let kmText = SourceContract.keyboardMonitorSources() else {
+            TestRunner.assertTrue(false, "KeyboardMonitor sources must be readable (all three files)")
+            return
+        }
 
         // Step 2: the sanity-length gate runs strictly before detect() in
         // processCurrentWord, right after the shortWordFloor guard.
@@ -49,7 +52,7 @@ enum GameModeSourceGuardTests {
         // AXUIElement/Bundle( — game-mode evidence collection is memory-only.
         if let funcStart = kmText.range(of: "func handleEvent(_ proxy: CGEventTapProxy") {
             let rest = String(kmText[funcStart.upperBound...])
-            let body = rest.range(of: "\n    private func handleWordBoundary").map { String(rest[..<$0.lowerBound]) } ?? rest
+            let body = rest.range(of: "\n    func finishReplacement()").map { String(rest[..<$0.lowerBound]) } ?? rest
             for forbidden in ["NSWorkspace", "AXUIElement", "Bundle("] {
                 TestRunner.assertTrue(
                     !body.contains(forbidden),
@@ -97,7 +100,7 @@ enum GameModeSourceGuardTests {
                     + " — inside its own wrapper, nowhere else"
             )
         }
-        countDirectCalls("Core/KeyboardMonitor.swift", kmText)
+        countDirectCalls("Core/KeyboardMonitor*.swift", kmText)
         countDirectCalls("Core/HotkeyManager.swift", readSource("Core/HotkeyManager.swift"))
     }
 }
@@ -123,7 +126,7 @@ enum GameModeReleaseGuardTests {
     static func run() {
         TestRunner.section("Game mode release — structural guards on KeyboardMonitor.swift / HotkeyManager.swift")
 
-        if let kmText = readSource("Core/KeyboardMonitor.swift") {
+        if let kmText = SourceContract.keyboardMonitorSources() {
             // 1) The prose-exit block fires on any real word boundary
             //    (proseBoundary — space/Enter/Tab, field 08.09.2026: Enter
             //    closes a word in chat apps too) and checks the OTHER active
@@ -161,6 +164,8 @@ enum GameModeReleaseGuardTests {
             } else {
                 TestRunner.assertTrue(false, "gameMode.note(.longRun) line not found — test needs updating")
             }
+        } else {
+            TestRunner.assertTrue(false, "KeyboardMonitor sources must be readable (all three files)")
         }
 
         // 3) Double Shift's game-mode release hatch: a blocked first press

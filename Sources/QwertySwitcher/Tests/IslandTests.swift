@@ -212,7 +212,10 @@ enum IslandStructuralGuardTests {
     static func run() {
         TestRunner.section("Island — structural guards on KeyboardMonitor.swift / HotkeyManager.swift")
 
-        guard let kmText = readSource("Core/KeyboardMonitor.swift") else { return }
+        guard let kmText = SourceContract.keyboardMonitorSources() else {
+            TestRunner.assertTrue(false, "KeyboardMonitor sources must be readable (all three files)")
+            return
+        }
 
         // (a)+(boundary): `processCurrentWord`'s .success restores
         // immediately only when the replay queue is already empty.
@@ -235,7 +238,7 @@ enum IslandStructuralGuardTests {
         // (a)+(b): `handleWordBoundary`'s deferred restore fires only under
         // `proseBoundary`, and only once the queue is empty — punctuation
         // boundaries and a non-empty queue both leave the flag pending.
-        if let funcStart = kmText.range(of: "private func handleWordBoundary("),
+        if let funcStart = kmText.range(of: "func handleWordBoundary("),
            let nextFunc = kmText.range(of: "\n    @discardableResult\n    private func expandSnippet(") {
             let scoped = String(kmText[funcStart.upperBound..<nextFunc.lowerBound])
             guard let pendingIf = scoped.range(of: "if pendingIslandRestore {"),
@@ -332,7 +335,7 @@ enum IslandStructuralGuardTests {
             }
             if let dsRange = kmText.range(of: "restoreIsland(path: \"ds\")"),
                let funcStart = kmText.range(of: "    func swapLastWordInBuffer() -> Bool {"),
-               let funcEnd = kmText.range(of: "    private func processCurrentWord(") {
+               let funcEnd = kmText.range(of: "    // MARK: - Run-resync erase-length decision") {
                 TestRunner.assertTrue(
                     funcStart.lowerBound < dsRange.lowerBound && dsRange.lowerBound < funcEnd.lowerBound,
                     "restoreIsland(\"ds\") lives in the Double Shift buffer/history completion (swapLastWordInBuffer)"
@@ -345,8 +348,8 @@ enum IslandStructuralGuardTests {
         // (e): restoreIsland switches the layout via the plain, fast
         // `switchTo` — never `switchToAndVerify` (3×8ms of sleep in a path
         // that can run from inside a CGEventTap completion callback).
-        if let funcStart = kmText.range(of: "private func restoreIsland(path: String) {"),
-           let nextFunc = kmText.range(of: "\n    /// Double Shift on a run the dictionary cannot judge") {
+        if let funcStart = kmText.range(of: "func restoreIsland(path: String) {"),
+           let nextFunc = kmText.range(of: "\n    /// - Parameter trigger: the character the user just typed that caused us to") {
             let scoped = String(kmText[funcStart.upperBound..<nextFunc.lowerBound])
             TestRunner.assertTrue(
                 scoped.contains("switchTo("),

@@ -200,10 +200,8 @@ enum PasteNoFormatGuardTests {
             .appendingPathComponent("Core")
 
         // --- FIX A + B(1): KeyboardMonitor.handleEvent's kc9 branch --------
-        guard let kmText = try? String(
-            contentsOf: coreDir.appendingPathComponent("KeyboardMonitor.swift"), encoding: .utf8
-        ) else {
-            TestRunner.skip("KeyboardMonitor.swift not readable")
+        guard let kmText = SourceContract.keyboardMonitorSources() else {
+            TestRunner.assertTrue(false, "KeyboardMonitor sources must be readable (all three files)")
             return
         }
         guard let branchStart = kmText.range(of: "keycode == 9 {"),

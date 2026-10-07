@@ -70,12 +70,8 @@ enum RunResyncStructuralGuardTests {
     static func run() {
         TestRunner.section("Double Shift erase count — the scored path reuses convertWholeRun's screen measurement")
 
-        let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent("Core/KeyboardMonitor.swift")
-        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
-            TestRunner.skip("KeyboardMonitor.swift not readable from \(source.path)")
+        guard let text = SourceContract.keyboardMonitorSources() else {
+            TestRunner.assertTrue(false, "KeyboardMonitor sources must be readable (all three files)")
             return
         }
 

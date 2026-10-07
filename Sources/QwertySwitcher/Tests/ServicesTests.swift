@@ -347,11 +347,7 @@ enum SnippetTests {
         service.removeSnippet(trigger: "addr")
         TestRunner.assertNil(service.replacement(for: "addr"), "snippet removal is exact")
 
-        let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Core/KeyboardMonitor.swift")
-        let monitorSource = (try? String(contentsOf: source, encoding: .utf8)) ?? ""
+        let monitorSource = SourceContract.keyboardMonitorSources() ?? ""
         TestRunner.assertTrue(
             monitorSource.contains("expandSnippet(keystrokes: captured"),
             "word-boundary path checks snippets before language correction"
@@ -467,11 +463,7 @@ enum SmartCaseTests {
                 + " ends a sentence"
         )
 
-        let monitorSource = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Core/KeyboardMonitor.swift")
-        let source = (try? String(contentsOf: monitorSource, encoding: .utf8)) ?? ""
+        let source = SourceContract.keyboardMonitorSources() ?? ""
         TestRunner.assertTrue(
             source.contains("if !captured.isEmpty {\n")
                 && source.contains(

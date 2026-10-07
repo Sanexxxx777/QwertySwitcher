@@ -2582,12 +2582,8 @@ enum TapAgeInterpretationTests {
 enum TapAgeProbeRouteGuardTests {
     static func run() {
         TestRunner.section("eventTapCallback — delivery-age probe only for physical keys")
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent("Core/KeyboardMonitor.swift")
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
-            TestRunner.assertTrue(false, "KeyboardMonitor.swift not readable from \(url.path)")
+        guard let text = SourceContract.keyboardMonitorSources() else {
+            TestRunner.assertTrue(false, "KeyboardMonitor sources must be readable (all three files)")
             return
         }
         let needle = "noteTapDeliveryAge(eventTimestamp:"
@@ -3170,12 +3166,8 @@ enum ContextResetPolicyTests {
     /// statements that every context reset must carry occur ONLY inside the functions listed
     /// here. A hand-written reset list at a new site fails this test. A missing file FAILS.
     private static func resetStatementsLiveOnlyInTheExecutor() {
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent("Core/KeyboardMonitor.swift")
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
-            TestRunner.assertTrue(false, "plan 007 guard: KeyboardMonitor.swift must be readable from \(url.path)")
+        guard let text = SourceContract.keyboardMonitorSources() else {
+            TestRunner.assertTrue(false, "plan 007 guard: KeyboardMonitor sources must be readable (all three files)")
             return
         }
         // statement -> function name -> why it may carry it

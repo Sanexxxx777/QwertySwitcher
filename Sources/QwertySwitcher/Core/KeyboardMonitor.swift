@@ -704,7 +704,6 @@ final class KeyboardMonitor {
         health = secureInputDetector.isSecureInput ? .secureInput : .running
     }
 
-
     func handleWordBoundary(
         trailing: String?, canAutoCorrect: Bool, keepForManualSwitch: Bool, triggerEvent: KeyEventSnapshot,
         triggerKeystroke: BufferedKeystroke? = nil, wordHadHeldKeys: Bool = false,
@@ -1541,7 +1540,6 @@ final class KeyboardMonitor {
         )
     }
 
-
     /// - Parameter trigger: the character the user just typed that caused us to
     ///                      consider the buffered word complete (space / `.` / `;`
     ///                      etc). It already landed in the text field, so the
@@ -2053,7 +2051,6 @@ final class KeyboardMonitor {
             self.finishReplacement()
         }
     }
-
 
     // MARK: - Callback-duration watchdog
 
