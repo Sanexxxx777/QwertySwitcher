@@ -677,6 +677,62 @@ enum SoundServiceToggleCueTests {
 }
 
 
+enum SoundServiceQueueTests {
+    static func run() {
+        TestRunner.section("SoundService — a stuck play never blocks the caller (the tap lives on main)")
+
+        // The player blocks on `release` the way `-[NSSound play]` blocked
+        // for 10 s inside CoreAudio on 26.09. Bounded waits only: a broken
+        // build fails the timing assertion, it never hangs the suite.
+        let release = DispatchSemaphore(value: 0)
+        let entered = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var calls: [(name: String, volume: Float?)] = []
+        var ranOnMain = false
+        let service = SoundService(testPlayer: { name, volume in
+            lock.lock()
+            calls.append((name, volume))
+            if Thread.isMainThread { ranOnMain = true }
+            lock.unlock()
+            entered.signal()
+            _ = release.wait(timeout: .now() + 2.0)
+        })
+
+        let t0 = DispatchTime.now()
+        let accepted = service.enqueue("Pop", volume: 0.35)
+        let returnedMs = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000
+        TestRunner.assertTrue(accepted, "the first cue is accepted")
+        TestRunner.assertTrue(
+            returnedMs < 50,
+            "enqueue returns at once while the player is stuck (took \(Int(returnedMs)) ms)"
+        )
+        TestRunner.assertTrue(
+            entered.wait(timeout: .now() + 2.0) == .success,
+            "the player actually runs"
+        )
+        TestRunner.assertTrue(
+            !service.enqueue("Glass"),
+            "a cue arriving while the previous play is stuck is dropped, not queued to sound late"
+        )
+
+        release.signal()
+        service.waitForPendingPlays()
+        release.signal()  // let the next play pass straight through
+        TestRunner.assertTrue(service.enqueue("Tink"), "once the stuck play returns, the next cue is accepted")
+        service.waitForPendingPlays()
+
+        lock.lock()
+        let snapshot = calls
+        let onMain = ranOnMain
+        lock.unlock()
+        TestRunner.assertEqual(snapshot.map(\.name), ["Pop", "Tink"], "the dropped cue never reached the player")
+        TestRunner.assertEqual(snapshot.first?.volume, 0.35, "the requested volume reaches the player")
+        TestRunner.assertTrue(snapshot.count == 2 && snapshot[1].volume == nil, "no volume = the sound's own volume")
+        TestRunner.assertTrue(!onMain, "plays run on the sound queue, never on the main thread")
+    }
+}
+
+
 enum LogRetentionTests {
     static func run() {
         TestRunner.section("DebugLog — logs expire by age, not just by size")

@@ -106,6 +106,7 @@ enum TestRunner {
         TapTimeoutCounterTests.run()
         SwitchBlockReasonTests.run()
         SoundServiceToggleCueTests.run()
+        SoundServiceQueueTests.run()
         DockIconPolicyTests.run()
         LearnedWordsStoreTests.run()
         PersonalFrequencyStoreTests.run()

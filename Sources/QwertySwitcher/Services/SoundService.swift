@@ -24,9 +24,76 @@ final class SoundService {
 
     private static let fallbackSoundName = "Pop"
 
-    private let uiTickSound = NSSound(named: "Tink")
+    /// Every NSSound call runs on this serial queue, never on main. The
+    /// keyboard event tap lives on the main run loop, and `-[NSSound play]`
+    /// can block inside CoreAudio for ~10 s when the output device fails to
+    /// start IO (26.09 field log: Dell monitor over DisplayPort,
+    /// `StartAndWaitForState` 'stop'). On main that froze the tap, macOS
+    /// disabled it on timeout, and everything typed meanwhile skipped
+    /// analysis. AppKit allows NSSound off main as long as one thread at a
+    /// time touches it — the serial queue guarantees that.
+    private let queue = DispatchQueue(label: "tech.sasha.qwertyswitch.sound", qos: .userInitiated)
+    private let lock = NSLock()
+    /// True from dispatch until `play()` returns. Normally that is a few ms
+    /// (playback itself is asynchronous); while a play is stuck starting IO,
+    /// new cues are dropped instead of piling up behind it and sounding
+    /// seconds late. Guarded by `lock`.
+    private var playInFlight = false
+    /// Owner of the last started sound — touched only on `queue`.
+    private var current: NSSound?
+    private let testPlayer: ((String, Float?) -> Void)?
+    static let slowPlayThresholdMs = 200
 
-    private init() {}
+    private init() { testPlayer = nil }
+
+    #if DEBUG
+    /// Test seam: `player` replaces the NSSound call, so the queue/skip
+    /// behaviour is exercised without making noise or touching CoreAudio.
+    init(testPlayer: @escaping (String, Float?) -> Void) { self.testPlayer = testPlayer }
+
+    /// Blocks until every dispatched play has returned. Test-only.
+    func waitForPendingPlays() { queue.sync {} }
+    #endif
+
+    /// Hands one cue to the sound queue and returns at once. `false` = dropped
+    /// because the previous play is still starting (device stuck).
+    @discardableResult
+    func enqueue(_ name: String, volume: Float? = nil) -> Bool {
+        lock.lock()
+        if playInFlight {
+            lock.unlock()
+            DebugLog.shared.log("SND", "sound skipped: previous play still starting name=\(name)")
+            return false
+        }
+        playInFlight = true
+        lock.unlock()
+        queue.async { [self] in
+            let start = DispatchTime.now()
+            if let testPlayer {
+                testPlayer(name, volume)
+            } else {
+                playNow(name, volume: volume)
+            }
+            let ms = Int((DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000)
+            if ms > Self.slowPlayThresholdMs {
+                DebugLog.shared.log("SND", "WARNING: sound play slow \(ms)ms name=\(name)")
+            }
+            lock.lock()
+            playInFlight = false
+            lock.unlock()
+        }
+        return true
+    }
+
+    /// Runs on `queue` only. Plays a COPY: `NSSound(named:)` returns one
+    /// shared object per name, so setting `.volume` on it leaked a quiet
+    /// correction cue's 0.35 into the next layout-switch cue of that sound.
+    private func playNow(_ name: String, volume: Float?) {
+        guard let sound = NSSound(named: name)?.copy() as? NSSound else { return }
+        if let volume { sound.volume = volume }
+        current = sound
+        sound.play()
+    }
 
     /// Resolves a stored preference name to the system sound name that
     /// should actually play. Pure and directly testable — no NSSound touched
@@ -72,7 +139,7 @@ final class SoundService {
             isLayoutSoundEnabled: prefsService.isLayoutSoundEnabled,
             storedName: prefsService.layoutSoundName
         ) else { return }
-        NSSound(named: name)?.play()
+        enqueue(name)
     }
 
     /// Quieter cue for automatic correction (instant mid-word or boundary) —
@@ -84,9 +151,7 @@ final class SoundService {
             isLayoutSoundEnabled: prefsService.isLayoutSoundEnabled,
             storedName: prefsService.layoutSoundName
         ) else { return }
-        let sound = NSSound(named: name)
-        sound?.volume = 0.35
-        sound?.play()
+        enqueue(name, volume: 0.35)
     }
 
     /// Auditions a sound immediately from Settings — bypasses the sound
@@ -94,25 +159,20 @@ final class SoundService {
     /// sounds are toggled off in preferences.
     func previewLayoutSound(named storedName: String) {
         guard let name = Self.effectiveSoundName(for: storedName) else { return }
-        NSSound(named: name)?.play()
+        enqueue(name)
     }
 
     func playToggle(enabled: Bool, prefsService: PreferencesService) {
         guard let cue = Self.toggleCue(
             enabled: enabled, isSoundEnabled: prefsService.isSoundEnabled, storedName: prefsService.layoutSoundName
         ) else { return }
-        // A fresh NSSound instance per play — `NSSound(named:)` returns a
-        // shared object by name, so setting `.volume` on it would leak into
-        // every other place that plays the same named sound (see class doc).
-        let sound = NSSound(named: cue.name)
-        sound?.volume = cue.volume
-        sound?.play()
+        enqueue(cue.name, volume: cue.volume)
     }
 
     /// Subtle UI-interaction tick (button presses in Settings window).
     /// Silent when sound is disabled in preferences.
     func playUITick() {
         guard SoundService.prefs?.isSoundEnabled ?? true else { return }
-        uiTickSound?.play()
+        enqueue("Tink")
     }
 }
