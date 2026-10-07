@@ -1969,6 +1969,18 @@ enum ChordCommaRepairTests {
             TestRunner.assertEqual(h.invocationCount, 0, "5: no replacement")
         }
 
+        // 5b. kc44, Shift down in the window but held 450 ms — a deliberate Shift, not a slip.
+        do {
+            let h = harness(layout: ruLayout)
+            h.type(privet)
+            h.press(44)
+            h.shiftDown()
+            Thread.sleep(forTimeInterval: 0.45)
+            h.shiftUp()
+            TestRunner.assertEqual(h.screen, "привет.", "5b: a Shift held longer than the chord cap keeps the period")
+            TestRunner.assertEqual(h.invocationCount, 0, "5b: no replacement")
+        }
+
         // 6. EN layout: kc44 is "/" — a late bare Shift is just a Shift tap.
         do {
             let h = harness(layout: enLayout)

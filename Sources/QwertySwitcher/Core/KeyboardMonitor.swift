@@ -153,6 +153,10 @@ final class KeyboardMonitor {
     /// (Shift released with no key pressed while held) is the real discriminator, the window
     /// only bounds how stale a candidate may be.
     private let chordCommaWindow: CFAbsoluteTime = 0.120
+    /// Longest Shift hold that still counts as the slipped-comma chord. Field 07.10: the
+    /// late bare Shift was held 100–227 ms in all 20 cases; a longer bare hold right after
+    /// a "." is a deliberate Shift, so the "." stays.
+    private let chordCommaMaxHold: CFAbsoluteTime = 0.400
 
     /// A kc44 "." typed without Shift on a layout where Shift+kc44 is "," — the keyboard
     /// sometimes delivers the key a hair BEFORE its Shift (field: 20 of 206 commas, Shift
@@ -2657,6 +2661,11 @@ final class KeyboardMonitor {
             chordComma = nil
         } else {
             chordComma = nil
+            if let downAt = candidate.shiftDownAt,
+               CFAbsoluteTimeGetCurrent() - downAt > chordCommaMaxHold {
+                DebugLog.shared.log("KM", "chord comma: skipped (Shift held too long)", level: .verbose)
+                return
+            }
             repairChordComma(candidate)
         }
     }
