@@ -578,7 +578,7 @@ final class HotkeyManager {
 
         if let keystrokes = LayoutTextConverter.keystrokes(
             for: text, typedOn: sourceLayout, inputSourceManager: inputSourceManager
-        ), case .switchTo(let layout, let word) = languageDetector.detect(keystrokes: keystrokes, typedLayout: sourceLayout) {
+        ), case .switchTo(let layout, let word) = languageDetector.detectWithoutRecording(keystrokes: keystrokes, typedLayout: sourceLayout) {
             return (word, layout)
         }
 

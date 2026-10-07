@@ -19,6 +19,12 @@ struct PendingUserEventQueue<Element> {
 
     var isEmpty: Bool { items.isEmpty }
 
+    /// Whether any queued element matches — the island restore asks "is a keyDown waiting?"
+    /// (a queued keyUp alone is not typing).
+    func contains(where predicate: (Element) -> Bool) -> Bool {
+        items.contains(where: predicate)
+    }
+
     mutating func enqueue(_ item: Element) {
         items.append(item)
     }

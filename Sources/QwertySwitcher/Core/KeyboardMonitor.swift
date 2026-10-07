@@ -125,14 +125,18 @@ final class KeyboardMonitor {
     /// through `InstantCorrectionAnalyzer.evaluate`, not `detect`), so there
     /// is nothing in the ring identifying which word this restore is for.
     private var pendingIslandTarget: String?
-    /// True when the SAME correction that set `pendingIslandTarget` also
-    /// pushed a ring entry for it (boundary correction and Double Shift both
-    /// call `languageDetector.detect`/`swapTarget` synchronously before their
-    /// completion runs — see `restoreIsland`). False for instant correction,
-    /// where the ring's last entry (if any) belongs to an EARLIER word.
-    /// `restoreIsland` uses this to decide whether to drop the ring's own
-    /// last slot before asking `IslandPolicy` for "the 2 words before".
-    private var pendingIslandRingIncludesTarget = false
+    /// The (at most 2) ring slots immediately BEFORE the pending island word, captured when the
+    /// island was ARMED (before any ring write for that word). `restoreIsland` reads this instead
+    /// of re-deriving "the words before" from the live ring, which has moved on by then (deferred
+    /// path) or carries the word's own slot (boundary / Double Shift). Cleared together with
+    /// `pendingIslandTarget` at every site that clears it.
+    private var pendingIslandContext: [LanguageDetector.ContextSlot]?
+
+    /// The island's "owner is already typing" gate: only a queued keyDown counts. The tap queues
+    /// keyUps too, and a trigger's or letter's keyUp alone is not the next word being typed.
+    private var hasQueuedKeyDown: Bool {
+        pendingUserEvents.contains { $0.type == .keyDown }
+    }
 
     // Avalanche circuit breaker (see CorrectionAvalancheGuard) — applies only
     // to the two fully-automatic correction entry points (instant + word
@@ -534,6 +538,7 @@ final class KeyboardMonitor {
         feedbackTracker.reset()
         pendingIslandRestore = false
         pendingIslandTarget = nil
+        pendingIslandContext = nil
     }
 
     /// The text before a UTF-16 caret offset (clamped to the string).
@@ -909,6 +914,7 @@ final class KeyboardMonitor {
             feedbackTracker.reset()
             pendingIslandRestore = false
             pendingIslandTarget = nil
+            pendingIslandContext = nil
             health = .secureInput
             DebugLog.shared.log("KM", "skip: secure input")
             return
@@ -928,6 +934,7 @@ final class KeyboardMonitor {
             feedbackTracker.reset()
             pendingIslandRestore = false
             pendingIslandTarget = nil
+            pendingIslandContext = nil
         }
         lastKeyTime = now
 
@@ -987,6 +994,7 @@ final class KeyboardMonitor {
             feedbackTracker.reset()
             pendingIslandRestore = false
             pendingIslandTarget = nil
+            pendingIslandContext = nil
             // Bug fix (bugfixes-diag-20260831.md Bug B): the buffer isn't
             // necessarily empty after a backspace (only its LAST keystroke
             // was dropped), so the ordinary `buffer.isEmpty` → `startNewWord()`
@@ -1194,6 +1202,7 @@ final class KeyboardMonitor {
             feedbackTracker.reset()
             pendingIslandRestore = false
             pendingIslandTarget = nil
+            pendingIslandContext = nil
         }
     }
 
@@ -1316,7 +1325,7 @@ final class KeyboardMonitor {
         // deferred restore just keeps waiting for the next one.
         if pendingIslandRestore {
             if proseBoundary {
-                if pendingUserEvents.isEmpty {
+                if !hasQueuedKeyDown {
                     restoreIsland(path: "deferred")
                 } else {
                     DebugLog.shared.log("KM", "island: skipped reason=queueNonEmpty path=deferred", level: .verbose)
@@ -1565,8 +1574,15 @@ final class KeyboardMonitor {
                 // Island: the word's own boundary hasn't happened yet
                 // (instant fires mid-word) — defer to `handleWordBoundary`,
                 // which restores once that boundary actually arrives.
+                //
+                // The context is captured FIRST (the word is not in the ring yet), then the
+                // word's own slot is written: an instant-corrected word is a corrected-landing
+                // slot like any other, so a run of them reads as a run (`secondInRun`).
+                self.pendingIslandContext = Array(self.languageDetector.contextSlots.suffix(2))
+                self.languageDetector.recordLandedWord(
+                    lang: result.layout.languageCode, corrected: true, replacingLast: false
+                )
                 self.pendingIslandTarget = result.layout.languageCode
-                self.pendingIslandRingIncludesTarget = false
                 self.pendingIslandRestore = true
             case .layoutSwitchFailed:
                 self.instantCorrectionGate.reset()
@@ -1908,6 +1924,7 @@ final class KeyboardMonitor {
         feedbackTracker.reset()
         pendingIslandRestore = false
         pendingIslandTarget = nil
+        pendingIslandContext = nil
     }
 
     /// Island feature (v0.11.0, CLAUDE.md "остров"): snap the layout back to
@@ -1928,7 +1945,10 @@ final class KeyboardMonitor {
             pendingIslandRestore = false
             return
         }
+        // Read BEFORE the clear: the context was captured when this island was armed.
+        let context = pendingIslandContext ?? []
         pendingIslandTarget = nil
+        pendingIslandContext = nil
         pendingIslandRestore = false
 
         // Terminals: the island makes NO text edit, only switches the input
@@ -1944,16 +1964,7 @@ final class KeyboardMonitor {
             return
         }
 
-        // Boundary correction and Double Shift both call
-        // `languageDetector.detect`/`swapTarget` SYNCHRONOUSLY, earlier in
-        // the very same call that led here, before their completion handler
-        // (and this function) ever runs — so by now the ring's last slot IS
-        // this word's own `(target, corrected: true)` entry and must be
-        // excluded before asking for "the 2 words before". Instant
-        // correction never touches the ring at all (see `pendingIslandTarget`'s
-        // doc comment) — nothing to exclude there.
-        let ring = languageDetector.contextSlots
-        let context = pendingIslandRingIncludesTarget ? Array(ring.dropLast()) : ring
+        // `context` (captured at arming) is the ≤2 ring slots immediately before the corrected word.
         let ctxDescription = context.map { "\($0.lang)\($0.corrected ? "*" : "")" }.joined(separator: ",")
 
         guard let restoreLang = IslandPolicy.shouldRestore(
@@ -2366,12 +2377,25 @@ final class KeyboardMonitor {
                 // boundary to defer to — wait for the NEXT word's instead,
                 // same mechanism instant correction uses. "via history": the
                 // word is long finished — restore right now.
+                //
+                // `swapTarget` writes nothing to the ring any more. The context is captured
+                // BEFORE this word's slot is written: "buffer" — the word never reached a boundary,
+                // no slot yet → the last 2; "history" — its boundary already pushed one → the 2
+                // before it. Then the slot is written once: added (buffer) or replaced (history).
+                let ring = self.languageDetector.contextSlots
+                let isHistory = source != "buffer"
+                self.pendingIslandContext = Array((isHistory ? ring.dropLast() : ring[...]).suffix(2))
+                self.languageDetector.recordLandedWord(
+                    lang: targetLayout.languageCode, corrected: true, replacingLast: isHistory
+                )
                 self.pendingIslandTarget = targetLayout.languageCode
-                self.pendingIslandRingIncludesTarget = true
                 if source == "buffer" {
                     self.pendingIslandRestore = true
-                } else {
+                } else if !self.hasQueuedKeyDown {
                     self.restoreIsland(path: "ds")
+                } else {
+                    self.pendingIslandRestore = true
+                    DebugLog.shared.log("KM", "island: skipped reason=queueNonEmpty path=ds", level: .verbose)
                 }
             case .layoutSwitchFailed:
                 DebugLog.shared.log("KM", "doubleShift aborted: layout switch verification failed")
@@ -2445,7 +2469,16 @@ final class KeyboardMonitor {
             return false
         }
 
+        // Captured BEFORE `detect`: when it is nil `detect` pushes no slot, and a `replacingLast`
+        // veto rewrite would clobber the PREVIOUS word's slot.
+        let ownLang = languageDetector.inputSourceManager.currentLayout?.languageCode
         let result = languageDetector.detect(keystrokes: keystrokes)
+        // `detect` pushed `(target, corrected)`; a veto leaves the word as typed → rewrite to (own, clean).
+        let recordVetoed = { [languageDetector] in
+            if let ownLang {
+                languageDetector.recordLandedWord(lang: ownLang, corrected: false, replacingLast: true)
+            }
+        }
         let currentLang = languageDetector.inputSourceManager.currentLayout?.languageCode ?? "?"
 
         switch result {
@@ -2465,11 +2498,13 @@ final class KeyboardMonitor {
         case .switchTo(let layout, var correctedWord):
             if exceptionsService.isWordExcepted(correctedWord) {
                 DebugLog.shared.log("KM", "skip: word exception match")
+                recordVetoed()
                 return false
             }
             let originalWord = languageDetector.lastConvertedWord(keystrokes: keystrokes)
             if let orig = originalWord, exceptionsService.isAutoLearned(orig) {
                 DebugLog.shared.log("KM", "skip: auto-learned exception")
+                recordVetoed()
                 return false
             }
 
@@ -2493,6 +2528,7 @@ final class KeyboardMonitor {
             }
 
             guard let sourceLayout = languageDetector.inputSourceManager.currentLayout else {
+                recordVetoed()
                 return false
             }
 
@@ -2525,7 +2561,10 @@ final class KeyboardMonitor {
                 : languageDetector.inputSourceManager.convertKeystrokes(leadingSymbols, toLayout: layout)
             let runReplacement = leadingCorrectedText + correctedWord
 
-            guard canFireAutoCorrection(branch: "boundary correction") else { return false }
+            guard canFireAutoCorrection(branch: "boundary correction") else {
+                recordVetoed()
+                return false
+            }
 
             // The word itself is already on screen (typed letter-by-letter
             // normally), but the trigger that just completed it (space/
@@ -2600,15 +2639,23 @@ final class KeyboardMonitor {
                     // their fingers turned «hub» into «руб» and bounced the
                     // word after it. A smarter island needs run awareness,
                     // not an earlier switch.
+                    //
+                    // The context is the 2 slots before this word's own (last) slot. A queued
+                    // keyUp alone does not defer (`hasQueuedKeyDown`): the next word is only
+                    // "being typed" once a keyDown is waiting.
+                    self.pendingIslandContext = Array(self.languageDetector.contextSlots.dropLast().suffix(2))
                     self.pendingIslandTarget = layout.languageCode
-                    self.pendingIslandRingIncludesTarget = true
-                    if self.pendingUserEvents.isEmpty {
+                    if !self.hasQueuedKeyDown {
                         self.restoreIsland(path: "boundary")
                     } else {
                         self.pendingIslandRestore = true
                         DebugLog.shared.log("KM", "island: skipped reason=queueNonEmpty path=boundary", level: .verbose)
                     }
                 case .layoutSwitchFailed:
+                    // `detect` already pushed `(target, corrected)` for this word; it stayed as typed.
+                    self.languageDetector.recordLandedWord(
+                        lang: sourceLayout.languageCode, corrected: false, replacingLast: true
+                    )
                     // Layout switch failed → nothing was retyped, the word is
                     // still on screen in `sourceLayout` exactly as typed — so
                     // history keeps the ORIGINAL (source-rendered) `trigger`,
@@ -2620,6 +2667,9 @@ final class KeyboardMonitor {
                     self.pendingUserEvents.replaceFront(with: triggerEvent.asOurs)
                     DebugLog.shared.log("KM", "correction aborted: layout switch verification failed")
                 case .cancelled:
+                    self.languageDetector.recordLandedWord(
+                        lang: sourceLayout.languageCode, corrected: false, replacingLast: true
+                    )
                     self.pendingUserEvents.replaceFront(with: triggerEvent.asOurs)
                     DebugLog.shared.log("KM", "correction cancelled: editing context changed")
                 }
@@ -2683,6 +2733,7 @@ final class KeyboardMonitor {
         feedbackTracker.reset()
         pendingIslandRestore = false
         pendingIslandTarget = nil
+        pendingIslandContext = nil
         // Undo already switches the layout back to `originalLayout` below —
         // island policy has no business layering another switch on top of
         // it, but the CONTEXT it reads must not still think the (now

@@ -219,11 +219,11 @@ enum IslandStructuralGuardTests {
         if let funcStart = kmText.range(of: "private func processCurrentWord("),
            let nextFunc = kmText.range(of: "\n    @discardableResult\n    private func applyYoficator(") {
             let scoped = String(kmText[funcStart.upperBound..<nextFunc.lowerBound])
-            if let emptyCheck = scoped.range(of: "if self.pendingUserEvents.isEmpty {"),
+            if let emptyCheck = scoped.range(of: "if !self.hasQueuedKeyDown {"),
                let call = scoped.range(of: "self.restoreIsland(path: \"boundary\")") {
                 TestRunner.assertTrue(
                     emptyCheck.lowerBound < call.lowerBound,
-                    "processCurrentWord: restoreIsland(\"boundary\") fires only inside the pendingUserEvents.isEmpty branch"
+                    "processCurrentWord: restoreIsland(\"boundary\") fires only inside the !hasQueuedKeyDown branch"
                 )
             } else {
                 TestRunner.assertTrue(false, "processCurrentWord: queue-empty guard or restoreIsland(\"boundary\") call not found — test needs updating")
@@ -240,7 +240,7 @@ enum IslandStructuralGuardTests {
             let scoped = String(kmText[funcStart.upperBound..<nextFunc.lowerBound])
             guard let pendingIf = scoped.range(of: "if pendingIslandRestore {"),
                   let proseIf = scoped.range(of: "if proseBoundary {"),
-                  let emptyCheck = scoped.range(of: "if pendingUserEvents.isEmpty {"),
+                  let emptyCheck = scoped.range(of: "if !hasQueuedKeyDown {"),
                   let call = scoped.range(of: "restoreIsland(path: \"deferred\")"),
                   let punctLog = scoped.range(of: "reason=punctBoundary") else {
                 TestRunner.assertTrue(false, "handleWordBoundary: deferred-restore branch not found — test needs updating")
@@ -249,7 +249,7 @@ enum IslandStructuralGuardTests {
             TestRunner.assertTrue(
                 pendingIf.lowerBound < proseIf.lowerBound && proseIf.lowerBound < emptyCheck.lowerBound
                     && emptyCheck.lowerBound < call.lowerBound,
-                "handleWordBoundary: restoreIsland(\"deferred\") is nested pendingIslandRestore → proseBoundary → pendingUserEvents.isEmpty, in that order"
+                "handleWordBoundary: restoreIsland(\"deferred\") is nested pendingIslandRestore → proseBoundary → !hasQueuedKeyDown, in that order"
             )
             TestRunner.assertTrue(
                 call.lowerBound < punctLog.lowerBound,
@@ -280,24 +280,65 @@ enum IslandStructuralGuardTests {
             )
         }
 
-        // (d): every context-wipe site that resets the learning feedback
-        // tracker (Mechanism B, 7 sites) also drops the island flag — scoped
-        // past the property declarations so the `private var
-        // pendingIslandRestore = false` declaration itself isn't counted.
-        if let scopeStart = kmText.range(of: "@objc func appDidActivate") {
-            let scoped = String(kmText[scopeStart.lowerBound...])
-            let resetCount = scoped.components(separatedBy: "feedbackTracker.reset()").count - 1
-            let flagCount = scoped.components(separatedBy: "pendingIslandRestore = false").count - 1
+        // (d): every function that clears `pendingIslandTarget` also clears `pendingIslandContext`
+        // (plan 004b) — exact per-function equality, so a stale captured context can never outlive
+        // the target it belongs to. A function is a chunk starting at a `func` declaration line.
+        do {
+            let lines = kmText.components(separatedBy: "\n")
+            var chunks: [(name: String, target: Int, context: Int)] = []
+            for line in lines {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.range(of: #"^((private|fileprivate|@objc|@discardableResult|static|final)\s+)*func\s"#,
+                                 options: .regularExpression) != nil {
+                    chunks.append((trimmed, 0, 0))
+                }
+                guard !chunks.isEmpty else { continue }
+                if trimmed.hasSuffix("pendingIslandTarget = nil") { chunks[chunks.count - 1].target += 1 }
+                if trimmed.hasSuffix("pendingIslandContext = nil") { chunks[chunks.count - 1].context += 1 }
+            }
+            let resetting = chunks.filter { $0.target > 0 }
+            TestRunner.assertTrue(resetting.count >= 5, "sanity: at least 5 functions reset pendingIslandTarget (found \(resetting.count))")
+            for chunk in resetting {
+                TestRunner.assertEqual(
+                    chunk.context, chunk.target,
+                    "`\(chunk.name.prefix(60))` clears pendingIslandContext as often as pendingIslandTarget"
+                )
+            }
             TestRunner.assertTrue(
-                resetCount == 7,
-                "sanity: exactly 7 feedbackTracker.reset() sites (Mechanism B) — found \(resetCount), test needs updating if this changed"
+                !kmText.contains("pendingIslandRingIncludesTarget"),
+                "the old pendingIslandRingIncludesTarget flag is gone — the context is captured at arming"
             )
-            TestRunner.assertTrue(
-                flagCount >= resetCount,
-                "pendingIslandRestore = false appears at least as often as feedbackTracker.reset() (\(flagCount) >= \(resetCount))"
-            )
-        } else {
-            TestRunner.assertTrue(false, "appDidActivate not found — test needs updating")
+        }
+
+        // (g): Double Shift's history path reaches `restoreIsland(path: "ds")` only when no keyDown
+        // is queued (an unguarded switch under the owner's fingers is why 0.11.2 was rolled back);
+        // the three island gates all read `hasQueuedKeyDown`, never the raw queue.
+        do {
+            let lines = kmText.components(separatedBy: "\n")
+            let calls = lines.indices.filter { lines[$0].contains("restoreIsland(path: \"") && !lines[$0].contains("func restoreIsland") }
+            TestRunner.assertEqual(calls.count, 3, "exactly three restoreIsland(path:) call sites (boundary, deferred, ds)")
+            for idx in calls {
+                let gate = lines[..<idx].last { l in
+                    let t = l.trimmingCharacters(in: .whitespaces)
+                    return t.hasPrefix("if ") || t.hasPrefix("} else if ")
+                }
+                let path = lines[idx].trimmingCharacters(in: .whitespaces)
+                TestRunner.assertTrue(
+                    gate?.contains("hasQueuedKeyDown") == true && gate?.contains("pendingUserEvents") == false
+                        && gate?.contains("!") == true,
+                    "`\(path)` sits directly under a `!hasQueuedKeyDown` gate, not pendingUserEvents.isEmpty (gate: \(gate?.trimmingCharacters(in: .whitespaces) ?? "none"))"
+                )
+            }
+            if let dsRange = kmText.range(of: "restoreIsland(path: \"ds\")"),
+               let funcStart = kmText.range(of: "    func swapLastWordInBuffer() -> Bool {"),
+               let funcEnd = kmText.range(of: "    private func processCurrentWord(") {
+                TestRunner.assertTrue(
+                    funcStart.lowerBound < dsRange.lowerBound && dsRange.lowerBound < funcEnd.lowerBound,
+                    "restoreIsland(\"ds\") lives in the Double Shift buffer/history completion (swapLastWordInBuffer)"
+                )
+            } else {
+                TestRunner.assertTrue(false, "Double Shift ds call site not found — test needs updating")
+            }
         }
 
         // (e): restoreIsland switches the layout via the plain, fast

@@ -175,6 +175,27 @@ final class LanguageDetector {
         return result
     }
 
+    /// Same decision as `detect`, but writes NOTHING to the island ring. For callers whose
+    /// outcome is not "the word landed where `detect` says": Double Shift converts the word
+    /// regardless of the verdict (`swapTarget`), and a selection/clipboard/caret word is not part
+    /// of the typing context at all. Those callers record the real landing themselves via
+    /// `recordLandedWord`, or not at all.
+    func detectWithoutRecording(keystrokes: [BufferedKeystroke], typedLayout: KeyboardLayout? = nil) -> DetectionResult {
+        detectResolved(keystrokes: keystrokes, typedLayout: typedLayout)
+    }
+
+    /// The island ring's only other writer (besides `detect`): one slot per word, saying where it
+    /// REALLY landed. `replacingLast` rewrites the word's existing slot (its boundary already
+    /// pushed one) instead of adding a second; on an empty ring it falls back to a push.
+    func recordLandedWord(lang: String, corrected: Bool, replacingLast: Bool) {
+        let slot = ContextSlot(lang: lang, corrected: corrected)
+        if replacingLast, !contextSlots.isEmpty {
+            contextSlots[contextSlots.count - 1] = slot
+        } else {
+            pushContextSlot(slot)
+        }
+    }
+
     private func detectResolved(keystrokes: [BufferedKeystroke], typedLayout: KeyboardLayout? = nil) -> DetectionResult {
         guard let currentLayout = typedLayout ?? inputSourceManager.currentLayout else { return .noSwitch }
         let layouts = activeLayouts
@@ -503,14 +524,15 @@ final class LanguageDetector {
     /// to the caret-word/Undo paths (see CLAUDE.md Double Shift toggle bug).
     /// Returns nil when there's nothing sensible to do: fewer than 2 active
     /// layouts, `typedLayout` isn't one of them, or the forced fallback
-    /// produces empty text.
+    /// produces empty text. Writes nothing to the island ring — the caller
+    /// records where the word really landed (`recordLandedWord`).
     func swapTarget(
         keystrokes: [BufferedKeystroke], typedLayout: KeyboardLayout
     ) -> (layout: KeyboardLayout, word: String)? {
         let layouts = activeLayouts
         guard layouts.count >= 2, layouts.contains(where: { $0.id == typedLayout.id }) else { return nil }
 
-        switch detect(keystrokes: keystrokes, typedLayout: typedLayout) {
+        switch detectWithoutRecording(keystrokes: keystrokes, typedLayout: typedLayout) {
         case .switchTo(let layout, let word):
             return (layout, word)
         case .noSwitch:
