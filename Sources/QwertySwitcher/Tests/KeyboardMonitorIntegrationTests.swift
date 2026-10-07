@@ -174,7 +174,7 @@ final class KeyboardMonitorHarness {
         // be analyzed twice and the harness would hide the very defect that
         // drain fixes (it used to re-dispatch here, which production never did).
         monitor.replaySink = { [weak self] snapshot in
-            guard let self else { return }
+            guard let self, snapshot.type == .keyDown else { return } // production delivers a keyUp without inserting text
             if let rendered = self.inputSources.currentLayout.flatMap({
                 self.inputSources.characterForKeycode(snapshot.keycode, layout: $0, flags: snapshot.flags)
             }) {
@@ -229,12 +229,16 @@ final class KeyboardMonitorHarness {
 
     /// Simulates a Shift transition (kc56 left / kc60 right). A flagsChanged event is never
     /// queued by the tap (`queueIfReplacementActive`), so it goes straight to `handle`.
+    /// `flags` is the aggregate modifier state AFTER the transition (`.maskShift` while the other
+    /// Shift is still held, `[]` once both are up).
     func shiftDown(keycode: UInt16 = 56) {
         monitor.handle(KeyEventSnapshot(type: .flagsChanged, keycode: CGKeyCode(keycode), flags: .maskShift))
     }
 
-    func shiftUp(keycode: UInt16 = 56) {
-        monitor.handle(KeyEventSnapshot(type: .flagsChanged, keycode: CGKeyCode(keycode), flags: []))
+    func shiftUp(keycode: UInt16 = 56, otherShiftStillHeld: Bool = false) {
+        monitor.handle(KeyEventSnapshot(
+            type: .flagsChanged, keycode: CGKeyCode(keycode), flags: otherShiftStillHeld ? .maskShift : []
+        ))
     }
 
     func press(_ stroke: BufferedKeystroke) { press(stroke.keycode, flags: stroke.flags) }
@@ -1850,6 +1854,41 @@ enum ReplayBurstAndFailureTests {
                 "the re-queued letter was analyzed AFTER the undo cleared the buffer, so it is in the buffer"
             )
         }
+
+        // --- Review: the island restore must still see the queued backlog ---------------------
+        // Two clean EN context words, an instant EN→RU correction held in flight, then Space and
+        // "rnj" (meant as «кто» in RU) typed during the pause. The replayed Space reaches the
+        // boundary while "rnj" is still queued: the island restore (back to EN) must be skipped
+        // (`queueNonEmpty`), or the remaining letters are delivered as Latin "rnj".
+        do {
+            guard let hello = InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse),
+                  let world = InstantCorrectionFixtures.keystrokes(for: "world", reverse: enReverse),
+                  let rnjKeys = InstantCorrectionFixtures.keystrokes(for: "rnj", reverse: enReverse) else {
+                TestRunner.assertTrue(false, "island-backlog fixtures must type every character")
+                return
+            }
+            let h = harness()
+            h.prefs.isSmartCaseEnabled = false
+            h.type(hello)
+            h.press(49)
+            h.type(world)
+            h.press(49)
+            h.replacer.mode = .deferred
+            h.type(ghbdtn) // the instant EN→RU correction fires on the last letter, held in flight
+            TestRunner.assertTrue(h.monitor.isPaused, "island: setup — the instant correction is in flight")
+            h.press(49)
+            h.type(rnjKeys) // queued behind the Space
+            h.replacer.mode = .immediate(.success)
+            h.completePendingReplacement()
+            TestRunner.assertEqual(
+                inputSources.currentLayout?.id, ruLayout.id,
+                "island: the restore back to EN was skipped while letters were still queued"
+            )
+            TestRunner.assertTrue(
+                h.screen.hasSuffix("привет кто"),
+                "island: the queued letters reach the screen in RU (got \"\(h.screen)\")"
+            )
+        }
     }
 }
 
@@ -2042,6 +2081,44 @@ enum ChordCommaRepairTests {
             )
             h.monitor.hotkeyManager = nil
         }
+
+        // 8. The late Shift must not kill a following L+R Shift gesture: kc44, left Shift down
+        //    (+8 ms), right Shift down, release both → the split-shift toggle fires, "." stays.
+        do {
+            let h = harness(layout: ruLayout)
+            let suite = "QwertySwitcher.ChordComma.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let wasSplit = h.prefs.isSplitShiftEnabled
+            h.prefs.isSplitShiftEnabled = true
+            defer { h.prefs.isSplitShiftEnabled = wasSplit }
+            var actions: [String] = []
+            let manager = HotkeyManager(
+                inputSourceManager: inputSources,
+                languageDetector: LanguageDetector(
+                    dictionary: dictionary, inputSourceManager: inputSources, prefsService: h.prefs
+                ),
+                textReplacer: TextReplacer(inputSourceManager: inputSources),
+                statsService: StatisticsService(), prefsService: h.prefs,
+                exceptionsService: h.exceptions, gameMode: GameModeState(defaults: defaults),
+                actionScheduler: { branch, _ in actions.append(branch) }
+            )
+            h.monitor.hotkeyManager = manager
+            h.type(privet)
+            h.press(44)
+            Thread.sleep(forTimeInterval: 0.008)
+            h.shiftDown(keycode: 56)
+            h.shiftDown(keycode: 60)
+            h.shiftUp(keycode: 56, otherShiftStillHeld: true)
+            h.shiftUp(keycode: 60)
+            TestRunner.assertTrue(
+                actions.contains("toggleAutoSwitch"),
+                "8: the late Shift of a chorded comma does not disqualify the L+R combo (got \(actions))"
+            )
+            TestRunner.assertEqual(h.screen, "привет.", "8: a two-Shift gesture is not a bare tap — the \".\" stays")
+            TestRunner.assertEqual(h.invocationCount, 0, "8: no replacement")
+            h.monitor.hotkeyManager = nil
+        }
     }
 }
 
@@ -2069,9 +2146,16 @@ enum FirstBurstRetypeTests {
         let environment = KeyboardMonitorTestEnvironment(inputSources: inputSources)
         defer { environment.restore() }
 
-        func harness() -> KeyboardMonitorHarness {
+        /// `provider`: what the focused field's AX reader returns. Default = the fake screen with
+        /// the caret at its end (a readable field showing exactly what we typed). Set on THIS
+        /// harness's monitor only — every harness builds a fresh monitor whose provider starts as
+        /// `{ nil }`, so nothing leaks into other suites.
+        func harness(provider: ((KeyboardMonitorHarness) -> (text: String, caret: Int)?)? = nil)
+            -> KeyboardMonitorHarness {
             inputSources.switchTo(enLayout)
             let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
+            let read = provider ?? { ($0.screen, $0.screen.utf16.count) }
+            h.monitor.focusedTextProvider = { [unowned h] in read(h) }
             h.prefs.isAutoSwitchEnabled = true
             h.prefs.isInstantCorrectionEnabled = false // isolate the layout-change path
             h.prefs.isYoficatorEnabled = false
@@ -2176,6 +2260,34 @@ enum FirstBurstRetypeTests {
             h.type(Array(privet[1...]))
             TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "6: the buffer survived the self-initiated change")
             TestRunner.assertEqual(h.screen, "ghbdtn", "6: erase count covers the whole word as today")
+        }
+
+        // 9. Ownership: the focused field is not AX-readable → no retype, wiped as today.
+        do {
+            let h = harness(provider: { _ in nil })
+            h.press(privet[0])
+            h.externalLayoutChange(to: ruLayout)
+            TestRunner.assertEqual(h.invocationCount, 0, "9: an unreadable field is never retyped")
+            TestRunner.assertEqual(h.screen, "g", "9: screen untouched")
+            TestRunner.assertTrue(!h.monitor.swapLastWordInBuffer(), "9: the buffer was wiped as today")
+        }
+
+        // 10. Ownership: the focused field's text before the caret does not end with the letter
+        //     (focus moved to another populated field) → no retype, wiped as today.
+        do {
+            let h = harness(provider: { _ in ("other field", 11) })
+            h.press(privet[0])
+            h.externalLayoutChange(to: ruLayout)
+            TestRunner.assertEqual(h.invocationCount, 0, "10: another field's text is never erased")
+            TestRunner.assertEqual(h.screen, "g", "10: screen untouched")
+            TestRunner.assertTrue(!h.monitor.swapLastWordInBuffer(), "10: the buffer was wiped as today")
+        }
+        // 10b. The caret sits before the typed letter even though the text ends with it → no retype.
+        do {
+            let h = harness(provider: { _ in ("ab g", 1) })
+            h.press(privet[0])
+            h.externalLayoutChange(to: ruLayout)
+            TestRunner.assertEqual(h.invocationCount, 0, "10b: only the text BEFORE the caret counts")
         }
 
         // 7. A key typed while the retype is in flight is queued, then analysed by the drain:

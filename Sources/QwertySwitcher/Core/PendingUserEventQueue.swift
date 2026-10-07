@@ -45,6 +45,13 @@ struct PendingUserEventQueue<Element> {
         items[0] = element
     }
 
+    /// Removes and returns the first element, leaving everything behind it queued — the drain
+    /// pops one key at a time so `isEmpty` stays truthful while that key is analysed (the island
+    /// restore's "owner is already typing" guard reads it).
+    mutating func popFront() -> Element? {
+        items.isEmpty ? nil : items.removeFirst()
+    }
+
     mutating func drain() -> [Element] {
         defer { items.removeAll(keepingCapacity: true) }
         return items

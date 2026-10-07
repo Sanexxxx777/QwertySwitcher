@@ -22,6 +22,11 @@ final class HotkeyManager {
     private var shiftDownTime: CFAbsoluteTime = 0
     private var anyKeyBetweenShifts = false
     private var anyModifierWithShift = false
+    /// This Shift cycle's release must not register as a Single/Double Shift tap (plan 013 B:
+    /// the late Shift of a chorded comma). Set by `suppressBareTapForCurrentShiftCycle`, cleared
+    /// when a fresh Shift cycle starts and when this cycle's release has been seen. Unlike
+    /// `anyKeyBetweenShifts` it leaves the L+R combo path alone.
+    private var suppressTapThisShiftCycle = false
     // Commit a bare L+R gesture only after both keys are released. Typing
     // can arrive after the second Shift-down (field log 18.09.2026).
     private var pendingSplitShift = false
@@ -166,6 +171,7 @@ final class HotkeyManager {
             // press that happened before the shift (not concurrent) would have
             // left these flags set and poisoned the tap detection.
             if !wasAlreadyHeld {
+                suppressTapThisShiftCycle = false
                 anyKeyBetweenShifts = false
                 anyModifierWithShift = Self.modifierDisqualifiesShiftTap(flags)
                 // First half of a potential combo — see `firstComboShiftTime`
@@ -225,6 +231,7 @@ final class HotkeyManager {
             let wasTap = holdDuration < maxShiftHoldForTap
                 && !anyKeyBetweenShifts
                 && !anyModifierWithShift
+                && !suppressTapThisShiftCycle
 
             if wasTap {
                 switch shiftTapResolver.registerTap(
@@ -259,7 +266,16 @@ final class HotkeyManager {
 
             anyKeyBetweenShifts = false
             anyModifierWithShift = false
+            suppressTapThisShiftCycle = false
         }
+    }
+
+    /// The Shift currently held is not a tap gesture: its release must not feed Single/Double
+    /// Shift. Narrower than `markKeyPressed()`, which also sets `anyKeyBetweenShifts` and so
+    /// would disqualify a following L+R Shift combo. Cancelling an OLDER pending tap is the
+    /// caller's job (a keyDown already did, via `markKeyPressed`).
+    func suppressBareTapForCurrentShiftCycle() {
+        suppressTapThisShiftCycle = true
     }
 
     func markKeyPressed() {

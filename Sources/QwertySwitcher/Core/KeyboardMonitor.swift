@@ -33,6 +33,7 @@ final class KeyboardMonitor {
     }
     var isPaused = false
     private var pendingUserEvents = PendingUserEventQueue<KeyEventSnapshot>()
+    private var isDrainingPendingEvents = false
     private var invalidateAfterReplacement = false
 
     /// Side effect for DELIVERING a queued keystroke to the app once a paused
@@ -523,6 +524,12 @@ final class KeyboardMonitor {
         pendingIslandTarget = nil
     }
 
+    /// The text before a UTF-16 caret offset (clamped to the string).
+    private static func textBeforeCaret(_ text: String, caret: Int) -> String {
+        let ns = text as NSString
+        return ns.substring(to: max(0, min(caret, ns.length)))
+    }
+
     /// Auto correction is allowed for the frontmost app right now: auto switch on, the app
     /// profile does not block it, no game mode, no secure input. Same conditions as
     /// `canAutoCorrect` in `handle` (which also needs the profile for other gates, so it keeps
@@ -562,6 +569,17 @@ final class KeyboardMonitor {
         // Both layouts must render every key, and the text must actually differ.
         guard onScreen.count == keystrokes.count, retyped.count == keystrokes.count,
               onScreen != retyped else { return false }
+
+        // Ownership: the retype erases `count` characters in whatever field is focused NOW. Within
+        // the window the app can have moved focus to another populated field (no click, key or
+        // activation reached us), and its text would be eaten. Retype only when the focused field
+        // is readable and the text before its caret ends with exactly what these keys typed.
+        // A field AX cannot read (terminals, some Electron apps) keeps today's behaviour: wipe.
+        guard let focused = focusedTextProvider(),
+              Self.textBeforeCaret(focused.text, caret: focused.caret).hasSuffix(onScreen) else {
+            DebugLog.shared.log("KM", "first-burst retype: skipped (not verified)", level: .verbose)
+            return false
+        }
 
         let dtMs = Int((age * 1000).rounded())
         let count = keystrokes.count
@@ -800,8 +818,8 @@ final class KeyboardMonitor {
         if event.type == .flagsChanged {
             lastEventWasLetter = false // plan 013 C: a modifier event after the letter voids the first-burst retype
             hotkeyManager?.handleFlagsChanged(keycode: UInt16(event.keycode), flags: event.flags)
-            // AFTER the hotkey manager: its Shift-down resets `anyKeyBetweenShifts`, so the
-            // "this Shift is not a bare tap" mark must come last (plan 013 B).
+            // AFTER the hotkey manager: its fresh Shift-down clears the per-cycle tap
+            // suppression, so the "this Shift is not a bare tap" mark must come last (plan 013 B).
             noteChordCommaFlags(keycode: UInt16(event.keycode), flags: event.flags)
             return
         }
@@ -2759,7 +2777,7 @@ final class KeyboardMonitor {
             }
             candidate.shiftDownAt = now
             chordComma = candidate
-            hotkeyManager?.markKeyPressed()
+            hotkeyManager?.suppressBareTapForCurrentShiftCycle()
         } else if shiftHeld {
             // A second Shift joined — not the plain gesture this repair is for.
             chordComma = nil
@@ -2842,8 +2860,8 @@ final class KeyboardMonitor {
     /// `replaySink` for why the posted event cannot do that itself). FIFO.
     ///
     /// - A replacement is active again (an earlier replayed key started one —
-    ///   e.g. a queued Cmd+Option+Z): this key and everything behind it go
-    ///   back to the queue in order and drain at that replacement's own
+    ///   e.g. a queued Cmd+Option+Z): the loop stops and everything behind
+    ///   stays queued, to drain at that replacement's own
     ///   `finishReplacement`. Analysing them now would run the next word's
     ///   keys through `handle` while the screen is mid-rewrite, and the
     ///   replacement's completion (it clears `buffer`) would swallow them.
@@ -2856,13 +2874,19 @@ final class KeyboardMonitor {
     ///   the re-queue rule above is the safety net for the paths it does not
     ///   cover (shortcuts, Double Shift).
     private func drainPendingUserEvents() {
-        var remaining = pendingUserEvents.drain()[...]
-        while let snapshot = remaining.first {
-            if isPaused {
-                for queued in remaining { pendingUserEvents.enqueue(queued) }
-                return
-            }
-            remaining.removeFirst()
+        // Re-entrancy: a replayed key can start a replacement that completes synchronously (a
+        // headless fake does) and calls `finishReplacement` from inside `handle` below. The
+        // running loop already picks up the rest in order; a nested drain would deliver later
+        // keys BEFORE the one being analysed.
+        guard !isDrainingPendingEvents else { return }
+        isDrainingPendingEvents = true
+        defer { isDrainingPendingEvents = false }
+        // One key at a time, straight off the queue: everything not yet analysed STAYS queued
+        // while the current key is handled, so guards that read `pendingUserEvents.isEmpty`
+        // (the island restore's "the owner is already typing" check) see the real backlog.
+        // A replacement active again ends the loop; the rest simply stays queued and drains at
+        // that replacement's own `finishReplacement`.
+        while !isPaused, let snapshot = pendingUserEvents.popFront() {
             if snapshot.route == .ours {
                 replaySink(snapshot)
                 continue
