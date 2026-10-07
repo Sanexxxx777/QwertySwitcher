@@ -3020,9 +3020,12 @@ final class KeyboardMonitor {
         return .none
     }
 
-    /// Called by `eventTapCallback` for every keyDown, with the raw
+    /// Called by `eventTapCallback` for every PHYSICAL keyDown, with the raw
     /// `CGEvent.timestamp` still in scope — read there, never inside
-    /// `handle(_:)`. No behaviour change: this only measures and logs.
+    /// `handle(_:)`. Our own synthetic (`.ours`) and replayed (`.replayedUser`)
+    /// keys keep their original timestamp, so their "age" would measure our
+    /// own queue/replacement, not system delivery latency. No behaviour
+    /// change: this only measures and logs.
     func noteTapDeliveryAge(eventTimestamp: UInt64) {
         let nowNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let ageA_ms = Double(nowNs >= eventTimestamp ? nowNs - eventTimestamp : 0) / 1_000_000
@@ -3072,17 +3075,18 @@ private func eventTapCallback(
     let monitor = Unmanaged<KeyboardMonitor>.fromOpaque(userInfo).takeUnretainedValue()
     let isDisableNotification = type == .tapDisabledByTimeout
         || type == .tapDisabledByUserInput
-    // Plan 006 Step 5 (diagnostic only, no behaviour change): how old the
-    // event already is by the time the callback starts. `event.timestamp`
-    // is read HERE — never inside `handle(_:)`, which only ever sees the
-    // snapshot built below.
-    if type == .keyDown {
-        monitor.noteTapDeliveryAge(eventTimestamp: event.timestamp)
-    }
     // Built once here, skipped only for a disable notification (which carries
     // no real keystroke fields) — every check below reads this snapshot
     // instead of the raw CGEvent.
     let snapshot = isDisableNotification ? nil : KeyEventSnapshot(type: type, event: event)
+    // Plan 006 Step 5 (diagnostic only, no behaviour change): how old the
+    // event already is by the time the callback starts. Physical keys only —
+    // `.ours`/`.replayedUser` carry their original timestamp. `event.timestamp`
+    // is read HERE — never inside `handle(_:)`, which only ever sees the
+    // snapshot built above.
+    if type == .keyDown, snapshot?.route == .physical {
+        monitor.noteTapDeliveryAge(eventTimestamp: event.timestamp)
+    }
     if let snapshot, snapshot.route == .ours {
         return Unmanaged.passUnretained(event)
     }

@@ -2559,4 +2559,39 @@ enum TapAgeInterpretationTests {
         )
     }
 }
+
+/// Source-contract guard (`#filePath`, same precedent as the other structural
+/// guards): the delivery-age probe in `eventTapCallback` fires for PHYSICAL
+/// keyDowns only. `.ours` / `.replayedUser` events keep their original
+/// `CGEvent.timestamp`, so probing them would measure our own queue.
+enum TapAgeProbeRouteGuardTests {
+    static func run() {
+        TestRunner.section("eventTapCallback — delivery-age probe only for physical keys")
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()      // Tests/
+            .deletingLastPathComponent()      // QwertySwitcher/
+            .appendingPathComponent("Core/KeyboardMonitor.swift")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            TestRunner.assertTrue(false, "KeyboardMonitor.swift not readable from \(url.path)")
+            return
+        }
+        let needle = "noteTapDeliveryAge(eventTimestamp:"
+        let lines = text.components(separatedBy: "\n")
+        let callIdx = lines.indices.filter {
+            lines[$0].contains(needle) && !lines[$0].contains("func noteTapDeliveryAge")
+        }
+        TestRunner.assertEqual(callIdx.count, 1, "exactly one call site of noteTapDeliveryAge(eventTimestamp:)")
+        guard let call = callIdx.first else { return }
+        // The `if` guarding the call is the nearest preceding `if` line.
+        let guardLine = lines[..<call].last { $0.trimmingCharacters(in: .whitespaces).hasPrefix("if ") }
+        TestRunner.assertTrue(
+            guardLine?.contains("route == .physical") ?? false,
+            "the `if` guarding the probe call requires route == .physical"
+        )
+        TestRunner.assertTrue(
+            guardLine?.contains("type == .keyDown") ?? false,
+            "the `if` guarding the probe call still requires type == .keyDown"
+        )
+    }
+}
 #endif

@@ -103,6 +103,7 @@ enum TestRunner {
         SecureInputAXTierTests.run()
         CallbackDurationThresholdTests.run()
         TapAgeInterpretationTests.run()
+        TapAgeProbeRouteGuardTests.run()
         TapTimeoutCounterTests.run()
         SwitchBlockReasonTests.run()
         SoundServiceToggleCueTests.run()
