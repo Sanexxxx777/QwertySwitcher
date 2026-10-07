@@ -136,6 +136,7 @@ enum TestRunner {
         IslandTests.run()
         IslandRingIntegrationTests.run()
         ModelAndLearningFixesTests.run()
+        ContextResetPolicyTests.run()
         TerminalAppsTests.run()
         ShortTokenTests.run()
         BigramTablesTests.run()

@@ -3078,4 +3078,90 @@ enum ModelAndLearningFixesTests {
         }
     }
 }
+
+// MARK: - Plan 007: the context-reset policy (pure table)
+
+enum ContextResetPolicyTests {
+    private typealias Bit = ContextResetScope
+
+    /// Every reason x every bit, pinned explicitly (plan 007 matrix) — NOT derived from the
+    /// implementation. A new reason or bit must add its row/column here.
+    static func run() {
+        TestRunner.section("Plan 007: ContextResetPolicy — what each context-ending event clears")
+
+        let allBits: [(name: String, bit: Bit)] = [
+            ("wordModel", .wordModel), ("runAndLead", .runAndLead), ("history", .history),
+            ("autoLearn", .autoLearn), ("undoRecord", .undoRecord), ("instantGate", .instantGate),
+            ("sentence", .sentence), ("detectorContext", .detectorContext),
+            ("feedback", .feedback), ("island", .island),
+        ]
+        // Expected sets, written out per reason from the plan's matrix.
+        let table: [(label: String, reason: ContextResetReason, expected: Set<String>)] = [
+            ("externalLayoutChange", .externalLayoutChange,
+             ["wordModel", "runAndLead", "history", "instantGate", "sentence", "detectorContext",
+              "feedback", "island"]),
+            ("secureInput", .secureInput,
+             ["wordModel", "runAndLead", "history", "autoLearn", "sentence", "detectorContext",
+              "feedback", "island"]),
+            ("stale", .stale(seconds: 12),
+             ["wordModel", "runAndLead", "feedback", "island"]),
+            ("backspace", .backspace,
+             ["runAndLead", "history", "undoRecord", "instantGate", "feedback", "island"]),
+            ("navigationKey", .navigationKey(123),
+             ["wordModel", "runAndLead", "history", "autoLearn", "undoRecord", "sentence",
+              "detectorContext", "feedback", "island"]),
+            ("editingInvalidated", .editingInvalidated("mouse-click"),
+             ["wordModel", "runAndLead", "history", "autoLearn", "undoRecord", "instantGate",
+              "sentence", "detectorContext", "feedback", "island"]),
+            ("undo", .undo,
+             ["detectorContext", "feedback", "island"]),
+        ]
+        for row in table {
+            let scope = ContextResetPolicy.scope(for: row.reason)
+            for (name, bit) in allBits {
+                TestRunner.assertEqual(
+                    scope.contains(bit), row.expected.contains(name),
+                    "scope(\(row.label)).\(name) = \(row.expected.contains(name))"
+                )
+            }
+        }
+        // The stale seconds / key code / invalidate reason never change the scope.
+        TestRunner.assertEqual(
+            ContextResetPolicy.scope(for: .stale(seconds: 11)), ContextResetPolicy.scope(for: .stale(seconds: 999)),
+            "scope(stale) does not depend on the seconds"
+        )
+        TestRunner.assertEqual(
+            ContextResetPolicy.scope(for: .navigationKey(123)), ContextResetPolicy.scope(for: .navigationKey(126)),
+            "scope(navigationKey) does not depend on the key code"
+        )
+        TestRunner.assertEqual(
+            ContextResetPolicy.scope(for: .editingInvalidated("app-activated")),
+            ContextResetPolicy.scope(for: .editingInvalidated("modifier-shortcut")),
+            "scope(editingInvalidated) does not depend on the reason text"
+        )
+
+        // Field-log format: labels are byte-identical to the pre-007 `logContextWipe` strings.
+        TestRunner.assertEqual(ContextResetReason.externalLayoutChange.logLabel, "layout-changed-externally", "label: external layout")
+        TestRunner.assertEqual(ContextResetReason.stale(seconds: 12).logLabel, "stale-12s", "label: stale")
+        TestRunner.assertEqual(ContextResetReason.backspace.logLabel, "backspace", "label: backspace")
+        TestRunner.assertEqual(ContextResetReason.navigationKey(123).logLabel, "navigation-key-123", "label: navigation key")
+        TestRunner.assertEqual(ContextResetReason.editingInvalidated("paste-no-format").logLabel, "paste-no-format", "label: invalidate reason passes through")
+        TestRunner.assertEqual(ContextResetReason.secureInput.logLabel, "secure-input", "label: secure input")
+        TestRunner.assertEqual(ContextResetReason.undo.logLabel, "undo", "label: undo")
+
+        // Which events log a wipe line (secure/undo log none; backspace keeps its own narrower condition).
+        let logs: [(String, ContextResetReason, Bool)] = [
+            ("externalLayoutChange", .externalLayoutChange, true),
+            ("secureInput", .secureInput, false),
+            ("stale", .stale(seconds: 12), true),
+            ("backspace", .backspace, false),
+            ("navigationKey", .navigationKey(123), true),
+            ("editingInvalidated", .editingInvalidated("mouse-click"), true),
+            ("undo", .undo, false),
+        ]
+        for (name, reason, expected) in logs {
+            TestRunner.assertEqual(reason.logsWipe, expected, "logsWipe(\(name)) = \(expected)")
+        }
+    }
+}
 #endif
