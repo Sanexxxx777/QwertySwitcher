@@ -190,6 +190,16 @@ final class KeyboardMonitor {
     /// notification" — `lastKeyTime` then is that letter's arrival time.
     private var lastEventWasLetter = false
 
+    /// The per-document input-source switch this retype fixes happens when a just-activated app's
+    /// field takes focus on the first keystroke (field: the buffered letter was the first keyDown
+    /// after `app activated`, 1.8-2.8 s later). Only that shape is retyped: the letters must be the
+    /// only keyDowns since the last activation, and the activation at most this old. A focus jump
+    /// in the middle of typing is out of scope by design — the text check alone cannot tell the
+    /// field it was typed into from another field that happens to end with the same letter.
+    private let firstBurstActivationWindow: CFAbsoluteTime = 5.0
+    private var lastActivationAt: CFAbsoluteTime = 0
+    private var keyDownsSinceActivation = 0
+
     /// Count of `.tapDisabledByTimeout` events seen this run — a live-log
     /// counter (task: "защита от повторения") so a regression shows up as a
     /// rising number, not just individual log lines a human has to notice.
@@ -468,7 +478,9 @@ final class KeyboardMonitor {
         )
     }
 
-    @objc private func appDidActivate(_ notification: Notification) {
+    @objc func appDidActivate(_ notification: Notification) { // internal: the test harness drives it
+        lastActivationAt = CFAbsoluteTimeGetCurrent()
+        keyDownsSinceActivation = 0
         if !TestRunMode.isActive {
             activeAppBundleID = (
                 notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
@@ -559,7 +571,9 @@ final class KeyboardMonitor {
               let typedLayout = sources.layout(withID: typedID),
               autoCorrectionAllowedNow() else { return false }
         let age = CFAbsoluteTimeGetCurrent() - lastKeyTime
-        guard age <= firstBurstRetypeWindow else { return false }
+        guard age <= firstBurstRetypeWindow,
+              keyDownsSinceActivation == buffer.count,
+              CFAbsoluteTimeGetCurrent() - lastActivationAt <= firstBurstActivationWindow else { return false }
         let active = languageDetector.activeLayouts
         guard active.contains(where: { $0.id == typedID }),
               active.contains(where: { $0.id == newLayout.id }) else { return false }
@@ -826,6 +840,7 @@ final class KeyboardMonitor {
 
         guard event.type == .keyDown else { return }
         lastEventWasLetter = false // plan 013 C: set again only by the buffered-letter append below
+        keyDownsSinceActivation += 1
         // Any keyDown voids a pending chord candidate (a later key means the "." was a period).
         // This single line covers backspace, navigation keys, secure input and every ordinary
         // key; `kc44` re-arms it at the end of its own branch below.

@@ -241,6 +241,12 @@ final class KeyboardMonitorHarness {
         ))
     }
 
+    /// The frontmost app changed (what `NSWorkspace.didActivateApplicationNotification` delivers;
+    /// the bundle id is not read under `TestRunMode`). Clears the typing context like production.
+    func activateApp() {
+        monitor.appDidActivate(Notification(name: NSWorkspace.didActivateApplicationNotification))
+    }
+
     func press(_ stroke: BufferedKeystroke) { press(stroke.keycode, flags: stroke.flags) }
     func type(_ strokes: [BufferedKeystroke]) { strokes.forEach { press($0) } }
 
@@ -2150,8 +2156,8 @@ enum FirstBurstRetypeTests {
         /// the caret at its end (a readable field showing exactly what we typed). Set on THIS
         /// harness's monitor only — every harness builds a fresh monitor whose provider starts as
         /// `{ nil }`, so nothing leaks into other suites.
-        func harness(provider: ((KeyboardMonitorHarness) -> (text: String, caret: Int)?)? = nil)
-            -> KeyboardMonitorHarness {
+        func harness(provider: ((KeyboardMonitorHarness) -> (text: String, caret: Int)?)? = nil,
+                     activate: Bool = true) -> KeyboardMonitorHarness {
             inputSources.switchTo(enLayout)
             let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
             let read = provider ?? { ($0.screen, $0.screen.utf16.count) }
@@ -2164,6 +2170,9 @@ enum FirstBurstRetypeTests {
             h.exceptions.appExceptions = []
             h.exceptions.wordExceptions = []
             h.exceptions.autoLearned = [:]
+            // The retype is only for the first keys after an app activation (see
+            // `firstBurstActivationWindow`): every scenario starts with one.
+            if activate { h.activateApp() }
             return h
         }
 
@@ -2260,6 +2269,34 @@ enum FirstBurstRetypeTests {
             h.type(Array(privet[1...]))
             TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "6: the buffer survived the self-initiated change")
             TestRunner.assertEqual(h.screen, "ghbdtn", "6: erase count covers the whole word as today")
+        }
+
+        // 11. Activation gate (a): the letter comes 6 s after the app activation → wiped as today.
+        do {
+            let h = harness()
+            Thread.sleep(forTimeInterval: 5.2)
+            h.press(privet[0])
+            h.externalLayoutChange(to: ruLayout)
+            TestRunner.assertEqual(h.invocationCount, 0, "11a: a letter long after the activation is not retyped")
+            TestRunner.assertEqual(h.screen, "g", "11a: screen untouched")
+            TestRunner.assertTrue(!h.monitor.swapLastWordInBuffer(), "11a: the buffer was wiped as today")
+        }
+        // (b): one earlier word was typed after the activation → focus may have moved mid-typing → wiped.
+        do {
+            guard let hello = InstantCorrectionFixtures.keystrokes(
+                for: "hello", reverse: InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+            ) else {
+                TestRunner.assertTrue(false, "11b fixture must type every character")
+                return
+            }
+            let h = harness()
+            h.type(hello)
+            h.press(49)
+            h.press(privet[0])
+            h.externalLayoutChange(to: ruLayout)
+            TestRunner.assertEqual(h.invocationCount, 0, "11b: keys typed before the letter since the activation → no retype")
+            TestRunner.assertEqual(h.screen, "hello g", "11b: screen untouched")
+            TestRunner.assertTrue(!h.monitor.swapLastWordInBuffer(), "11b: the buffer was wiped as today")
         }
 
         // 9. Ownership: the focused field is not AX-readable → no retype, wiped as today.

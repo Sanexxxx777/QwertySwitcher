@@ -284,7 +284,7 @@ enum IslandStructuralGuardTests {
         // tracker (Mechanism B, 7 sites) also drops the island flag — scoped
         // past the property declarations so the `private var
         // pendingIslandRestore = false` declaration itself isn't counted.
-        if let scopeStart = kmText.range(of: "@objc private func appDidActivate") {
+        if let scopeStart = kmText.range(of: "@objc func appDidActivate") {
             let scoped = String(kmText[scopeStart.lowerBound...])
             let resetCount = scoped.components(separatedBy: "feedbackTracker.reset()").count - 1
             let flagCount = scoped.components(separatedBy: "pendingIslandRestore = false").count - 1
