@@ -1221,11 +1221,19 @@ final class KeyboardMonitor {
         }
     }
 
-    /// A new word started while an island deferred by an EARLIER, finished word is still pending:
-    /// its context is frozen at that word, so the later boundary must not run it (the owner is
-    /// typing a run, not an island). Called from the letter path that starts a word.
-    func cancelStalePendingIsland() {
+    /// A key was added to the buffer while an island deferred by an EARLIER, finished word is
+    /// still pending: if it renders a LETTER on the active layout, the owner is typing the next
+    /// word of a run and the frozen context must not be restored. Layout-dependent punctuation
+    /// (kc47 is "." on en, "ю" on ru) renders no letter and leaves the island alone. Called for
+    /// every letter-path key, so ".hello" still cancels on the "h".
+    func cancelStalePendingIsland(keycode: UInt16, flags: CGEventFlags, layout: KeyboardLayout?) {
         guard pendingIslandRestore, pendingIslandOwnerEnded else { return }
+        // Unknown rendering (no layout / no lookup): treat as a letter, the pre-existing behaviour.
+        if let layout,
+           let rendered = languageDetector.inputSourceManager.characterForKeycode(keycode, layout: layout, flags: flags),
+           rendered.first?.isLetter != true {
+            return
+        }
         pendingIslandRestore = false
         pendingIslandTarget = nil
         pendingIslandContext = nil

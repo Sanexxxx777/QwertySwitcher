@@ -3295,6 +3295,38 @@ enum ReleaseReviewFixesTests {
             TestRunner.assertEqual(currentLang(), "ru", "(1c) the drained Enter closes the owner's run → island restored to ru")
         }
 
+        // (B1) Layout-dependent punctuation after the owner's word must not cancel the pending
+        // island: "!" closes the instant-corrected word (punctuation boundary), then "..." — kc47 is
+        // a LETTER key but renders "." on the active (en) layout — and Space still restores ru.
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(instant: true)
+            typeRuContext(h)
+            h.type(world)
+            TestRunner.assertEqual(h.invocationCount, 1, "(B1) setup: the foreign word instant-corrected")
+            TestRunner.assertEqual(currentLang(), "en", "(B1) setup: now in en")
+            h.press(18, flags: .maskShift) // "!" — punctuation boundary, the restore waits
+            TestRunner.assertTrue(h.monitor.pendingIslandRestore, "(B1) setup: the island is still pending after the punctuation")
+            for _ in 0..<3 { h.press(47) }
+            TestRunner.assertTrue(h.monitor.pendingIslandRestore, "(B1) a '.' typed on the en layout does not cancel the pending island")
+            h.press(space)
+            TestRunner.assertEqual(currentLang(), "ru", "(B1) the Space after the punctuation still restores ru")
+        }
+
+        // (B2) Guard: a pending island of a finished word + ".hello" → cancelled on the first REAL letter.
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(instant: true)
+            typeRuContext(h)
+            h.type(world)
+            TestRunner.assertEqual(h.invocationCount, 1, "(B2) setup: the foreign word instant-corrected")
+            h.press(18, flags: .maskShift)
+            h.press(47)
+            TestRunner.assertTrue(h.monitor.pendingIslandRestore, "(B2) setup: the '.' alone keeps the island pending")
+            h.press(hello[0].keycode)
+            TestRunner.assertTrue(!h.monitor.pendingIslandRestore, "(B2) the first real letter of the next word cancels the island")
+        }
+
         // (3) Double Shift via history after a word the boundary never wrote a slot for
         // (21 letters > the 20-keystroke cap): the previous word's slot must stay intact.
         inputSources.switchTo(ruLayout)

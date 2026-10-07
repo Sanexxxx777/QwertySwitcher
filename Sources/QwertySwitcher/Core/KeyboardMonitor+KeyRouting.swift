@@ -377,12 +377,16 @@ extension KeyboardMonitor {
         if InputBuffer.isLetterKey(keycode) {
             switchUndoManager.invalidate()
             autoLearnTracker.registerNonDeletion()
+            // Cheap flag check first: the keycode→character lookup runs only while an island of an
+            // already finished word is pending.
+            if pendingIslandRestore && pendingIslandOwnerEnded {
+                cancelStalePendingIsland(keycode: keycode, flags: flags, layout: currentLayout)
+            }
             if buffer.isEmpty {
                 lastCompletedWord = nil
                 lastAmbiguousKeyIndex = nil
                 lastLoggedInstantSilence = nil
                 instantCorrectionGate.startNewWord()
-                cancelStalePendingIsland()
                 bufferTypedLayoutID = currentLayout?.id
             } else if bufferTypedLayoutID != currentLayout?.id {
                 bufferTypedLayoutID = nil // letters from two layouts: no first-burst retype
