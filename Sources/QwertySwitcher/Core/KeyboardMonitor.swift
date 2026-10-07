@@ -1694,6 +1694,33 @@ final class KeyboardMonitor {
         )
     }
 
+    /// The ONE place that drops parts of the typed-word model when the editing context ends
+    /// (plan 007). WHAT each reason drops is `ContextResetPolicy.scope(for:)`; the reset bodies
+    /// are independent of each other (none reads another component), so the fixed order below is
+    /// safe. The wipe log reads the model, so it runs before any clear.
+    private func resetTypingContext(_ reason: ContextResetReason) {
+        if reason.logsWipe { logContextWipe(reason.logLabel) }
+        let scope = ContextResetPolicy.scope(for: reason)
+        if scope.contains(.wordModel) { buffer.clear() }
+        if scope.contains(.runAndLead) {
+            pendingLeadingSymbols.removeAll()
+            runKeystrokes.removeAll()
+            wordAutorepeatCount = 0
+        }
+        if scope.contains(.history) { lastCompletedWord = nil }
+        if scope.contains(.autoLearn) { autoLearnTracker.cancel() }
+        if scope.contains(.undoRecord) { switchUndoManager.invalidate() }
+        if scope.contains(.instantGate) { instantCorrectionGate.reset() }
+        if scope.contains(.sentence) { sentenceStartTracker.reset() }
+        if scope.contains(.detectorContext) { languageDetector.resetContext() }
+        if scope.contains(.feedback) { feedbackTracker.reset() }
+        if scope.contains(.island) {
+            pendingIslandRestore = false
+            pendingIslandTarget = nil
+            pendingIslandContext = nil
+        }
+    }
+
     // MARK: - Learning on behavior patterns (Mechanisms A/B/C, learning_spec.md)
 
     /// Instant-path Mechanism A set — plain, lowercased words active across
