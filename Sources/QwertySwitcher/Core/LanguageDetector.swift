@@ -35,7 +35,11 @@ final class LanguageDetector {
         let corrected: Bool
     }
     private(set) var contextSlots: [ContextSlot] = []
+    /// Counts every ring write (push and replace; NOT `resetContext`). `KeyboardMonitor` compares it
+    /// around a word boundary to know whether that boundary wrote the word's slot.
+    private(set) var ringWriteCount = 0
     private func pushContextSlot(_ slot: ContextSlot) {
+        ringWriteCount += 1
         contextSlots.append(slot)
         if contextSlots.count > 3 { contextSlots.removeFirst(contextSlots.count - 3) }
     }
@@ -190,6 +194,7 @@ final class LanguageDetector {
     func recordLandedWord(lang: String, corrected: Bool, replacingLast: Bool) {
         let slot = ContextSlot(lang: lang, corrected: corrected)
         if replacingLast, !contextSlots.isEmpty {
+            ringWriteCount += 1
             contextSlots[contextSlots.count - 1] = slot
         } else {
             pushContextSlot(slot)

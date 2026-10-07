@@ -3294,6 +3294,25 @@ enum ReleaseReviewFixesTests {
             h.completePendingReplacement()
             TestRunner.assertEqual(currentLang(), "ru", "(1c) the drained Enter closes the owner's run → island restored to ru")
         }
+
+        // (3) Double Shift via history after a word the boundary never wrote a slot for
+        // (21 letters > the 20-keystroke cap): the previous word's slot must stay intact.
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(instant: false)
+            typeRuContext(h)
+            let before = h.detector.contextSlots
+            TestRunner.assertEqual(describe(before), "ru,ru", "(3) setup: two clean ru slots")
+            h.type(longWord); h.press(space)
+            TestRunner.assertEqual(h.invocationCount, 0, "(3) setup: the over-long word was not auto-corrected")
+            TestRunner.assertEqual(describe(h.detector.contextSlots), "ru,ru", "(3) setup: the boundary wrote no slot for it")
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "(3) setup: Double Shift via history converts it")
+            TestRunner.assertEqual(
+                describe(h.detector.contextSlots), "ru,ru,en*",
+                "(3) the two ru slots are intact and the word's own (en, corrected) slot was appended"
+            )
+            TestRunner.assertEqual(currentLang(), "ru", "(3) the island restores ru after the converted word")
+        }
     }
 }
 #endif

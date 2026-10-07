@@ -385,12 +385,22 @@ extension KeyboardMonitor {
                 // BEFORE this word's slot is written: "buffer" — the word never reached a boundary,
                 // no slot yet → the last 2; "history" — its boundary already pushed one → the 2
                 // before it. Then the slot is written once: added (buffer) or replaced (history).
+                //
+                // History owns the ring's last slot only if its boundary really wrote one
+                // (`lastCompletedWordSlotWrite`): a word that ended without `detect` (over-long,
+                // held keys, leading symbols...) has none, and replacing "its" slot would
+                // overwrite the PREVIOUS word's. Then the slot is appended and the context is
+                // the last 2 as they stand.
                 let ring = self.languageDetector.contextSlots
                 let isHistory = source != "buffer"
-                self.pendingIslandContext = Array((isHistory ? ring.dropLast() : ring[...]).suffix(2))
+                let ownsLast = isHistory && !ring.isEmpty
+                    && self.lastCompletedWordSlotWrite == self.languageDetector.ringWriteCount
+                self.pendingIslandContext = Array((ownsLast ? ring.dropLast() : ring[...]).suffix(2))
                 self.languageDetector.recordLandedWord(
-                    lang: targetLayout.languageCode, corrected: true, replacingLast: isHistory
+                    lang: targetLayout.languageCode, corrected: true, replacingLast: ownsLast
                 )
+                // The history re-armed above now has its own slot, written just now.
+                self.lastCompletedWordSlotWrite = self.languageDetector.ringWriteCount
                 self.pendingIslandTarget = targetLayout.languageCode
                 if source == "buffer" {
                     self.pendingIslandOwnerEnded = false // the word's own boundary is still ahead

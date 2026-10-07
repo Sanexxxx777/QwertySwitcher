@@ -270,6 +270,11 @@ final class KeyboardMonitor {
     // written, never re-derived from "whatever is active now" when Double
     // Shift is eventually pressed (this history has no TTL, so the active
     // layout can easily have drifted by then — see MarzheDoubleShiftRegressionTests).
+    /// `languageDetector.ringWriteCount` right after the ring write that gave `lastCompletedWord`
+    /// its slot; nil = the history word wrote none. The slot is the ring's last one only while the
+    /// detector's counter still equals this — any later write moves it.
+    /// Only read while `lastCompletedWord != nil`, so clearing the history needs no reset here.
+    var lastCompletedWordSlotWrite: Int?
     var lastCompletedWord: (
         keystrokes: [BufferedKeystroke], trailing: String, typedLayout: KeyboardLayout,
         // Layout-dependent symbols typed right before this word (e.g. "/" in
@@ -715,6 +720,8 @@ final class KeyboardMonitor {
         triggerKeystroke: BufferedKeystroke? = nil, wordHadHeldKeys: Bool = false,
         wordAutorepeatCount: Int = 0, proseBoundary: Bool = false
     ) {
+        // Compared at the history capture below: did THIS boundary write the word's ring slot?
+        let ringWritesAtEntry = languageDetector.ringWriteCount
         let captured = buffer.currentWord()
         // Read before `pendingLeadingSymbols` is cleared below.
         let leadHasDigit = pendingLeadHasDigit
@@ -794,6 +801,10 @@ final class KeyboardMonitor {
             // cleared `buffer` via `layoutDidChange`). `pendingLeadingSymbols`
             // is read here, BEFORE it's cleared below.
             lastCompletedWord = (captured, trailing, typedLayout, pendingLeadingSymbols, triggerKeystroke)
+            // The boundary can end without `detect` (over-long word, held keys, leading symbols,
+            // retype paths, `!canAutoCorrect`) — then the history word owns NO ring slot.
+            lastCompletedWordSlotWrite = languageDetector.ringWriteCount != ringWritesAtEntry
+                ? languageDetector.ringWriteCount : nil
         } else if captured.isEmpty, keepForManualSwitch, trailing == " ", let history = lastCompletedWord,
                   history.trailing.isEmpty {
             // Double Shift re-armed the history with no trailing; this Space is the one that
@@ -1838,6 +1849,8 @@ final class KeyboardMonitor {
                     // layout that never actually took effect).
                     if let trigger {
                         self.lastCompletedWord = (keystrokes, trigger, sourceLayout, leadingSymbols, triggerKeystroke)
+                        // `detect` pushed this word's slot and the line above rewrote it.
+                        self.lastCompletedWordSlotWrite = self.languageDetector.ringWriteCount
                     }
                     self.pendingUserEvents.replaceFront(with: triggerEvent.asOurs)
                     DebugLog.shared.log("KM", "correction aborted: layout switch verification failed")
