@@ -3162,6 +3162,57 @@ enum ContextResetPolicyTests {
         for (name, reason, expected) in logs {
             TestRunner.assertEqual(reason.logsWipe, expected, "logsWipe(\(name)) = \(expected)")
         }
+
+        resetStatementsLiveOnlyInTheExecutor()
+    }
+
+    /// Structural guard (`#filePath`, same precedent as `IslandStructuralGuardTests`): the two
+    /// statements that every context reset must carry occur ONLY inside the functions listed
+    /// here. A hand-written reset list at a new site fails this test. A missing file FAILS.
+    private static func resetStatementsLiveOnlyInTheExecutor() {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()      // Tests/
+            .deletingLastPathComponent()      // QwertySwitcher/
+            .appendingPathComponent("Core/KeyboardMonitor.swift")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            TestRunner.assertTrue(false, "plan 007 guard: KeyboardMonitor.swift must be readable from \(url.path)")
+            return
+        }
+        // statement -> function name -> why it may carry it
+        let allowed: [(statement: String, functions: [String: String])] = [
+            ("feedbackTracker.reset()", [
+                "resetTypingContext": "the executor (.feedback bit)",
+            ]),
+            ("pendingIslandContext = nil", [
+                "resetTypingContext": "the executor (.island bit)",
+                "restoreIsland": "outcome: the armed island is consumed by the restore, not a context loss",
+            ]),
+        ]
+        var occurrences: [String: [String: Int]] = [:]
+        var currentFunc = "<top level>"
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("//") { continue }
+            if let range = trimmed.range(of: #"\bfunc\s+(\w+)"#, options: .regularExpression) {
+                currentFunc = String(trimmed[range]).replacingOccurrences(of: "func", with: "")
+                    .trimmingCharacters(in: .whitespaces)
+            }
+            for entry in allowed where trimmed.contains(entry.statement) {
+                occurrences[entry.statement, default: [:]][currentFunc, default: 0] += 1
+            }
+        }
+        for entry in allowed {
+            let found = occurrences[entry.statement] ?? [:]
+            TestRunner.assertTrue(
+                found["resetTypingContext"] == 1,
+                "`\(entry.statement)` occurs exactly once in resetTypingContext (found \(found["resetTypingContext"] ?? 0))"
+            )
+            let unlisted = found.keys.filter { entry.functions[$0] == nil }.sorted()
+            TestRunner.assertTrue(
+                unlisted.isEmpty,
+                "`\(entry.statement)` occurs only in listed functions (unlisted: \(unlisted.joined(separator: ", ")))"
+            )
+        }
     }
 }
 #endif
