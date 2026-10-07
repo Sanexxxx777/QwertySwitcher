@@ -168,12 +168,6 @@ enum TestRunner {
         knownDefaultsSuites.append(suiteName)
     }
 
-    /// Same as `discardDefaultsSuite` — name kept for fixtures that have no
-    /// teardown point (their owner just registers the suite on creation).
-    static func discardDefaultsSuiteAtEndOfRun(_ suiteName: String) {
-        discardDefaultsSuite(suiteName)
-    }
-
     /// Waits for cfprefsd's delayed writes, then deletes every tracked plist.
     private static func sweepDefaultsSuites() {
         guard !knownDefaultsSuites.isEmpty else { return }

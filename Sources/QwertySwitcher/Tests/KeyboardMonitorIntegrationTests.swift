@@ -147,7 +147,7 @@ final class KeyboardMonitorHarness {
         let analyzer = InstantCorrectionAnalyzer(dictionary: dictionary)
         let perApp = PerAppLayoutService(inputSourceManager: inputSources, prefsService: prefs)
         let snippetSuite = AppIdentity.bundleIdentifier + ".tests.keyboard-monitor-snippets." + UUID().uuidString
-        TestRunner.discardDefaultsSuiteAtEndOfRun(snippetSuite)
+        TestRunner.discardDefaultsSuite(snippetSuite)
         let snippetDefaults = UserDefaults(suiteName: snippetSuite)!
         let snippets = SnippetService(defaults: snippetDefaults)
         snippets.snippets = [:]

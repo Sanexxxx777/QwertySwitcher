@@ -734,7 +734,7 @@ enum LearningKeyboardMonitorIntegrationTests {
     )? {
         let suite = AppIdentity.bundleIdentifier + ".tests.kmLearning." + UUID().uuidString
         guard let defaults = UserDefaults(suiteName: suite) else { return nil }
-        TestRunner.discardDefaultsSuiteAtEndOfRun(suite) // fresh UUID name; no teardown point here, swept at end of run
+        TestRunner.discardDefaultsSuite(suite) // fresh UUID name; no teardown point here, swept at end of run
         let prefs = PreferencesService(defaults: defaults)
         let exceptions = ExceptionsService(defaults: defaults)
         let learnedWords = LearnedWordsStore(defaults: defaults)
