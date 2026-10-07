@@ -379,6 +379,33 @@ enum SettingsBackupTests {
                     TestRunner.assertTrue(false, "old-format fixture builds")
                 }
 
+                // Old-format backup, count 3 spanning 40 days (promoted in the live app, field absent):
+                // the entry must come back active, with promotedAt = lastConfirmed.
+                learnedWords.removeAll()
+                for offset in [0, day, 40 * day] {
+                    learnedWords.recordManualFix(word: "spanold", lang: "en", originApp: nil, at: t0.addingTimeInterval(offset))
+                }
+                if let spanOldData = try? service.encodedBackup(now: Date(timeIntervalSince1970: 1_000)),
+                   var object = (try? JSONSerialization.jsonObject(with: spanOldData)) as? [String: Any],
+                   var words = object["learnedWords"] as? [[String: Any]] {
+                    for i in words.indices { words[i].removeValue(forKey: "promotedAt") }
+                    object["learnedWords"] = words
+                    if let oldData = try? JSONSerialization.data(withJSONObject: object) {
+                        learnedWords.removeAll()
+                        do {
+                            try service.importBackup(oldData)
+                            let imported = learnedWords.allEntries["en:spanold"]
+                            TestRunner.assertTrue(learnedWords.isActive(word: "spanold", lang: "en"), "old-format count-3 entry spanning >30 days imports active")
+                            TestRunner.assertEqual(imported?.count, 3, "old-format span entry keeps count 3")
+                            TestRunner.assertEqual(imported?.promotedAt, imported?.lastConfirmed, "old-format span entry: promotedAt = lastConfirmed")
+                        } catch {
+                            TestRunner.assertTrue(false, "old-format span backup imports: \(error.localizedDescription)")
+                        }
+                    }
+                } else {
+                    TestRunner.assertTrue(false, "old-format span fixture builds")
+                }
+
                 // A promotedAt outside [first, last] is rejected.
                 learnedWords.removeAll()
                 learnedWords.recordManualFix(word: "badpromo", lang: "en", originApp: nil, at: t0)

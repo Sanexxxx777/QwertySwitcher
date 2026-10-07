@@ -270,7 +270,11 @@ final class SettingsBackupService {
                     firstConfirmed: Date(timeIntervalSince1970: TimeInterval(entry.firstConfirmed)),
                     lastConfirmed: Date(timeIntervalSince1970: TimeInterval(entry.lastConfirmed)),
                     originApp: entry.originApp,
+                    // Backups written before `promotedAt` existed: count >= 2 means the entry was
+                    // promoted, so it stays active even past the 30-day window (same choice as the
+                    // store's lazy upgrade on first touch).
                     promotedAt: entry.promotedAt.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+                        ?? (entry.count >= 2 ? Date(timeIntervalSince1970: TimeInterval(entry.lastConfirmed)) : nil)
                 )
             )
         }
