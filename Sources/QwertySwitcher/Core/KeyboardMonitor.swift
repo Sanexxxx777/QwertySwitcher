@@ -35,12 +35,20 @@ final class KeyboardMonitor {
     private var pendingUserEvents = PendingUserEventQueue<KeyEventSnapshot>()
     private var invalidateAfterReplacement = false
 
-    /// Side effect for replaying a queued keystroke once a paused replacement
-    /// finishes. Production posts a real CGEvent back into the session tap
-    /// (`eventTapCallback` sees it again, routed `.replayedUser` via its own
-    /// marker) — the headless test harness overrides this to append to an
-    /// in-memory list instead, since a posted CGEvent goes nowhere observable
-    /// there. `finishReplacement` is the only caller.
+    /// Side effect for DELIVERING a queued keystroke to the app once a paused
+    /// replacement finishes — delivery only, never analysis. Production posts
+    /// a real CGEvent at `.cgAnnotatedSessionEventTap`, which is DOWNSTREAM of
+    /// our own `.cgSessionEventTap`: the posted event never re-enters
+    /// `eventTapCallback`/`handle(_:)`. (This comment used to say the tap
+    /// "sees it again" — it does not, and a replayed letter silently stayed
+    /// out of `buffer`/`runKeystrokes`: the field log showed the next word
+    /// starting at `run=1 buf=0` without its first letter, and a later
+    /// correction of that word erased one character too few, leaving a stray
+    /// old-layout letter in front.) Analysis therefore happens in
+    /// `drainPendingUserEvents`, which mirrors the tap callback before it
+    /// calls this. The headless test harness overrides this to render the
+    /// key on its fake screen — and must not call `handle` itself.
+    /// `drainPendingUserEvents` is the only caller.
     var replaySink: (KeyEventSnapshot) -> Void = { snapshot in
         guard let event = snapshot.makeEvent() else {
             // No fallback exists if CGEvent construction itself fails
@@ -2584,8 +2592,43 @@ final class KeyboardMonitor {
             invalidateAfterReplacement = false
             invalidateEditingContext()
         }
-        for queued in pendingUserEvents.drain() {
-            replaySink(queued)
+        drainPendingUserEvents()
+    }
+
+    /// Hands every key queued during the pause back to the app, analysing each
+    /// one first exactly as `eventTapCallback` does for a live key (see
+    /// `replaySink` for why the posted event cannot do that itself). FIFO.
+    ///
+    /// - A replacement is active again (an earlier replayed key started one —
+    ///   e.g. a queued Cmd+Option+Z): this key and everything behind it go
+    ///   back to the queue in order and drain at that replacement's own
+    ///   `finishReplacement`. Analysing them now would run the next word's
+    ///   keys through `handle` while the screen is mid-rewrite, and the
+    ///   replacement's completion (it clears `buffer`) would swallow them.
+    /// - `.ours` (a failed replacement's restored trigger, `asOurs`) is
+    ///   delivered only, never analysed — the tap passes `.ours` through too.
+    /// - Anything else: shortcut check, `handle` as `.replayedUser` (skips the
+    ///   avalanche guard's proof-of-life), then deliver unless it was
+    ///   suppressed. The post-replacement cooldown set in `finishReplacement`
+    ///   keeps a replayed burst from starting an automatic correction here;
+    ///   the re-queue rule above is the safety net for the paths it does not
+    ///   cover (shortcuts, Double Shift).
+    private func drainPendingUserEvents() {
+        var remaining = pendingUserEvents.drain()[...]
+        while let snapshot = remaining.first {
+            if isPaused {
+                for queued in remaining { pendingUserEvents.enqueue(queued) }
+                return
+            }
+            remaining.removeFirst()
+            if snapshot.route == .ours {
+                replaySink(snapshot)
+                continue
+            }
+            let suppressHandledShortcut = handlesShortcut(snapshot)
+            handle(snapshot.asReplayed)
+            let suppressTrigger = consumeSuppressCurrentEvent()
+            if !(suppressHandledShortcut || suppressTrigger) { replaySink(snapshot) }
         }
     }
 

@@ -122,11 +122,6 @@ final class KeyboardMonitorHarness {
     let replacer: FakeTextReplacer
     let monitor: KeyboardMonitor
     private let inputSources: InputSourceManager
-    /// Keystrokes `KeyboardMonitor.replaySink` captured while a replacement
-    /// was in flight, waiting to be dispatched — the harness's stand-in for
-    /// production replaying a real CGEvent back through the session tap.
-    private var pendingReplays: [KeyEventSnapshot] = []
-
     var screen: String { replacer.screen }
     /// How many replacements the monitor actually attempted — the only way to
     /// assert "it left correct text alone" rather than "it happened to put the
@@ -172,14 +167,19 @@ final class KeyboardMonitorHarness {
             secureInputDetector: secureInputDetector,
             learnedWordsStore: learnedWordsStore
         )
-        // Mirrors `KeyEventSnapshot.makeEvent()`'s conditional marking
-        // (plan 004): an `.ours` snapshot (a failed replacement's restored
-        // trigger — see `PendingUserEventQueue.replaceFront`) keeps that
-        // route when it round-trips through the real tap, so `dispatch`
-        // below renders it without re-analyzing it. Everything else becomes
-        // `.replayedUser`, exactly as before.
+        // Delivery only — what the app would render when production posts the
+        // queued event back downstream of our tap. The ANALYSIS of a queued
+        // key lives in `KeyboardMonitor.finishReplacement`'s drain (plan 013,
+        // step A); this closure must NOT call `handle` again, or the key would
+        // be analyzed twice and the harness would hide the very defect that
+        // drain fixes (it used to re-dispatch here, which production never did).
         monitor.replaySink = { [weak self] snapshot in
-            self?.pendingReplays.append(snapshot.route == .ours ? snapshot : snapshot.asReplayed)
+            guard let self else { return }
+            if let rendered = self.inputSources.currentLayout.flatMap({
+                self.inputSources.characterForKeycode(snapshot.keycode, layout: $0, flags: snapshot.flags)
+            }) {
+                self.replacer.appendPhysicalChar(rendered)
+            }
         }
         // Terminal-like: no AX inside this headless harness (a CLI test
         // binary has no focused element to read). A test that needs an
@@ -188,8 +188,9 @@ final class KeyboardMonitorHarness {
     }
 
     /// Renders `keycode`/`flags` as they'd appear on screen right now (the
-    /// currently active layout) unless the tap suppressed them — shared by a
-    /// fresh physical keydown and by draining a replayed one. Mirrors
+    /// currently active layout) unless the tap suppressed them — used for a
+    /// fresh physical keydown (a replayed one is analyzed and delivered by
+    /// `KeyboardMonitor.finishReplacement` itself). Mirrors
     /// `eventTapCallback` (KeyboardMonitor.swift) branch for branch:
     /// `route == .ours` is passed straight through (rendered, never
     /// analyzed — the real tap does this for our own synthetic events);
@@ -212,19 +213,6 @@ final class KeyboardMonitorHarness {
         }
     }
 
-    /// Drains `pendingReplays` FIFO, dispatching each the same way a fresh
-    /// keydown is dispatched — a replayed key may itself finish a
-    /// replacement and queue MORE replays, so this loops until the list is
-    /// empty, mirroring production (a replayed event only re-enters the tap
-    /// after the current callback returns). Shared by `press` and
-    /// `completePendingReplacement` — the two places a replacement can
-    /// finish and hand back queued keystrokes.
-    private func drainPendingReplays() {
-        while !pendingReplays.isEmpty {
-            dispatch(pendingReplays.removeFirst())
-        }
-    }
-
     /// Simulate one physical keydown. Mirrors `eventTapCallback`: run the
     /// same analysis `handle` does, then only render the character if the
     /// tap wouldn't have suppressed it — a firing correction suppresses the
@@ -237,18 +225,17 @@ final class KeyboardMonitorHarness {
     /// to false so every pre-existing call renders exactly as before.
     func press(_ keycode: UInt16, flags: CGEventFlags = [], autorepeat: Bool = false) {
         dispatch(KeyEventSnapshot(type: .keyDown, keycode: keycode, flags: flags, autorepeat: autorepeat ? 1 : 0))
-        drainPendingReplays()
     }
 
     func press(_ stroke: BufferedKeystroke) { press(stroke.keycode, flags: stroke.flags) }
     func type(_ strokes: [BufferedKeystroke]) { strokes.forEach { press($0) } }
 
     /// Completes a replacement the test put on hold via `replacer.mode =
-    /// .deferred`, then drains any replay this produces — the harness's
-    /// hand-crank for what happens automatically, later, in production.
+    /// .deferred` — the harness's hand-crank for what happens automatically,
+    /// later, in production. The queued keys drain inside the completion's
+    /// own `finishReplacement()`, through the production drain.
     func completePendingReplacement(with result: TextReplacer.Result = .success) {
         replacer.completePending(with: result)
-        drainPendingReplays()
     }
 }
 
@@ -1641,30 +1628,27 @@ enum ReplayBurstAndFailureTests {
             for stroke in eshche { h.press(stroke) }
             h.press(49) // space
 
-            // Resolve the held replacement WITHOUT draining the burst yet
-            // (completePendingReplacement would do both at once) — captures
-            // the actual corrected word this harness/scorer produced,
-            // instead of assuming it from a hardcoded "привет".
-            h.replacer.completePending()
-            let correctedWord = h.screen
+            // Resolve the held replacement. The queued burst drains inside the
+            // completion's own `finishReplacement()` (production drain, plan 013
+            // step A — the harness no longer has a separate hand-cranked drain),
+            // so the corrected word is whatever precedes the burst on screen,
+            // not assumed from a hardcoded "привет".
+            h.completePendingReplacement()
+            let burst = " еще "
+            TestRunner.assertTrue(
+                h.screen.hasSuffix(burst),
+                "the queued burst renders exactly as typed — Yoficator does not rewrite «еще» mid-burst"
+                    + " (accepted trade-off of the fix) (got \"\(h.screen)\")"
+            )
+            let correctedWord = String(h.screen.dropLast(burst.count))
             TestRunner.assertTrue(
                 !correctedWord.isEmpty && correctedWord.allSatisfy { !$0.isWhitespace },
-                "setup: the instant correction produced one corrected word, nothing queued rendered yet"
+                "setup: the instant correction produced one corrected word in front of the burst"
                     + " (got \"\(correctedWord)\")"
             )
-
-            // `pending` is already nil (consumed above), so this call is
-            // just the drain half — dispatches the queued " еще " burst.
-            h.completePendingReplacement()
-
             TestRunner.assertEqual(
                 h.invocationCount, 1,
                 "no second replacement was started by the replayed burst (defect 1)"
-            )
-            TestRunner.assertEqual(
-                h.screen, correctedWord + " еще ",
-                "the queued burst renders exactly as typed — Yoficator does not rewrite «еще» mid-burst"
-                    + " (accepted trade-off of the fix)"
             )
         }
 
@@ -1755,6 +1739,92 @@ enum ReplayBurstAndFailureTests {
                 !newLines.contains("skip boundary correction: already instant-corrected"),
                 "a cancelled instant correction resets instantCorrectionGate — the boundary path is not"
                     + " silently blocked by a correction that never actually happened (defect 2)"
+            )
+        }
+
+        // --- Plan 013 step A: a replayed key is ANALYZED, not just delivered
+        // ---------------------------------------------------------------
+        // Field evidence (verbose log, 24 h): a letter typed while a boundary
+        // correction was in flight reached the screen but never the buffer —
+        // the next word logged `run=1 buf=0` without its first letter, because
+        // production posts the replay downstream of our tap and nothing
+        // re-analysed it. A later Double Shift on that word then erased one
+        // character too few and left a stray old-layout letter in front.
+        // Synthetic shape: "ghbdtn" + space (boundary correction held in
+        // flight), the first letter of the next word typed during the pause,
+        // the rest typed live after the pause ends.
+        guard let rnj = InstantCorrectionFixtures.keystrokes(for: "rnj", reverse: enReverse), rnj.count == 3 else {
+            TestRunner.assertTrue(false, "'rnj': EN fixture can type every character")
+            return
+        }
+        do {
+            let h = harness()
+            h.prefs.isInstantCorrectionEnabled = false // isolate the boundary path
+            h.replacer.mode = .deferred
+            h.type(ghbdtn)
+            h.press(49) // space — boundary correction starts, held in flight
+            TestRunner.assertEqual(h.invocationCount, 1, "setup: boundary correction attempted")
+
+            h.press(rnj[0]) // first letter of the next word, typed mid-pause → queued
+            h.completePendingReplacement()
+            TestRunner.assertEqual(
+                h.screen, "привет к",
+                "setup: the queued letter is delivered after the correction, in the new layout"
+            )
+
+            h.press(rnj[1])
+            h.press(rnj[2])
+            h.replacer.mode = .immediate(.success)
+            TestRunner.assertTrue(
+                h.monitor.swapLastWordInBuffer(),
+                "Double Shift finds the word whose first letter was replayed from the queue"
+            )
+            TestRunner.assertEqual(
+                h.screen, "привет rnj",
+                "a replayed letter is analyzed (buffer/run), so Double Shift erases all 3 letters —"
+                    + " an unanalyzed replay leaves a stray «к» in front (plan 013 A)"
+            )
+        }
+
+        // --- Rule 1 of the drain: a replayed key that itself starts a
+        // replacement re-queues the rest ------------------------------------
+        // Cmd+Option+Z (undo) is queued mid-pause, then a letter. The drain
+        // analyzes the shortcut, which starts the undo replacement (held in
+        // flight) — the letter behind it must stay queued, NOT be analyzed
+        // while paused (undo's success path clears the buffer, which would
+        // swallow it), and drain at the undo's own finishReplacement.
+        do {
+            let h = harness()
+            h.prefs.isInstantCorrectionEnabled = false
+            h.replacer.mode = .deferred
+            h.type(ghbdtn)
+            h.press(49) // space — boundary correction held in flight
+            TestRunner.assertEqual(h.invocationCount, 1, "setup: boundary correction attempted")
+
+            h.press(6, flags: [.maskCommand, .maskAlternate]) // undo shortcut → queued
+            h.press(rnj[0]) // → queued behind it
+            h.completePendingReplacement() // correction done → drain starts the undo
+            TestRunner.assertEqual(h.invocationCount, 2, "the replayed undo shortcut started its replacement")
+            TestRunner.assertTrue(h.monitor.isPaused, "the undo is in flight")
+            TestRunner.assertEqual(
+                h.screen, "привет ",
+                "the shortcut is consumed (not delivered) and the letter behind it waits for the undo"
+            )
+
+            h.completePendingReplacement() // undo done → the re-queued letter drains
+            TestRunner.assertTrue(!h.monitor.isPaused, "setup: undo finished")
+            TestRunner.assertEqual(
+                h.screen, "ghbdtn r",
+                "after the undo the re-queued letter is delivered once, in the restored layout"
+            )
+
+            h.press(rnj[1])
+            h.press(rnj[2])
+            h.replacer.mode = .immediate(.success)
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "Double Shift finds the re-queued letter's word")
+            TestRunner.assertEqual(
+                h.screen, "ghbdtn кто",
+                "the re-queued letter was analyzed AFTER the undo cleared the buffer, so it is in the buffer"
             )
         }
     }

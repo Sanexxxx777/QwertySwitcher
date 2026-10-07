@@ -49,8 +49,9 @@ struct KeyEventSnapshot {
     /// restores its suppressed trigger via `PendingUserEventQueue.replaceFront
     /// (with: trigger.asOurs)` — that trigger must round-trip through the
     /// tap and reach the app WITHOUT being analyzed a second time); every
-    /// other queued snapshot marks `.replayedUser` as before, so the tap
-    /// still analyzes it exactly like live typing.
+    /// other queued snapshot marks `.replayedUser`. Its analysis already
+    /// happened in `KeyboardMonitor.drainPendingUserEvents` — the posted event
+    /// lands downstream of our tap and is never re-analyzed by it.
     func makeEvent() -> CGEvent? {
         let source = CGEventSource(stateID: .hidSystemState)
         guard let event = CGEvent(
@@ -72,8 +73,7 @@ struct KeyEventSnapshot {
 
     /// Same fields, re-routed as a replayed user event — what a queued
     /// keystroke becomes the moment it is handed back to `handle(_:)` after
-    /// the pause that queued it ends (production: the real event tap reading
-    /// its own replayed CGEvent's marker; the test harness: `pendingReplays`).
+    /// the pause that queued it ends (`KeyboardMonitor.drainPendingUserEvents`).
     var asReplayed: KeyEventSnapshot {
         KeyEventSnapshot(
             type: type, keycode: keycode, flags: flags,
