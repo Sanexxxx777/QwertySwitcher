@@ -16,28 +16,22 @@ enum ReplacementAtomicityGuardTests {
     static func run() {
         TestRunner.section("TextReplacer — a started replacement is never abandoned halfway")
 
-        let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent("Core/TextReplacer.swift")
-        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
-            TestRunner.skip("TextReplacer.swift not readable from \(source.path)")
-            return
-        }
+        guard let text = SourceContract.require("Core/TextReplacer.swift", "TextReplacer atomicity") else { return }
 
-        for (function, loopHeader) in [
-            ("sendBackspaces", "for _ in 0..<count {"),
-            ("sendBackspacesVerified", "while sent < count + maxExtra {"),
-            ("typeStringFast", "for char in text {")
+        // From the loop header to the end of its function: a `guard !cancellation.isCancelled` BEFORE the
+        // first backspace is the legitimate pre-check; a re-check in/after the loop bails out after text was erased.
+        for (function, signature, loopHeader) in [
+            ("sendBackspaces", "private func sendBackspaces(", "for _ in 0..<count {"),
+            ("sendBackspacesVerified", "private func sendBackspacesVerified(", "while sent < count + maxExtra {"),
+            ("typeStringFast", "private func typeStringFast(", "for char in text {")
         ] {
-            guard let loopStart = text.range(of: loopHeader) else {
-                TestRunner.assertTrue(false, "\(function): loop header not found — test needs updating")
+            guard let functionText = SourceContract.body(ofFunction: signature, in: text),
+                  SourceContract.block(startingAt: loopHeader, in: functionText) != nil,   // exactly one such loop
+                  let loopStart = functionText.range(of: loopHeader) else {
+                TestRunner.assertTrue(false, "\(function): function or loop header not found — test needs updating")
                 continue
             }
-            // Bound the search to the rest of THIS function: the next
-            // `private func` (or end of file) is a safe terminator here.
-            let rest = String(text[loopStart.upperBound...])
-            let functionBody = rest.range(of: "private func").map { String(rest[..<$0.lowerBound]) } ?? rest
+            let functionBody = String(functionText[loopStart.lowerBound...])
             TestRunner.assertTrue(
                 !functionBody.contains("isCancelled"),
                 "\(function) does not re-check cancellation inside its loop"
@@ -70,20 +64,18 @@ enum RunResyncStructuralGuardTests {
     static func run() {
         TestRunner.section("Double Shift erase count — the scored path reuses convertWholeRun's screen measurement")
 
-        guard let text = SourceContract.keyboardMonitorSources() else {
-            TestRunner.assertTrue(false, "KeyboardMonitor sources must be readable (all three files)")
-            return
-        }
+        guard let text = SourceContract.requireKeyboardMonitorSources("Run-resync structural guards") else { return }
 
         // 1) convertWholeRun stashes the AX measurement right where it falls
         //    through (letters-only run — nothing for THIS function to do).
-        guard let fallthroughMarker = text.range(
-            of: "run check: letters only — falls through to the scored path"
-        ) else {
-            TestRunner.assertTrue(false, "letters-only fallthrough log line not found — test needs updating")
+        guard let wholeRunBody = SourceContract.body(ofFunction: "private func convertWholeRun(", in: text),
+              let fallthroughMarker = wholeRunBody.range(
+                of: "run check: letters only — falls through to the scored path"
+              ) else {
+            TestRunner.assertTrue(false, "convertWholeRun or its letters-only fallthrough log line not found — test needs updating")
             return
         }
-        let precedingGuardBlock = String(text[..<fallthroughMarker.lowerBound]).suffix(400)
+        let precedingGuardBlock = String(wholeRunBody[..<fallthroughMarker.lowerBound]).suffix(400)
         TestRunner.assertTrue(
             precedingGuardBlock.contains("pendingRunResync = onScreen.count"),
             "convertWholeRun stashes the AX-measured screen length before falling through"
@@ -92,14 +84,11 @@ enum RunResyncStructuralGuardTests {
         // 2) swapLastWordInBuffer picks it up, gated to the LIVE run — never
         //    a `lastCompletedWord` history snapshot, which is a different
         //    word at a different caret position.
-        guard let funcStart = text.range(of: "func swapLastWordInBuffer() -> Bool {") else {
+        guard let swapBody = SourceContract.body(ofFunction: "func swapLastWordInBuffer() -> Bool {", in: text) else {
             TestRunner.assertTrue(false, "swapLastWordInBuffer not found — test needs updating")
             return
         }
-        guard let lengthMarker = text.range(
-            of: "var length = leadingSymbols.count + keystrokes.count",
-            range: funcStart.upperBound..<text.endIndex
-        ) else {
+        guard let lengthMarker = swapBody.range(of: "var length = leadingSymbols.count + keystrokes.count") else {
             TestRunner.assertTrue(false, "erase-length computation not found — test needs updating")
             return
         }
@@ -109,19 +98,19 @@ enum RunResyncStructuralGuardTests {
         //    measurement. Only the erase count is allowed to move; the
         //    screen decides how much to erase, the keycodes decide what to
         //    type (project invariant).
-        let contentSelection = String(text[funcStart.upperBound..<lengthMarker.lowerBound])
+        let contentSelection = String(swapBody[..<lengthMarker.lowerBound])
         TestRunner.assertTrue(
             !contentSelection.contains("pendingRunResync"),
             "the replacement CONTENT is fully decided before the erase-length override runs"
         )
 
-        guard let callSite = text.range(
-            of: "textReplacer.replaceCurrentWord(", range: lengthMarker.upperBound..<text.endIndex
+        guard let callSite = swapBody.range(
+            of: "textReplacer.replaceCurrentWord(", range: lengthMarker.upperBound..<swapBody.endIndex
         ) else {
             TestRunner.assertTrue(false, "replaceCurrentWord call site not found — test needs updating")
             return
         }
-        let overrideBlock = String(text[lengthMarker.upperBound..<callSite.lowerBound])
+        let overrideBlock = String(swapBody[lengthMarker.upperBound..<callSite.lowerBound])
         // 4) The override is asymmetric (16.08.2026 fix): erasing LESS than
         //    modelled is adopted unconditionally (clamp), erasing MORE is
         //    gated on proof the extra characters are our own artifact
@@ -231,12 +220,11 @@ enum OverlayMismatchGuardTests {
     static func run() {
         TestRunner.section("TextReplacer — an overlay delivery aborts only when the screen holds LESS than the model")
 
-        let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent("Core/TextReplacer.swift")
-        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
-            TestRunner.skip("TextReplacer.swift not readable from \(source.path)")
+        // `replaceCurrentWord` is declared twice (protocol + implementation); the implementation's
+        // continuation line is unique and its first `{` opens the real body.
+        guard let replacerText = SourceContract.require("Core/TextReplacer.swift", "Overlay mismatch guards"),
+              let text = SourceContract.block(startingAt: "trailingAlreadyOnScreen: Bool = true,", in: replacerText) else {
+            TestRunner.assertTrue(false, "Overlay mismatch guards: TextReplacer.replaceCurrentWord body not found — test needs updating")
             return
         }
 
@@ -321,26 +309,22 @@ enum VerifiedEraseGuardTests {
     static func run() {
         TestRunner.section("TextReplacer — verified erase for overlay panels")
 
-        let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent("Core/TextReplacer.swift")
-        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
-            TestRunner.skip("TextReplacer.swift not readable from \(source.path)")
-            return
-        }
+        guard let text = SourceContract.require("Core/TextReplacer.swift", "Verified erase guards") else { return }
 
         // (a) the overlay branch calls the verified erase, the plain branch
         // keeps calling the original blind burst — never the other way round.
-        guard let eraseDecisionStart = text.range(of: "let eraseSucceeded: Bool"),
-              let typeStringCall = text.range(
-                of: "self.typeStringFast(plan.payload", range: eraseDecisionStart.upperBound..<text.endIndex
+        // (`replaceCurrentWord` is declared twice — protocol + implementation; the implementation's
+        // continuation line is unique and its first `{` opens the real body.)
+        guard let replaceBody = SourceContract.block(startingAt: "trailingAlreadyOnScreen: Bool = true,", in: text),
+              let eraseDecisionStart = replaceBody.range(of: "let eraseSucceeded: Bool"),
+              let typeStringCall = replaceBody.range(
+                of: "self.typeStringFast(plan.payload", range: eraseDecisionStart.upperBound..<replaceBody.endIndex
               )
         else {
             TestRunner.assertTrue(false, "erase decision block not found — test needs updating")
             return
         }
-        let eraseDecisionBlock = String(text[eraseDecisionStart.upperBound..<typeStringCall.lowerBound])
+        let eraseDecisionBlock = String(replaceBody[eraseDecisionStart.upperBound..<typeStringCall.lowerBound])
         TestRunner.assertTrue(
             eraseDecisionBlock.contains("self.sendBackspacesVerified("),
             "the overlay branch calls the verified erase"
@@ -351,13 +335,10 @@ enum VerifiedEraseGuardTests {
         )
 
         // (b)-(e) the verified erase's own safety budget.
-        guard let verifiedFuncStart = text.range(of: "private func sendBackspacesVerified(") else {
+        guard let verifiedFuncBody = SourceContract.body(ofFunction: "private func sendBackspacesVerified(", in: text) else {
             TestRunner.assertTrue(false, "sendBackspacesVerified not found — test needs updating")
             return
         }
-        let verifiedFuncTail = String(text[verifiedFuncStart.lowerBound...])
-        let verifiedFuncBody = verifiedFuncTail.range(of: "\n    private func typeStringFast")
-            .map { String(verifiedFuncTail[..<$0.lowerBound]) } ?? verifiedFuncTail
 
         TestRunner.assertTrue(
             verifiedFuncBody.contains("count + maxExtra"),
@@ -381,11 +362,10 @@ enum VerifiedEraseGuardTests {
         )
 
         // (f) the payload retype is never verified via AX — only the erase is.
-        guard let typeFuncStart = text.range(of: "private func typeStringFast(") else {
+        guard let typeFuncBody = SourceContract.body(ofFunction: "private func typeStringFast(", in: text) else {
             TestRunner.assertTrue(false, "typeStringFast not found — test needs updating")
             return
         }
-        let typeFuncBody = String(text[typeFuncStart.lowerBound...])
         TestRunner.assertTrue(
             !typeFuncBody.contains("selectionRange"),
             "typeStringFast never verifies via AX — the payload is not read back"
@@ -405,32 +385,22 @@ enum SyntheticEventFlagsGuardTests {
     static func run() {
         TestRunner.section("TextReplacer — synthetic keyboard events carry no inherited modifiers")
 
-        let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent("Core/TextReplacer.swift")
-        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
-            TestRunner.skip("TextReplacer.swift not readable from \(source.path)")
-            return
-        }
+        guard let text = SourceContract.require("Core/TextReplacer.swift", "Synthetic event flags guard") else { return }
 
         let marker = "CGEvent(keyboardEventSource:"
-        let occurrences = text.components(separatedBy: marker).count - 1
         TestRunner.assertEqual(
-            occurrences, 1,
+            SourceContract.occurrences(of: marker, in: text), 1,
             "every synthetic keyboard event (backspace, verified-erase backspace, Unicode retype) is"
                 + " built through ONE shared helper — a second, uncleared construction site would"
                 + " reopen the inherited-modifiers hole"
         )
 
-        guard let markerRange = text.range(of: marker) else {
-            TestRunner.assertTrue(false, "\(marker) not found — test needs updating")
+        // The one construction site lives in the shared helper `makeSyntheticKeyEvent`; its body must hold it.
+        guard let helperBody = SourceContract.body(ofFunction: "private static func makeSyntheticKeyEvent(", in: text),
+              helperBody.contains(marker) else {
+            TestRunner.assertTrue(false, "\(marker) not found inside makeSyntheticKeyEvent — test needs updating")
             return
         }
-        // Same bounding convention as ReplacementAtomicityGuardTests above:
-        // the next `private func` (or end of file) closes the helper.
-        let rest = String(text[markerRange.upperBound...])
-        let helperBody = rest.range(of: "private func").map { String(rest[..<$0.lowerBound]) } ?? rest
         TestRunner.assertTrue(
             helperBody.contains(".flags = []"),
             "the shared helper clears flags on every synthetic event it builds"

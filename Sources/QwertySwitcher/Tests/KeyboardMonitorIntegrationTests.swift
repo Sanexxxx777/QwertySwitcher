@@ -2582,10 +2582,7 @@ enum TapAgeInterpretationTests {
 enum TapAgeProbeRouteGuardTests {
     static func run() {
         TestRunner.section("eventTapCallback — delivery-age probe only for physical keys")
-        guard let text = SourceContract.keyboardMonitorSources() else {
-            TestRunner.assertTrue(false, "KeyboardMonitor sources must be readable (all three files)")
-            return
-        }
+        guard let text = SourceContract.requireKeyboardMonitorSources("eventTapCallback age-probe guard") else { return }
         let needle = "noteTapDeliveryAge(eventTimestamp:"
         let lines = text.components(separatedBy: "\n")
         let callIdx = lines.indices.filter {
@@ -3000,17 +2997,9 @@ enum ModelAndLearningFixesTests {
 
         // Step 3: the app's own Single Shift / CapsLock switch is a USER switch.
         do {
-            let url = URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent().deletingLastPathComponent()
-                .appendingPathComponent("Core/HotkeyManager.swift")
-            if let text = try? String(contentsOf: url, encoding: .utf8) {
-                func body(of marker: String) -> String? {
-                    guard let r = text.range(of: marker) else { return nil }
-                    let tail = String(text[r.upperBound...])
-                    return tail.range(of: "\n    }\n").map { String(tail[..<$0.lowerBound]) } ?? tail
-                }
-                let single = body(of: "private func handleSingleShift()")
-                let success = body(of: "private func recordDoubleShiftSuccess(")
+            if let text = SourceContract.require("Core/HotkeyManager.swift", "own-Shift switch guard") {
+                let single = SourceContract.body(ofFunction: "private func handleSingleShift()", in: text)
+                let success = SourceContract.body(ofFunction: "private func recordDoubleShiftSuccess(", in: text)
                 TestRunner.assertTrue(
                     single?.contains("switchToAndVerify(target, selfInitiated: false)") == true,
                     "3: handleSingleShift's switch is not self-initiated (the half-typed word is wiped)"
@@ -3019,8 +3008,6 @@ enum ModelAndLearningFixesTests {
                     success != nil && success?.contains("selfInitiated: false") == false,
                     "3: the Double Shift success switch stays self-initiated"
                 )
-            } else {
-                TestRunner.skip("HotkeyManager.swift not readable from \(url.path)")
             }
             TestRunner.assertEqual(
                 InputSourceManager.classifyChange(previousLayoutID: "a", newLayoutID: "b", pendingSelfSwitchID: nil),
@@ -3166,10 +3153,7 @@ enum ContextResetPolicyTests {
     /// statements that every context reset must carry occur ONLY inside the functions listed
     /// here. A hand-written reset list at a new site fails this test. A missing file FAILS.
     private static func resetStatementsLiveOnlyInTheExecutor() {
-        guard let text = SourceContract.keyboardMonitorSources() else {
-            TestRunner.assertTrue(false, "plan 007 guard: KeyboardMonitor sources must be readable (all three files)")
-            return
-        }
+        guard let text = SourceContract.requireKeyboardMonitorSources("plan 007 guard") else { return }
         // statement -> function name -> why it may carry it
         let allowed: [(statement: String, functions: [String: String])] = [
             ("feedbackTracker.reset()", [

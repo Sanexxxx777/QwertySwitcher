@@ -77,27 +77,13 @@ enum BigramThresholdTableTests {
 /// in the real source, not a fuzzy pattern match — this is meant to catch a
 /// future accidental swap, not to survive an unrelated rewrite untouched.
 enum JunkMeterCallSiteGuardTests {
-    private static func readSource(_ path: String) -> String? {
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent(path)
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
-            TestRunner.skip("\(path) not readable from \(url.path)")
-            return nil
-        }
-        return text
-    }
-
     static func run() {
         TestRunner.section("JunkMeter call sites — isJunk always possible, isClean always plausible")
 
-        guard let ldText = readSource("Core/LanguageDetector.swift") else { return }
+        guard let ldText = SourceContract.require("Core/LanguageDetector.swift", "JunkMeter call sites") else { return }
 
         // junkOverrideFires: own -> possible -> isJunk; target -> plausible -> isClean.
-        if let funcStart = ldText.range(of: "private func junkOverrideFires("),
-           let nextFunc = ldText.range(of: "\n    /// Junk-override is disabled") {
-            let scoped = String(ldText[funcStart.upperBound..<nextFunc.lowerBound])
+        if let scoped = SourceContract.body(ofFunction: "private func junkOverrideFires(", in: ldText) {
             TestRunner.assertTrue(
                 scoped.contains("let ownBigrams = dictionary.possibleBigrams(language: ownLang)"),
                 "junkOverrideFires: ownBigrams (feeds isJunk) is sourced from possibleBigrams"
@@ -119,9 +105,7 @@ enum JunkMeterCallSiteGuardTests {
         }
 
         // isCleanReading: own reading -> plausible -> isClean (Mechanism C bump gate).
-        if let funcStart = ldText.range(of: "func isCleanReading(_ core: String, language: String) -> Bool {"),
-           let nextFunc = ldText.range(of: "\n    /// Mechanism A write-time guard") {
-            let scoped = String(ldText[funcStart.upperBound..<nextFunc.lowerBound])
+        if let scoped = SourceContract.body(ofFunction: "func isCleanReading(_ core: String, language: String) -> Bool", in: ldText) {
             TestRunner.assertTrue(
                 scoped.contains("let bigrams = dictionary.plausibleBigrams(language: language)"),
                 "isCleanReading: sourced from plausibleBigrams"
@@ -136,9 +120,7 @@ enum JunkMeterCallSiteGuardTests {
 
         // learnedHitApplies no longer calls JunkMeter at all (previous wave,
         // short-token fix) — guard that this stays true, not just today.
-        if let funcStart = ldText.range(of: "func learnedHitApplies(core: String, lang: String) -> Bool {"),
-           let funcEnd = ldText.range(of: "\n    }", range: funcStart.upperBound..<ldText.endIndex) {
-            let scoped = String(ldText[funcStart.upperBound..<funcEnd.lowerBound])
+        if let scoped = SourceContract.body(ofFunction: "func learnedHitApplies(core: String, lang: String) -> Bool", in: ldText) {
             TestRunner.assertTrue(
                 !scoped.contains("JunkMeter"),
                 "learnedHitApplies never calls JunkMeter (exact learned match uses isMixedScript only)"
@@ -148,7 +130,7 @@ enum JunkMeterCallSiteGuardTests {
         }
 
         // InstantCorrectionAnalyzer's own-reading junk-gate -> plausible -> isClean.
-        guard let icaText = readSource("Core/InstantCorrectionAnalyzer.swift") else { return }
+        guard let icaText = SourceContract.require("Core/InstantCorrectionAnalyzer.swift", "JunkMeter call sites") else { return }
         TestRunner.assertTrue(
             icaText.contains("dictionary.plausibleBigrams(language: currentLayout.languageCode)"),
             "InstantCorrectionAnalyzer junk-gate: sourced from plausibleBigrams"
@@ -172,20 +154,8 @@ enum BigramThresholdPortSyncTests {
     static func run() {
         TestRunner.section("plausibleMinWords — Swift/Python K stays in sync")
 
-        let swiftURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Dictionary/WordDictionary.swift")
-        let pyURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Scripts/research/false_switch_sim.py")
-
-        guard let swiftText = try? String(contentsOf: swiftURL, encoding: .utf8) else {
-            TestRunner.skip("WordDictionary.swift not readable from \(swiftURL.path)")
-            return
-        }
-        guard let pyText = try? String(contentsOf: pyURL, encoding: .utf8) else {
-            TestRunner.skip("false_switch_sim.py not readable from \(pyURL.path)")
+        guard let swiftText = SourceContract.require("Dictionary/WordDictionary.swift", "plausibleMinWords sync"),
+              let pyText = SourceContract.require("../../Scripts/research/false_switch_sim.py", "plausibleMinWords sync") else {
             return
         }
 

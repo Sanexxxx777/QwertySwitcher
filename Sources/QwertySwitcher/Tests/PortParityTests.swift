@@ -25,12 +25,8 @@ enum PortParityTests {
     static func run() {
         TestRunner.section("Port parity — LanguageDetector.swift constants/tables vs false_switch_sim.py")
 
-        guard let swiftText = readSwiftSource() else {
-            TestRunner.assertTrue(false, "Core/LanguageDetector.swift not readable — port parity cannot be verified")
-            return
-        }
-        guard let pyText = readPythonSource() else {
-            TestRunner.assertTrue(false, "Scripts/research/false_switch_sim.py not readable — port parity cannot be verified")
+        guard let swiftText = SourceContract.require("Core/LanguageDetector.swift", "Port parity"),
+              let pyText = SourceContract.require("../../Scripts/research/false_switch_sim.py", "Port parity") else {
             return
         }
 
@@ -111,12 +107,7 @@ enum PortParityTests {
     private static func runGoldenDecisions() {
         TestRunner.section("Port parity — golden_decisions.json replayed through LanguageDetector.detect")
 
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .deletingLastPathComponent()      // Sources/
-            .deletingLastPathComponent()      // <repo root>
-            .appendingPathComponent("Scripts/research/golden_decisions.json")
+        let url = SourceContract.url("../../Scripts/research/golden_decisions.json")
         guard let data = try? Data(contentsOf: url) else {
             TestRunner.assertTrue(false, "golden_decisions.json not readable at \(url.path)")
             return
@@ -125,6 +116,8 @@ enum PortParityTests {
             TestRunner.assertTrue(false, "golden_decisions.json does not parse")
             return
         }
+        // A range on purpose (not a source-contract count): the vector file is DATA that grows by
+        // design; the bounds only catch an accidentally emptied or duplicated file.
         TestRunner.assertTrue(
             vectors.count >= 30 && vectors.count <= 60,
             "golden_decisions.json has 30-60 vectors (has \(vectors.count))"
@@ -185,26 +178,6 @@ enum PortParityTests {
         let layout: String
         let context: String
         let expect: String
-    }
-
-    // MARK: - File access
-
-    private static func readSwiftSource() -> String? {
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent("Core/LanguageDetector.swift")
-        return try? String(contentsOf: url, encoding: .utf8)
-    }
-
-    private static func readPythonSource() -> String? {
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .deletingLastPathComponent()      // Sources/
-            .deletingLastPathComponent()      // <repo root>
-            .appendingPathComponent("Scripts/research/false_switch_sim.py")
-        return try? String(contentsOf: url, encoding: .utf8)
     }
 
     // MARK: - Extraction helpers

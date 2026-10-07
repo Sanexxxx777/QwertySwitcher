@@ -157,15 +157,12 @@ enum TimedPauseTests {
             "a manual toggle cancels the pending automatic resume"
         )
 
-        let viewModelURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("UI/Views/MainViewModel.swift")
-        let viewModelSource = (try? String(contentsOf: viewModelURL, encoding: .utf8)) ?? ""
-        TestRunner.assertTrue(
-            viewModelSource.contains("guard !isSyncingAutoSwitch else { return }"),
-            "settings-window synchronization does not echo and cancel a timed pause"
-        )
+        if let viewModelSource = SourceContract.require("UI/Views/MainViewModel.swift", "Timed pause guard") {
+            TestRunner.assertTrue(
+                viewModelSource.contains("guard !isSyncingAutoSwitch else { return }"),
+                "settings-window synchronization does not echo and cancel a timed pause"
+            )
+        }
     }
 }
 
@@ -347,15 +344,16 @@ enum SnippetTests {
         service.removeSnippet(trigger: "addr")
         TestRunner.assertNil(service.replacement(for: "addr"), "snippet removal is exact")
 
-        let monitorSource = SourceContract.keyboardMonitorSources() ?? ""
-        TestRunner.assertTrue(
-            monitorSource.contains("expandSnippet(keystrokes: captured"),
-            "word-boundary path checks snippets before language correction"
-        )
-        TestRunner.assertTrue(
-            monitorSource.contains("trailingAlreadyOnScreen: false"),
-            "snippet expansion suppresses and retypes the boundary in one transaction"
-        )
+        if let monitorSource = SourceContract.requireKeyboardMonitorSources("Snippet guards") {
+            TestRunner.assertTrue(
+                monitorSource.contains("expandSnippet(keystrokes: captured"),
+                "word-boundary path checks snippets before language correction"
+            )
+            TestRunner.assertTrue(
+                monitorSource.contains("trailingAlreadyOnScreen: false"),
+                "snippet expansion suppresses and retypes the boundary in one transaction"
+            )
+        }
     }
 }
 
@@ -463,7 +461,7 @@ enum SmartCaseTests {
                 + " ends a sentence"
         )
 
-        let source = SourceContract.keyboardMonitorSources() ?? ""
+        guard let source = SourceContract.requireKeyboardMonitorSources("Sentence tracker guards") else { return }
         TestRunner.assertTrue(
             source.contains("if !captured.isEmpty {\n")
                 && source.contains(

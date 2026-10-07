@@ -97,14 +97,7 @@ enum SingleInstanceLockTests {
     }
 
     private static func mainSwiftOrdering() {
-        let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent("main.swift")
-        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
-            TestRunner.skip("main.swift not readable from \(source.path)")
-            return
-        }
+        guard let text = SourceContract.require("main.swift", "main.swift startup ordering") else { return }
 
         guard let testModeRange = text.range(of: "TestRunMode.isActive"),
               let installUpdateRange = text.range(of: "\"--install-update\""),
@@ -139,12 +132,10 @@ enum SingleInstanceLockTests {
         // update helper, which outlives it. An inherited fd would keep the lock
         // held, the freshly installed copy would see "busy" and exit, and the
         // helper would roll the update back.
-        let lockSource = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Core/SingleInstanceLock.swift")
-        let lockText = (try? String(contentsOf: lockSource, encoding: .utf8)) ?? ""
-        TestRunner.assertTrue(lockText.contains("O_CLOEXEC"),
-                              "SingleInstanceLock opens the lock file with O_CLOEXEC (not inherited by the update helper)")
+        if let lockText = SourceContract.require("Core/SingleInstanceLock.swift", "SingleInstanceLock fd inheritance") {
+            TestRunner.assertTrue(lockText.contains("O_CLOEXEC"),
+                                  "SingleInstanceLock opens the lock file with O_CLOEXEC (not inherited by the update helper)")
+        }
     }
 }
 #endif

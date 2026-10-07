@@ -133,33 +133,28 @@ enum DoubleShiftSelectionGuardTests {
     static func run() {
         TestRunner.section("Double Shift on a selection — write is verified, selection never falls to the buffer")
 
-        let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent("Core/HotkeyManager.swift")
-        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
-            TestRunner.skip("HotkeyManager.swift not readable from \(source.path)")
-            return
-        }
+        guard let text = SourceContract.require("Core/HotkeyManager.swift", "Double Shift selection guards") else { return }
 
-        guard let writeCall = text.range(of: "AXTextSelectionService.replaceSelectedText") else {
-            TestRunner.assertTrue(false, "AX selection write not found — test needs updating")
+        // The AX write lives in `convertAXSelection`; the read-back must come AFTER it in that function
+        // (`selectedText` is also read BEFORE the write, so the whole body would prove nothing).
+        guard let axBody = SourceContract.body(ofFunction: "private func convertAXSelection()", in: text),
+              let writeCall = axBody.range(of: "AXTextSelectionService.replaceSelectedText") else {
+            TestRunner.assertTrue(false, "convertAXSelection or its AX selection write not found — test needs updating")
             return
         }
-        let afterWrite = String(text[writeCall.upperBound...])
-        let functionTail = afterWrite.range(of: "\n    private func").map { String(afterWrite[..<$0.lowerBound]) }
-            ?? afterWrite
+        let functionTail = String(axBody[writeCall.upperBound...])
         TestRunner.assertTrue(
             functionTail.contains("AXTextSelectionService.selectedText"),
             "the AX write is read back before being reported as success"
                 + " (.success only means the app accepted the message)"
         )
 
-        guard let chainStart = text.range(of: "switch convertAXSelection()") else {
+        guard let dsBody = SourceContract.body(ofFunction: "private func handleDoubleShift()", in: text),
+              let chainStart = dsBody.range(of: "switch convertAXSelection()") else {
             TestRunner.assertTrue(false, "Double Shift chain not found — test needs updating")
             return
         }
-        let chain = String(text[chainStart.upperBound...])
+        let chain = String(dsBody[chainStart.upperBound...])
         let unwritableCase = chain.range(of: "case .selectionUnwritable:")
         let noSelectionCase = chain.range(of: "case .noSelection:")
         guard let unwritableCase, let noSelectionCase else {

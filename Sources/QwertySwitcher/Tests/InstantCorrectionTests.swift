@@ -260,7 +260,7 @@ enum InstantCorrectionCorpusTests {
 
         guard let enWords = loadCorpus("en_US.txt", limit: 2000),
               let ruWords = loadCorpus("ru_RU.txt", limit: 2000) else {
-            TestRunner.skip("dictionary corpus files not found at the expected resource path")
+            TestRunner.assertTrue(false, "honest-typing corpus: Resources/Dictionaries/{en_US,ru_RU}.txt not found at the expected resource path")
             return
         }
 

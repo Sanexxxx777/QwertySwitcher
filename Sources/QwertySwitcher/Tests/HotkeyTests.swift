@@ -194,24 +194,15 @@ enum PasteNoFormatGuardTests {
     static func run() {
         TestRunner.section("Cmd+Option+Shift+V — every pass resets state, formatting stripped only when present")
 
-        let coreDir = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent("Core")
-
         // --- FIX A + B(1): KeyboardMonitor.handleEvent's kc9 branch --------
-        guard let kmText = SourceContract.keyboardMonitorSources() else {
-            TestRunner.assertTrue(false, "KeyboardMonitor sources must be readable (all three files)")
+        guard let kmText = SourceContract.requireKeyboardMonitorSources("Paste-no-format guards") else { return }
+        // `handlesShortcut` carries the same condition text, so scope to the handler first (`handle`, which
+        // `handleEvent` delegates to since plan 008), then to its `keycode == 9` block.
+        guard let handleBody = SourceContract.body(ofFunction: "func handle(_ event: KeyEventSnapshot) {", in: kmText),
+              let branch = SourceContract.block(startingAt: "&& keycode == 9 {", in: handleBody) else {
+            TestRunner.assertTrue(false, "Cmd+Shift+V branch not found in handle(_:) — test needs updating")
             return
         }
-        guard let branchStart = kmText.range(of: "keycode == 9 {"),
-              let branchEnd = kmText.range(
-                of: "// Cmd+Option+Z", range: branchStart.upperBound..<kmText.endIndex
-              ) else {
-            TestRunner.assertTrue(false, "Cmd+Shift+V branch not found — test needs updating")
-            return
-        }
-        let branch = String(kmText[branchStart.upperBound..<branchEnd.lowerBound])
         TestRunner.assertTrue(
             branch.contains("hotkeyManager?.markKeyPressed()"),
             "FIX B: a swallowed V still registers as a real keypress (kills the ghost shift-tap)"
@@ -236,7 +227,7 @@ enum PasteNoFormatGuardTests {
         let pasteCondition =
             "flags.contains(.maskCommand) && flags.contains(.maskShift)"
                 + " && flags.contains(.maskAlternate) && keycode == 9"
-        let pasteConditionCount = kmText.components(separatedBy: pasteCondition).count - 1
+        let pasteConditionCount = SourceContract.occurrences(of: pasteCondition, in: kmText)
         TestRunner.assertEqual(
             pasteConditionCount, 2,
             "both handlesShortcut and handleEvent require Option — bare Cmd+Shift+V matches neither"
@@ -244,26 +235,17 @@ enum PasteNoFormatGuardTests {
 
         // --- FIX B(2): fresh Shift-down seeds anyModifierWithShift from
         //     THIS event's own flags instead of an unconditional reset.
-        guard let hkText = try? String(
-            contentsOf: coreDir.appendingPathComponent("HotkeyManager.swift"), encoding: .utf8
-        ) else {
-            TestRunner.skip("HotkeyManager.swift not readable")
-            return
-        }
+        guard let hkText = SourceContract.require("Core/HotkeyManager.swift", "Paste-no-format guards") else { return }
         TestRunner.assertTrue(
             hkText.contains("anyModifierWithShift = Self.modifierDisqualifiesShiftTap(flags)"),
             "FIX B: a fresh Shift-down derives anyModifierWithShift from this event's own flags"
         )
 
         // --- FIX C + D: handlePasteNoFormat --------------------------------
-        guard let funcStart = hkText.range(of: "func handlePasteNoFormat(completion:"),
-              let funcEnd = hkText.range(
-                of: "private struct PasteboardSnapshot", range: funcStart.upperBound..<hkText.endIndex
-              ) else {
+        guard let pasteFn = SourceContract.body(ofFunction: "func handlePasteNoFormat(completion:", in: hkText) else {
             TestRunner.assertTrue(false, "handlePasteNoFormat not found — test needs updating")
             return
         }
-        let pasteFn = String(hkText[funcStart.upperBound..<funcEnd.lowerBound])
         TestRunner.assertTrue(
             pasteFn.contains(".pasteboardItems"),
             "FIX C: the pasteboard's actual flavors are inspected before deciding whether to substitute"

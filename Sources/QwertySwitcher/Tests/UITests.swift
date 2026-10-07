@@ -259,17 +259,7 @@ enum AuthorLinksViewTests {
     static func run() {
         TestRunner.section("AuthorLinksView — outbound links present, LicenseView gone")
 
-        let viewsDir = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent("UI/Views")
-
-        guard let source = try? String(
-            contentsOf: viewsDir.appendingPathComponent("AuthorLinksView.swift"), encoding: .utf8
-        ) else {
-            TestRunner.assertTrue(false, "AuthorLinksView.swift not readable — test needs updating")
-            return
-        }
+        guard let source = SourceContract.require("UI/Views/AuthorLinksView.swift", "AuthorLinksView") else { return }
 
         for url in [
             "https://shulgin.is-a.dev/store/prosto/",
@@ -282,7 +272,7 @@ enum AuthorLinksViewTests {
         TestRunner.assertTrue(source.contains("@Aleksandr_NFA"), "AuthorLinksView names the Telegram handle")
 
         TestRunner.assertTrue(
-            !FileManager.default.fileExists(atPath: viewsDir.appendingPathComponent("LicenseView.swift").path),
+            !SourceContract.fileExists("UI/Views/LicenseView.swift"),
             "LicenseView.swift no longer exists — replaced by AuthorLinksView in 0.10.0"
         )
 
@@ -291,25 +281,10 @@ enum AuthorLinksViewTests {
         // PrivacyService.policyText, must not drift from the code again.
         TestRunner.section("AboutView / PrivacyService — claims match the code (Plan 010 guard)")
 
-        let projectRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .deletingLastPathComponent()      // Sources/
-            .deletingLastPathComponent()      // project root
+        guard let aboutSource = SourceContract.require("UI/Views/AboutView.swift", "AboutView / PrivacyService claims") else { return }
 
-        guard let aboutSource = try? String(
-            contentsOf: viewsDir.appendingPathComponent("AboutView.swift"), encoding: .utf8
-        ) else {
-            TestRunner.assertTrue(false, "AboutView.swift not readable — test needs updating")
-            return
-        }
-
-        guard let enWords = try? String(
-            contentsOf: projectRoot.appendingPathComponent("Resources/Dictionaries/en_US.txt"), encoding: .utf8
-        ), let ruWords = try? String(
-            contentsOf: projectRoot.appendingPathComponent("Resources/Dictionaries/ru_RU.txt"), encoding: .utf8
-        ) else {
-            TestRunner.assertTrue(false, "dictionary files not readable — test needs updating")
+        guard let enWords = SourceContract.require("../../Resources/Dictionaries/en_US.txt", "AboutView / PrivacyService claims"),
+              let ruWords = SourceContract.require("../../Resources/Dictionaries/ru_RU.txt", "AboutView / PrivacyService claims") else {
             return
         }
         let realTotal = enWords.split(separator: "\n").count + ruWords.split(separator: "\n").count
@@ -334,13 +309,7 @@ enum AuthorLinksViewTests {
             "AboutView no longer claims NSSpellChecker is part of the engine"
         )
 
-        guard let privacySource = try? String(
-            contentsOf: projectRoot.appendingPathComponent("Sources/QwertySwitcher/Services/PrivacyService.swift"),
-            encoding: .utf8
-        ) else {
-            TestRunner.assertTrue(false, "PrivacyService.swift not readable — test needs updating")
-            return
-        }
+        guard let privacySource = SourceContract.require("Services/PrivacyService.swift", "AboutView / PrivacyService claims") else { return }
         guard let policyRange = privacySource.range(of: "static let policyText"),
               let clipboardRange = privacySource.range(
                   of: "Буфер обмена", range: policyRange.upperBound..<privacySource.endIndex

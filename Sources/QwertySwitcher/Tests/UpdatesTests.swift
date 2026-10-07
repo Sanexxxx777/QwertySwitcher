@@ -825,15 +825,8 @@ enum UpdatesTests {
     private static func structuralGuards() {
         TestRunner.section("Updates — structural guards on the install helper's source")
 
-        let sourcesRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent() // Tests/
-            .deletingLastPathComponent() // QwertySwitcher/
-            .appendingPathComponent("Services/Updates")
-
-        guard let helperSource = try? String(contentsOf: sourcesRoot.appendingPathComponent("UpdateInstallerMode.swift"), encoding: .utf8) else {
-            TestRunner.skip("UpdateInstallerMode.swift not readable — structural guards skipped")
-            return
-        }
+        let suite = "Updates structural guards"
+        guard let helperSource = SourceContract.require("Services/Updates/UpdateInstallerMode.swift", suite) else { return }
         let helperCode = codeOnly(helperSource)
         TestRunner.assertTrue(
             !helperCode.contains("osascript"),
@@ -848,10 +841,7 @@ enum UpdatesTests {
             "install.sh is copied out of the staged bundle before it is ever executed"
         )
 
-        guard let launcherSource = try? String(contentsOf: sourcesRoot.appendingPathComponent("UpdateInstallLauncher.swift"), encoding: .utf8) else {
-            TestRunner.skip("UpdateInstallLauncher.swift not readable — structural guard skipped")
-            return
-        }
+        guard let launcherSource = SourceContract.require("Services/Updates/UpdateInstallLauncher.swift", suite) else { return }
         let launcherCode = codeOnly(launcherSource)
         TestRunner.assertTrue(
             !launcherCode.contains("--allow-identity-change"),
@@ -868,10 +858,7 @@ enum UpdatesTests {
         // closure returned silently and the update sat in "downloading"
         // forever with no log line. The one-shot stager must hold itself
         // until its own completion.
-        guard let stagerSource = try? String(contentsOf: sourcesRoot.appendingPathComponent("UpdateStager.swift"), encoding: .utf8) else {
-            TestRunner.skip("UpdateStager.swift not readable — structural guard skipped")
-            return
-        }
+        guard let stagerSource = SourceContract.require("Services/Updates/UpdateStager.swift", suite) else { return }
         let stagerCode = codeOnly(stagerSource)
         let fetchLine = stagerCode.split(separator: "\n").first { $0.contains("client.fetch(archiveURL)") }
         TestRunner.assertTrue(

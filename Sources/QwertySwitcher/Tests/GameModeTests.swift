@@ -11,30 +11,14 @@ import AppKit
 /// behavioral coverage: ordering inside a function body, and "every direct
 /// call routes through the one wrapper".
 enum GameModeSourceGuardTests {
-    private static func readSource(_ path: String) -> String? {
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent(path)
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
-            TestRunner.skip("\(path) not readable from \(url.path)")
-            return nil
-        }
-        return text
-    }
-
     static func run() {
         TestRunner.section("Game mode — structural guards on KeyboardMonitor.swift / HotkeyManager.swift")
 
-        guard let kmText = SourceContract.keyboardMonitorSources() else {
-            TestRunner.assertTrue(false, "KeyboardMonitor sources must be readable (all three files)")
-            return
-        }
+        guard let kmText = SourceContract.requireKeyboardMonitorSources("Game mode structural guards") else { return }
 
         // Step 2: the sanity-length gate runs strictly before detect() in
         // processCurrentWord, right after the shortWordFloor guard.
-        if let funcStart = kmText.range(of: "private func processCurrentWord(") {
-            let body = String(kmText[funcStart.upperBound...])
+        if let body = SourceContract.body(ofFunction: "private func processCurrentWord(", in: kmText) {
             if let capGate = body.range(of: "InstantCorrectionAnalyzer.maxLength"),
                let detectCall = body.range(of: "languageDetector.detect(keystrokes: keystrokes)") {
                 TestRunner.assertTrue(
@@ -50,13 +34,17 @@ enum GameModeSourceGuardTests {
 
         // Step 3: the hot path (handleEvent) never touches NSWorkspace/
         // AXUIElement/Bundle( — game-mode evidence collection is memory-only.
-        if let funcStart = kmText.range(of: "func handleEvent(_ proxy: CGEventTapProxy") {
-            let rest = String(kmText[funcStart.upperBound...])
-            let body = rest.range(of: "\n    func finishReplacement()").map { String(rest[..<$0.lowerBound]) } ?? rest
+        // The hot path is `handleEvent` plus what it dispatches to (`handleTapDisabled`, `handle`) — the
+        // old marker pair spanned exactly these three. `handleEvent` alone is a 6-line wrapper since plan 008.
+        let hotPath = ["func handleEvent(_ proxy: CGEventTapProxy", "func handleTapDisabled(_ type: CGEventType)",
+                       "func handle(_ event: KeyEventSnapshot) {"]
+            .compactMap { SourceContract.body(ofFunction: $0, in: kmText) }
+        if hotPath.count == 3 {
+            let body = hotPath.joined(separator: "\n")
             for forbidden in ["NSWorkspace", "AXUIElement", "Bundle("] {
                 TestRunner.assertTrue(
                     !body.contains(forbidden),
-                    "handleEvent's body contains no \(forbidden) (game-mode evidence collection is memory-only)"
+                    "the hot path (handleEvent → handle) contains no \(forbidden) (game-mode evidence collection is memory-only)"
                 )
             }
         } else {
@@ -85,23 +73,17 @@ enum GameModeSourceGuardTests {
         // exceptionsService call (StatusBarController is untouched by this
         // wave and deliberately not scanned here — it still checks the
         // per-app profile directly, outside any hotkey path).
-        func countDirectCalls(_ path: String, _ text: String?) {
-            guard let text else { return }
-            var count = 0
-            var searchStart = text.startIndex
-            let needle = "exceptionsService.areHotkeysBlockedForCurrentApp()"
-            while let r = text.range(of: needle, range: searchStart..<text.endIndex) {
-                count += 1
-                searchStart = r.upperBound
-            }
+        func countDirectCalls(_ path: String, _ text: String) {
             TestRunner.assertEqual(
-                count, 1,
+                SourceContract.occurrences(of: "exceptionsService.areHotkeysBlockedForCurrentApp()", in: text), 1,
                 "\(path): exactly 1 direct call to areHotkeysBlockedForCurrentApp()"
                     + " — inside its own wrapper, nowhere else"
             )
         }
         countDirectCalls("Core/KeyboardMonitor*.swift", kmText)
-        countDirectCalls("Core/HotkeyManager.swift", readSource("Core/HotkeyManager.swift"))
+        if let hkText = SourceContract.require("Core/HotkeyManager.swift", "Game mode structural guards") {
+            countDirectCalls("Core/HotkeyManager.swift", hkText)
+        }
     }
 }
 
@@ -111,22 +93,10 @@ enum GameModeSourceGuardTests {
 /// layouts, the CGEventTap hot path) can't be exercised live from a headless
 /// test binary, same precedent as `GameModeSourceGuardTests` right below.
 enum GameModeReleaseGuardTests {
-    private static func readSource(_ path: String) -> String? {
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()      // Tests/
-            .deletingLastPathComponent()      // QwertySwitcher/
-            .appendingPathComponent(path)
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
-            TestRunner.skip("\(path) not readable from \(url.path)")
-            return nil
-        }
-        return text
-    }
-
     static func run() {
         TestRunner.section("Game mode release — structural guards on KeyboardMonitor.swift / HotkeyManager.swift")
 
-        if let kmText = SourceContract.keyboardMonitorSources() {
+        if let kmText = SourceContract.requireKeyboardMonitorSources("Game mode release guards") {
             // 1) The prose-exit block fires on any real word boundary
             //    (proseBoundary — space/Enter/Tab, field 08.09.2026: Enter
             //    closes a word in chat apps too) and checks the OTHER active
@@ -134,10 +104,9 @@ enum GameModeReleaseGuardTests {
             //    08.09.2026: 13 Russian words typed in the wrong/English
             //    layout while GAME was active never read as words on their
             //    OWN side).
-            if let boundaryMarker = kmText.range(
-                of: "if proseBoundary, !captured.isEmpty, gameMode.isActiveForFrontmost()"
+            if let block = SourceContract.block(
+                startingAt: "if proseBoundary, !captured.isEmpty, gameMode.isActiveForFrontmost()", in: kmText
             ) {
-                let block = String(kmText[boundaryMarker.lowerBound...].prefix(1500))
                 TestRunner.assertTrue(
                     block.contains("activeLayouts.first(where:"),
                     "the prose-exit block also checks the OTHER active layout, not just own reading"
@@ -155,8 +124,12 @@ enum GameModeReleaseGuardTests {
             //    without it would readmit URLs/paths/tokens/passwords as
             //    game evidence (field 06–08.09.2026: a browser got a
             //    persisted GAME verdict this way).
-            if let longRunLine = kmText.components(separatedBy: "\n")
-                .first(where: { $0.contains("gameMode.note(.longRun)") }) {
+            let longRunLines = kmText.components(separatedBy: "\n").filter { $0.contains("gameMode.note(.longRun)") }
+            if let longRunLine = longRunLines.first {
+                TestRunner.assertEqual(
+                    longRunLines.count, 1,
+                    "exactly one gameMode.note(.longRun) call site (update this number if a second site is added deliberately)"
+                )
                 TestRunner.assertTrue(
                     longRunLine.contains("InputBuffer.isGameControlRun("),
                     "gameMode.note(.longRun) is called on the SAME line as InputBuffer.isGameControlRun("
@@ -164,17 +137,14 @@ enum GameModeReleaseGuardTests {
             } else {
                 TestRunner.assertTrue(false, "gameMode.note(.longRun) line not found — test needs updating")
             }
-        } else {
-            TestRunner.assertTrue(false, "KeyboardMonitor sources must be readable (all three files)")
         }
 
         // 3) Double Shift's game-mode release hatch: a blocked first press
         //    while GAME is active is logged (not silently swallowed like
         //    the old bare `guard !hotkeysBlocked()`, field 08.09.2026: 17
         //    Double Shifts died silently with zero log trace).
-        if let hkText = readSource("Core/HotkeyManager.swift") {
-            if let funcStart = hkText.range(of: "private func handleDoubleShift() {") {
-                let body = String(hkText[funcStart.upperBound...].prefix(1200))
+        if let hkText = SourceContract.require("Core/HotkeyManager.swift", "Game mode release guards") {
+            if let body = SourceContract.body(ofFunction: "private func handleDoubleShift() {", in: hkText) {
                 TestRunner.assertTrue(
                     body.contains("noteDoubleShiftWhileActive()"),
                     "handleDoubleShift consults gameMode.noteDoubleShiftWhileActive()"
