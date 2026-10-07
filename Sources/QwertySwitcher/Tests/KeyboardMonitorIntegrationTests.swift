@@ -121,6 +121,9 @@ final class KeyboardMonitorHarness {
     let exceptions = ExceptionsService()
     let replacer: FakeTextReplacer
     let monitor: KeyboardMonitor
+    /// The detector the monitor was built with — plan 004b reads its island ring
+    /// (`contextSlots`) straight from here; the monitor keeps its own reference private.
+    let detector: LanguageDetector
     private let inputSources: InputSourceManager
     var screen: String { replacer.screen }
     /// How many replacements the monitor actually attempted — the only way to
@@ -144,6 +147,7 @@ final class KeyboardMonitorHarness {
         let detector = LanguageDetector(
             dictionary: dictionary, inputSourceManager: inputSources, prefsService: prefs
         )
+        self.detector = detector
         let analyzer = InstantCorrectionAnalyzer(dictionary: dictionary)
         let perApp = PerAppLayoutService(inputSourceManager: inputSources, prefsService: prefs)
         let snippetSuite = AppIdentity.bundleIdentifier + ".tests.keyboard-monitor-snippets." + UUID().uuidString
@@ -245,6 +249,12 @@ final class KeyboardMonitorHarness {
     /// the bundle id is not read under `TestRunMode`). Clears the typing context like production.
     func activateApp() {
         monitor.appDidActivate(Notification(name: NSWorkspace.didActivateApplicationNotification))
+    }
+
+    /// Simulate one physical keyup through the same `dispatch` path as `press` — the real tap
+    /// queues a keyUp that arrives mid-replacement exactly like a keyDown (plan 004b, A5).
+    func release(_ keycode: UInt16, flags: CGEventFlags = []) {
+        dispatch(KeyEventSnapshot(type: .keyUp, keycode: keycode, flags: flags))
     }
 
     func press(_ stroke: BufferedKeystroke) { press(stroke.keycode, flags: stroke.flags) }
@@ -2592,6 +2602,211 @@ enum TapAgeProbeRouteGuardTests {
             guardLine?.contains("type == .keyDown") ?? false,
             "the `if` guarding the probe call still requires type == .keyDown"
         )
+    }
+}
+
+
+// MARK: - Plan 004b: the island ring holds one slot per word, true to the screen
+//
+// Synthetic words only. "Context" words are Russian typed on the RU layout; the "foreign" word is
+// the English "hello"/"world" typed on the RU layout (screen text «руддщ»/«цщкдв»).
+enum IslandRingIntegrationTests {
+    static func run() {
+        TestRunner.section("Island ring — one slot per word, captured context, queue gates (plan 004b)")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the island-ring integration suite")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+        let environment = KeyboardMonitorTestEnvironment(inputSources: inputSources)
+        defer { environment.restore() }
+
+        guard let privet = InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse),
+              let druzya = InstantCorrectionFixtures.keystrokes(for: "друзья", reverse: ruReverse),
+              let hello = InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse),
+              let world = InstantCorrectionFixtures.keystrokes(for: "world", reverse: enReverse) else {
+            TestRunner.assertTrue(false, "island-ring fixtures must type every character")
+            return
+        }
+        let space: UInt16 = 49
+
+        func harness(instant: Bool) -> KeyboardMonitorHarness {
+            let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
+            h.prefs.isAutoSwitchEnabled = true
+            h.prefs.isInstantCorrectionEnabled = instant
+            h.prefs.isYoficatorEnabled = false
+            h.prefs.isSmartCaseEnabled = false
+            h.prefs.activeLayoutIDs = [enLayout.id, ruLayout.id]
+            h.exceptions.appExceptions = []
+            h.exceptions.wordExceptions = []
+            h.exceptions.autoLearned = [:]
+            return h
+        }
+        func describe(_ slots: [LanguageDetector.ContextSlot]) -> String {
+            slots.map { "\($0.lang)\($0.corrected ? "*" : "")" }.joined(separator: ",")
+        }
+        /// Two clean Russian context words, typed on the RU layout, each closed by Space.
+        func typeRuContext(_ h: KeyboardMonitorHarness) {
+            h.type(privet); h.press(space)
+            h.type(druzya); h.press(space)
+        }
+        func currentLang() -> String { inputSources.currentLayout?.languageCode ?? "?" }
+
+        // (a) DS converts a word still in the buffer → the ring records where it landed.
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(instant: false)
+            h.type(privet)
+            let before = h.detector.contextSlots
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "(a) setup: Double Shift converts the buffered word")
+            let after = h.detector.contextSlots
+            TestRunner.assertEqual(after.count, before.count + 1, "(a) the ring grew by exactly one slot (\(describe(before)) → \(describe(after)))")
+            TestRunner.assertTrue(
+                after.last?.lang == "en" && after.last?.corrected == true,
+                "(a) the last slot is (en, corrected) — the word landed in en via a correction (got \(describe(after)))"
+            )
+        }
+
+        // (b) DS on a finished word replaces ITS slot, it does not add a second one.
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(instant: false)
+            h.type(privet); h.press(space)
+            let before = h.detector.contextSlots
+            TestRunner.assertEqual(before.count, 1, "(b) setup: the boundary pushed exactly one slot")
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "(b) setup: Double Shift via history converts the word")
+            let after = h.detector.contextSlots
+            TestRunner.assertEqual(after.count, before.count, "(b) ring length unchanged (\(describe(before)) → \(describe(after)))")
+            TestRunner.assertTrue(
+                after.last?.lang == "en" && after.last?.corrected == true,
+                "(b) the replaced slot is (en, corrected) (got \(describe(after)))"
+            )
+        }
+
+        // (c) A vetoed boundary correction leaves the word as typed → its slot is (own, clean).
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(instant: false)
+            h.exceptions.wordExceptions = ["hello"]
+            h.type(hello); h.press(space)
+            TestRunner.assertEqual(h.invocationCount, 0, "(c) setup: the exception vetoed the correction (no replacement)")
+            TestRunner.assertEqual(h.detector.contextSlots.count, 1, "(c) setup: one slot for the word")
+            TestRunner.assertTrue(
+                h.detector.contextSlots.last?.lang == "ru" && h.detector.contextSlots.last?.corrected == false,
+                "(c) the vetoed word's slot is (ru, clean) — it stayed in ru (got \(describe(h.detector.contextSlots)))"
+            )
+        }
+
+        // (d) Island after a Double Shift via history: two clean ru words, then a foreign word
+        // left as typed (vetoed), then DS on it → the layout goes back to ru.
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(instant: false)
+            h.exceptions.wordExceptions = ["hello"]
+            typeRuContext(h)
+            h.type(hello); h.press(space)
+            TestRunner.assertEqual(h.invocationCount, 0, "(d) setup: the foreign word was left as typed")
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "(d) setup: Double Shift via history converts it")
+            TestRunner.assertEqual(currentLang(), "ru", "(d) two clean ru words before the DS-converted foreign word → layout restored to ru")
+        }
+
+        // (e) Run guard: a second DS-converted foreign word right after a first one → no restore.
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(instant: false)
+            typeRuContext(h)
+            h.type(hello)
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "(e) setup: first foreign word converted by Double Shift")
+            h.press(space) // the first prose boundary since → deferred island decision
+            let afterFirst = currentLang()
+            inputSources.switchTo(ruLayout)
+            h.type(world)
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "(e) setup: second foreign word converted by Double Shift")
+            h.press(space)
+            // Record-only observation in the report: (e) may pass or fail before the fix.
+            TestRunner.assertEqual(currentLang(), "en", "(e) no restore after the SECOND converted word (first restore gave \(afterFirst))")
+        }
+
+        // (f) Queued keyDown during a DS-via-history replacement → no restore at completion.
+        // Three clean ru words; DS converts the third from history while a key is queued.
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(instant: false)
+            typeRuContext(h)
+            h.type(privet); h.press(space)
+            h.replacer.mode = .deferred
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "(f) setup: Double Shift via history started")
+            TestRunner.assertTrue(h.monitor.isPaused, "(f) setup: the replacement is in flight")
+            h.press(hello[0].keycode) // a keyDown reaches the tap mid-replacement → queued
+            h.completePendingReplacement()
+            TestRunner.assertEqual(currentLang(), "en", "(f) the island restore is skipped while a keyDown is queued (queueNonEmpty path=ds)")
+        }
+
+        // (f2) Same gate with the veto-shaped context of (d).
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(instant: false)
+            h.exceptions.wordExceptions = ["hello"]
+            typeRuContext(h)
+            h.type(hello); h.press(space)
+            h.replacer.mode = .deferred
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "(f2) setup: Double Shift via history started")
+            h.press(world[0].keycode)
+            h.completePendingReplacement()
+            TestRunner.assertEqual(currentLang(), "en", "(f2) queued keyDown → no restore at completion")
+        }
+
+        // (g) A1: instant-corrected foreign words are ring slots too — the second one in a row
+        // is a run, not an island. Mirror direction (instant fires for ru words typed on EN):
+        // two clean en words, then ru words typed on the EN layout.
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(instant: true)
+            h.type(hello); h.press(space)
+            h.type(world); h.press(space)
+            h.type(privet)
+            TestRunner.assertEqual(h.invocationCount, 1, "(g) setup: the first foreign word instant-corrected")
+            h.press(space)
+            TestRunner.assertEqual(currentLang(), "en", "(g) first instant-corrected foreign word between two clean en words → restored to en")
+            inputSources.switchTo(enLayout)
+            Thread.sleep(forTimeInterval: 0.25) // past finishReplacement's 0.2 s post-replacement cooldown
+            h.type(privet)
+            TestRunner.assertEqual(h.invocationCount, 2, "(g) setup: the second foreign word instant-corrected")
+            h.press(space)
+            TestRunner.assertEqual(currentLang(), "ru", "(g) the SECOND instant-corrected word in a row → no restore (secondInRun)")
+        }
+
+        // (h) A2: a boundary replacement that fails leaves the word as typed → (own, clean).
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(instant: false)
+            h.replacer.mode = .immediate(.layoutSwitchFailed)
+            h.type(hello); h.press(space)
+            TestRunner.assertEqual(h.invocationCount, 1, "(h) setup: the boundary correction was attempted")
+            TestRunner.assertTrue(
+                h.detector.contextSlots.last?.lang == "ru" && h.detector.contextSlots.last?.corrected == false,
+                "(h) a failed correction's slot is (ru, clean) (got \(describe(h.detector.contextSlots)))"
+            )
+        }
+
+        // (i) A5: only a keyUp queued during the boundary replacement → the island restores at once.
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness(instant: false)
+            typeRuContext(h)
+            h.replacer.mode = .deferred
+            h.type(hello); h.press(space)
+            TestRunner.assertTrue(h.monitor.isPaused, "(i) setup: the boundary correction is in flight")
+            h.release(hello[4].keycode) // the letter's keyUp lands mid-replacement → queued, no keyDown
+            h.completePendingReplacement()
+            TestRunner.assertEqual(currentLang(), "ru", "(i) a queued keyUp alone does not defer the island — restored at once (path=boundary)")
+        }
     }
 }
 #endif
