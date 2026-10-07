@@ -1575,13 +1575,12 @@ final class KeyboardMonitor {
                 // (instant fires mid-word) — defer to `handleWordBoundary`,
                 // which restores once that boundary actually arrives.
                 //
-                // The context is captured FIRST (the word is not in the ring yet), then the
-                // word's own slot is written: an instant-corrected word is a corrected-landing
-                // slot like any other, so a run of them reads as a run (`secondInRun`).
+                // The context is captured now (the word is not in the ring yet). The word's own
+                // `(target, corrected)` slot is written at ITS BOUNDARY from the gate's
+                // `landedLang` (`processCurrentWord`), like every other word — a Backspace or a
+                // Double Shift before the boundary can still change where it lands.
                 self.pendingIslandContext = Array(self.languageDetector.contextSlots.suffix(2))
-                self.languageDetector.recordLandedWord(
-                    lang: result.layout.languageCode, corrected: true, replacingLast: false
-                )
+                self.instantCorrectionGate.markLanded(lang: result.layout.languageCode)
                 self.pendingIslandTarget = result.layout.languageCode
                 self.pendingIslandRestore = true
             case .layoutSwitchFailed:
@@ -2131,6 +2130,9 @@ final class KeyboardMonitor {
                     targetLayoutID: targetLayout.id
                 )
                 self.buffer.clear()
+                // The gesture already decided where the word landed (via run: deliberately no
+                // slot, plan 004b A4) — the word's boundary must not add a stale instant landing.
+                self.instantCorrectionGate.reset()
                 self.pendingLeadingSymbols.removeAll()
                 self.lastCompletedWord = nil
                 // Mechanism A/B (learning_spec.md): "via run" IS one of the
@@ -2318,6 +2320,8 @@ final class KeyboardMonitor {
                     targetLayoutID: targetLayout.id
                 )
                 self.buffer.clear()
+                // Same as "via run": a Double Shift owns the word's landing; drop the instant one.
+                self.instantCorrectionGate.reset()
                 // Only the LIVE pendingLeadingSymbols run was actually
                 // consumed above when `source == "buffer"` — the history
                 // path reused a snapshot already captured earlier, so it
@@ -2421,7 +2425,12 @@ final class KeyboardMonitor {
         wordAutorepeatCount: Int
     ) -> Bool {
         guard !isPaused else { return false }
+        let instantLanded = instantCorrectionGate.landedLang
         if instantCorrectionGate.consumeIfCorrected() {
+            // The word's one ring slot: it landed in the instant correction's target.
+            if let instantLanded {
+                languageDetector.recordLandedWord(lang: instantLanded, corrected: true, replacingLast: false)
+            }
             DebugLog.shared.log("KM", "skip boundary correction: already instant-corrected")
             return false
         }

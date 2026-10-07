@@ -2782,6 +2782,42 @@ enum IslandRingIntegrationTests {
             TestRunner.assertEqual(currentLang(), "ru", "(g) the SECOND instant-corrected word in a row → no restore (secondInRun)")
         }
 
+        // (j) One slot per word on the instant path: a Backspace inside the instant-corrected word
+        // resets the gate, so its boundary runs `detect` — that must not add a SECOND slot.
+        // One context word only: the ring is capped at 3, so +1 vs +2 must stay distinguishable.
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(instant: true)
+            h.type(hello); h.press(space)
+            let before = h.detector.contextSlots.count
+            h.type(privet)
+            TestRunner.assertEqual(h.invocationCount, 1, "(j) setup: the foreign word instant-corrected")
+            h.press(51) // Backspace inside the word
+            h.press(privet[privet.count - 1].keycode) // retype that key
+            h.press(space)
+            let after = h.detector.contextSlots
+            TestRunner.assertEqual(after.count, before + 1, "(j) the word added exactly ONE slot (\(before) → \(after.count): \(describe(after)))")
+        }
+
+        // (k) Double Shift via buffer on an instant-corrected word (reverting it) before Space:
+        // one slot for the word, and it is where the gesture landed it.
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(instant: true)
+            h.type(hello); h.press(space)
+            let before = h.detector.contextSlots.count
+            h.type(privet)
+            TestRunner.assertEqual(h.invocationCount, 1, "(k) setup: the foreign word instant-corrected")
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "(k) setup: Double Shift via buffer reverts it")
+            h.press(space)
+            let after = h.detector.contextSlots
+            TestRunner.assertEqual(after.count, before + 1, "(k) the word added exactly ONE slot (\(before) → \(after.count): \(describe(after)))")
+            TestRunner.assertTrue(
+                after.last?.lang == "en" && after.last?.corrected == true,
+                "(k) that slot is (DS target en, corrected) (got \(describe(after)))"
+            )
+        }
+
         // (h) A2: a boundary replacement that fails leaves the word as typed → (own, clean).
         inputSources.switchTo(ruLayout)
         do {
