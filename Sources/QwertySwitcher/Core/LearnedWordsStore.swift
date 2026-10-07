@@ -94,6 +94,20 @@ final class LearnedWordsStore {
         return (!wasActive && entry.count >= 2) ? .promoted : .recorded
     }
 
+    /// Settings-backup import: stores `entry` exactly as exported (count, dates, originApp,
+    /// promotedAt) instead of replaying confirmations — a promoted entry can span more than the
+    /// promotion window, which no replay of first/last dates can reproduce. `active` is recomputed
+    /// from the restored entry; the cap and the dirty/persist path are the same as `recordManualFix`.
+    /// Same gates as recording: learning off or an invalid key stores nothing.
+    func restoreEntry(word: String, lang: String, entry: LearnedWordEntry) {
+        guard isEnabled, isValid(word: word, lang: lang), entry.count >= 1 else { return }
+        let key = makeKey(word: word, lang: lang)
+        entries[key] = entry
+        recomputeActive(key: key)
+        markDirty()
+        enforceCap()
+    }
+
     /// Decrements the record by exactly one (never below zero). Callers are
     /// responsible for one-shot semantics (an anti-toggle slot fires once).
     /// A count that reaches zero removes the entry entirely.

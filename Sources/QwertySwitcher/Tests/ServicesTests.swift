@@ -315,6 +315,97 @@ enum SettingsBackupTests {
         } else {
             TestRunner.assertTrue(false, "valid backup fixture decodes for the invalid-learned-word test")
         }
+
+        // Release review fix 2: a promoted entry that spans more than the 30-day window
+        // (promoted at day 1, fixed again at day 40, then one fix undone → count 2) must
+        // round-trip EXACTLY — replaying confirmations at first/last would reset it to count 1.
+        do {
+            let day: TimeInterval = 86_400
+            let t0 = Date(timeIntervalSince1970: 10_000)
+            learnedWords.removeAll()
+            learnedWords.recordManualFix(word: "blorf", lang: "en", originApp: "com.app.span", at: t0)
+            learnedWords.recordManualFix(word: "blorf", lang: "en", originApp: "com.app.span", at: t0.addingTimeInterval(day))
+            learnedWords.recordManualFix(word: "blorf", lang: "en", originApp: "com.app.span", at: t0.addingTimeInterval(40 * day))
+            learnedWords.revokeRecord(word: "blorf", lang: "en")
+            let original = learnedWords.allEntries["en:blorf"]
+            TestRunner.assertEqual(original?.count, 2, "promoted-span setup: count 2 after the undo")
+            TestRunner.assertEqual(
+                original?.promotedAt, t0.addingTimeInterval(day), "promoted-span setup: promotedAt is day 1"
+            )
+            TestRunner.assertTrue(learnedWords.isActive(word: "blorf", lang: "en"), "promoted-span setup: entry is active")
+
+            if let spanData = try? service.encodedBackup(now: Date(timeIntervalSince1970: 1_000)) {
+                TestRunner.assertTrue(
+                    (String(data: spanData, encoding: .utf8) ?? "").contains("\"promotedAt\""),
+                    "backup carries promotedAt for a promoted entry"
+                )
+                learnedWords.removeAll()
+                do {
+                    try service.importBackup(spanData)
+                    TestRunner.assertTrue(
+                        learnedWords.isActive(word: "blorf", lang: "en"), "promoted entry spanning >30 days is still active after import"
+                    )
+                    TestRunner.assertEqual(learnedWords.allEntries["en:blorf"], original, "import restores count, dates, originApp and promotedAt exactly")
+                } catch {
+                    TestRunner.assertTrue(false, "promoted-span backup imports: \(error.localizedDescription)")
+                }
+
+                // Old-format backup (no promotedAt key at all) still decodes and imports as before.
+                learnedWords.removeAll()
+                learnedWords.recordManualFix(word: "oldfmt", lang: "en", originApp: nil, at: t0)
+                learnedWords.recordManualFix(word: "oldfmt", lang: "en", originApp: nil, at: t0.addingTimeInterval(day))
+                let oldEntry = learnedWords.allEntries["en:oldfmt"]
+                if let freshData = try? service.encodedBackup(now: Date(timeIntervalSince1970: 1_000)),
+                   var object = (try? JSONSerialization.jsonObject(with: freshData)) as? [String: Any],
+                   var words = object["learnedWords"] as? [[String: Any]] {
+                    for i in words.indices { words[i].removeValue(forKey: "promotedAt") }
+                    object["learnedWords"] = words
+                    if let oldData = try? JSONSerialization.data(withJSONObject: object) {
+                        learnedWords.removeAll()
+                        do {
+                            try service.importBackup(oldData)
+                            let imported = learnedWords.allEntries["en:oldfmt"]
+                            TestRunner.assertTrue(learnedWords.isActive(word: "oldfmt", lang: "en"), "old-format backup (no promotedAt) imports an active entry")
+                            TestRunner.assertEqual(imported?.count, oldEntry?.count, "old-format backup keeps the count")
+                            TestRunner.assertEqual(imported?.firstConfirmed, oldEntry?.firstConfirmed, "old-format backup keeps firstConfirmed")
+                            TestRunner.assertEqual(imported?.lastConfirmed, oldEntry?.lastConfirmed, "old-format backup keeps lastConfirmed")
+                        } catch {
+                            TestRunner.assertTrue(false, "old-format backup imports: \(error.localizedDescription)")
+                        }
+                    } else {
+                        TestRunner.assertTrue(false, "old-format fixture re-serialises")
+                    }
+                } else {
+                    TestRunner.assertTrue(false, "old-format fixture builds")
+                }
+
+                // A promotedAt outside [first, last] is rejected.
+                learnedWords.removeAll()
+                learnedWords.recordManualFix(word: "badpromo", lang: "en", originApp: nil, at: t0)
+                learnedWords.recordManualFix(word: "badpromo", lang: "en", originApp: nil, at: t0.addingTimeInterval(day))
+                if let goodData = try? service.encodedBackup(now: Date(timeIntervalSince1970: 1_000)),
+                   var object = (try? JSONSerialization.jsonObject(with: goodData)) as? [String: Any],
+                   var words = object["learnedWords"] as? [[String: Any]], !words.isEmpty {
+                    words[0]["promotedAt"] = 1
+                    object["learnedWords"] = words
+                    if let badData = try? JSONSerialization.data(withJSONObject: object) {
+                        do {
+                            _ = try service.decodeAndValidate(badData)
+                            TestRunner.assertTrue(false, "a promotedAt before firstConfirmed is rejected")
+                        } catch SettingsBackupService.BackupError.invalidData {
+                            TestRunner.assertTrue(true, "a promotedAt before firstConfirmed is rejected")
+                        } catch {
+                            TestRunner.assertTrue(false, "bad promotedAt reports the expected error")
+                        }
+                    }
+                } else {
+                    TestRunner.assertTrue(false, "bad-promotedAt fixture builds")
+                }
+            } else {
+                TestRunner.assertTrue(false, "promoted-span backup encodes")
+            }
+            learnedWords.removeAll()
+        }
     }
 }
 

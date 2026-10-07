@@ -32,6 +32,9 @@ struct LearnedWordBackupEntry: Codable, Equatable {
     let firstConfirmed: Int64
     let lastConfirmed: Int64
     let originApp: String?
+    /// When the entry became active (epoch seconds). Optional so backups written before this
+    /// field existed still decode (nil = not promoted, or promotion is inferred from the window).
+    var promotedAt: Int64? = nil
 }
 
 struct PreferencesBackup: Codable, Equatable {
@@ -148,7 +151,8 @@ final class SettingsBackupService {
                 lang: lang, word: word, count: entry.count,
                 firstConfirmed: Int64(entry.firstConfirmed.timeIntervalSince1970),
                 lastConfirmed: Int64(entry.lastConfirmed.timeIntervalSince1970),
-                originApp: entry.originApp
+                originApp: entry.originApp,
+                promotedAt: entry.promotedAt.map { Int64($0.timeIntervalSince1970) }
             )
         }.sorted { $0.lang == $1.lang ? $0.word < $1.word : $0.lang < $1.lang }
     }
@@ -215,12 +219,12 @@ final class SettingsBackupService {
     private static func isValidLearnedWordBackupEntry(_ entry: LearnedWordBackupEntry) -> Bool {
         !entry.lang.isEmpty && entry.lang.count <= 10
             && !entry.word.isEmpty && entry.word.count <= 100 && entry.word == entry.word.lowercased()
-            // `LearnedWordsStore.recordManualFix` is replayed `count` times on
-            // import (see `importBackup`) — a bound well above anything real
-            // usage produces keeps a malformed/hostile file from turning
-            // import into an unbounded loop.
+            // Bound well above anything real usage produces: a malformed/hostile file
+            // must not plant an absurd count (import restores the entry as stored).
             && entry.count >= 1 && entry.count <= 100
             && entry.firstConfirmed <= entry.lastConfirmed
+            // A promotion happened between the first and the last confirmation.
+            && (entry.promotedAt.map { entry.firstConfirmed <= $0 && $0 <= entry.lastConfirmed } ?? true)
             && (entry.originApp?.count ?? 0) <= 255
     }
 
@@ -253,30 +257,22 @@ final class SettingsBackupService {
         perAppLayoutService.isEnabled = backup.perAppLayoutEnabled
         perAppLayoutService.manualOverrides = backup.manualLayoutOverrides
         perAppLayoutService.replaceRememberedLayouts(backup.rememberedLayouts)
-        // Same "replace" policy as the exceptions above. `LearnedWordsStore`
-        // exposes no bulk setter (wave 3's file boundary keeps that store's
-        // contract untouched — read-only for the UI), so `removeAll()` +
-        // replaying `recordManualFix` the exact `count` times it takes to
-        // reach each entry's stored count is the only way to reconstruct
-        // (count, firstConfirmed, lastConfirmed, originApp) through the
-        // store's own already-tested state machine. Safe by construction:
-        // any entry that reached `count >= 2` in the live app already
-        // satisfies `lastConfirmed - firstConfirmed <= promotionWindow`
-        // (`recordManualFix` resets to count 1 otherwise), so replaying the
-        // first confirmation at `firstConfirmed` and the rest at
-        // `lastConfirmed` never crosses the 30-day reset itself.
+        // Same "replace" policy as the exceptions above. Each entry is restored EXACTLY (count,
+        // first/last dates, originApp, promotedAt): replaying `recordManualFix` at first/last
+        // cannot reproduce a promoted entry that spans more than the promotion window (promoted at
+        // day 1, fixed again at day 40 → the replay would reset it to count 1, inactive).
         learnedWordsStore.removeAll()
         for entry in backup.learnedWords {
-            let first = Date(timeIntervalSince1970: TimeInterval(entry.firstConfirmed))
-            let last = Date(timeIntervalSince1970: TimeInterval(entry.lastConfirmed))
-            learnedWordsStore.recordManualFix(word: entry.word, lang: entry.lang, originApp: entry.originApp, at: first)
-            if entry.count > 1 {
-                for _ in 1..<entry.count {
-                    learnedWordsStore.recordManualFix(
-                        word: entry.word, lang: entry.lang, originApp: entry.originApp, at: last
-                    )
-                }
-            }
+            learnedWordsStore.restoreEntry(
+                word: entry.word, lang: entry.lang,
+                entry: LearnedWordEntry(
+                    count: entry.count,
+                    firstConfirmed: Date(timeIntervalSince1970: TimeInterval(entry.firstConfirmed)),
+                    lastConfirmed: Date(timeIntervalSince1970: TimeInterval(entry.lastConfirmed)),
+                    originApp: entry.originApp,
+                    promotedAt: entry.promotedAt.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+                )
+            )
         }
         NotificationCenter.default.post(name: .settingsImported, object: self)
         NotificationCenter.default.post(name: .autoSwitchToggled, object: self)
