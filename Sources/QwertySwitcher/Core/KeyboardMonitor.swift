@@ -1145,7 +1145,8 @@ final class KeyboardMonitor {
                 && appProfile?.blockInstantCorrection != true {
                 if instantCorrectionGate.wasCorrected {
                     logInstantSilence(.alreadyCorrected, len: buffer.count)
-                } else if autoLearnTracker.isRetypePrefix(
+                } else if autoLearnTracker.isAwaitingRetype, autoLearnTracker.isRetypePrefix(
+                    // Checked first: the conversion below would otherwise run on every letter.
                     languageDetector.lastConvertedWord(keystrokes: buffer.currentWord()) ?? ""
                 ) {
                     // The user deleted a correction and is retyping the original: leave it alone.
