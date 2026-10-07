@@ -482,6 +482,11 @@ final class KeyboardMonitor {
         )
     }
 
+#if DEBUG
+    /// Test seam: `activeAppBundleID` is nil under `TestRunMode`, so a terminal-only rule needs a way in.
+    func setActiveAppBundleIDForTesting(_ id: String?) { activeAppBundleID = id }
+#endif
+
     @objc func appDidActivate(_ notification: Notification) { // internal: the test harness drives it
         lastActivationAt = CFAbsoluteTimeGetCurrent()
         keyDownsSinceActivation = 0
@@ -910,6 +915,9 @@ final class KeyboardMonitor {
             wordAutorepeatCount = 0
             lastCompletedWord = nil
             autoLearnTracker.cancel()
+            // A secure field is a new context: no sentence start / island ring carries over.
+            sentenceStartTracker.reset()
+            languageDetector.resetContext()
             // Mechanism B reset point 3/7: secure input.
             feedbackTracker.reset()
             pendingIslandRestore = false
@@ -1198,6 +1206,9 @@ final class KeyboardMonitor {
             runKeystrokes.removeAll()
             wordAutorepeatCount = 0
             lastCompletedWord = nil
+            // The caret moved: the sentence start before it is no longer the one before the next word.
+            sentenceStartTracker.reset()
+            languageDetector.resetContext()
             // Mechanism B reset point 6/7: navigation keys.
             feedbackTracker.reset()
             pendingIslandRestore = false
@@ -1258,10 +1269,23 @@ final class KeyboardMonitor {
         // A conversion re-renders `trailing` for the TARGET layout (EN "?"
         // typed for RU "," is shown as ",") — 23.09.2026: judge the sentence
         // end from what actually landed on screen, not the source symbol.
-        if !captured.isEmpty {
+        // English "." is kc47, a LETTER key ("ю" in Russian): it joins the word, so the boundary
+        // only sees the Space. When that word ends in an unshifted kc47 on a Latin layout (outside
+        // terminals, where ".." / "./x" are shell tokens), the Space is the period's gap.
+        let englishPeriodThenSpace = trailing == " "
+            && !snippetStarted && !languageReplacementStarted
+            && triggerEvent.keycode != 53
+            && captured.last.map { $0.keycode == 47 && !$0.flags.contains(.maskShift) } == true
+            && languageDetector.inputSourceManager.currentLayout?.isEnglish == true
+            && !LanguageDetector.isTerminalBundle(activeAppBundleID)
+        if englishPeriodThenSpace {
+            sentenceStartTracker.observeBoundary(".")
+            sentenceStartTracker.observeEmptyBoundary(isGap: true, leadHasDigit: false)
+        } else if !captured.isEmpty {
             sentenceStartTracker.observeBoundary(languageReplacementStarted ? (lastRetypedTrigger ?? trailing) : trailing)
         } else {
-            sentenceStartTracker.observeEmptyBoundary(isGap: proseBoundary, leadHasDigit: leadHasDigit)
+            // Esc types nothing, so it is not the gap after a period.
+            sentenceStartTracker.observeEmptyBoundary(isGap: proseBoundary && triggerEvent.keycode != 53, leadHasDigit: leadHasDigit)
         }
 
         if replacementStarted {
@@ -1273,6 +1297,11 @@ final class KeyboardMonitor {
             // cleared `buffer` via `layoutDidChange`). `pendingLeadingSymbols`
             // is read here, BEFORE it's cleared below.
             lastCompletedWord = (captured, trailing, typedLayout, pendingLeadingSymbols, triggerKeystroke)
+        } else if captured.isEmpty, keepForManualSwitch, trailing == " ", let history = lastCompletedWord,
+                  history.trailing.isEmpty {
+            // Double Shift re-armed the history with no trailing; this Space is the one that
+            // follows the converted word on screen. Keep it so a second Double Shift toggles back.
+            lastCompletedWord = (history.keystrokes, " ", history.typedLayout, history.leadingSymbols, triggerKeystroke)
         } else {
             lastCompletedWord = nil
         }

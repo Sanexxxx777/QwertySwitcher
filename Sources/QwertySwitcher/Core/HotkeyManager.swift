@@ -368,7 +368,7 @@ final class HotkeyManager {
             let currentIndex = layouts.firstIndex(where: { $0.id == current.id }) ?? 0
             target = layouts[(currentIndex + 1) % layouts.count]
         }
-        guard inputSourceManager.switchToAndVerify(target) else {
+        guard inputSourceManager.switchToAndVerify(target, selfInitiated: false) else {
             DebugLog.shared.log("HK", "singleShift aborted: layout switch verification failed")
             return
         }

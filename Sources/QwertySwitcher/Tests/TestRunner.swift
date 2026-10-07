@@ -135,6 +135,7 @@ enum TestRunner {
         StorageMigrationV2Tests.run()
         IslandTests.run()
         IslandRingIntegrationTests.run()
+        ModelAndLearningFixesTests.run()
         TerminalAppsTests.run()
         ShortTokenTests.run()
         BigramTablesTests.run()

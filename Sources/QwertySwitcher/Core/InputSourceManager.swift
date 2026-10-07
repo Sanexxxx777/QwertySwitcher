@@ -123,12 +123,15 @@ final class InputSourceManager {
     }
 
     @discardableResult
-    func switchTo(_ layout: KeyboardLayout) -> Bool {
+    /// `selfInitiated: false` is for a switch that is the USER's action carried out by the app
+    /// (Single Shift / CapsLock): the change is then classified external, so `KeyboardMonitor`
+    /// wipes the half-typed word that was typed in the old layout.
+    func switchTo(_ layout: KeyboardLayout, selfInitiated: Bool = true) -> Bool {
         if Self.layoutSwitchingIsSimulated {
             simulatedLayoutID = layout.id
             return true
         }
-        pendingSelfSwitchID = layout.id
+        if selfInitiated { pendingSelfSwitchID = layout.id }
         let status = TISSelectInputSource(layout.source)
         if status != noErr {
             NSLog("[InputSource] Failed to switch to \(layout.name): status=\(status)")
@@ -140,12 +143,12 @@ final class InputSourceManager {
 
     /// Selects and verifies a layout before any destructive text replacement starts.
     /// Must be called on the main thread because TIS notifications and AppKit state live there.
-    func switchToAndVerify(_ layout: KeyboardLayout, maxAttempts: Int = 3) -> Bool {
+    func switchToAndVerify(_ layout: KeyboardLayout, maxAttempts: Int = 3, selfInitiated: Bool = true) -> Bool {
         dispatchPrecondition(condition: .onQueue(.main))
         if currentLayout?.id == layout.id { return true }
 
         for attempt in 0..<max(1, maxAttempts) {
-            guard switchTo(layout) else { continue }
+            guard switchTo(layout, selfInitiated: selfInitiated) else { continue }
             if currentLayout?.id == layout.id { return true }
             if attempt + 1 < maxAttempts { Thread.sleep(forTimeInterval: 0.008) }
         }

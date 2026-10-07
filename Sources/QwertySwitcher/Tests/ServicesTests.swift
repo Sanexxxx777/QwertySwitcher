@@ -483,9 +483,10 @@ enum SmartCaseTests {
         )
         TestRunner.assertTrue(
             source.contains(
-                "sentenceStartTracker.observeEmptyBoundary(isGap: proseBoundary, leadHasDigit: leadHasDigit)"
+                "sentenceStartTracker.observeEmptyBoundary(isGap: proseBoundary && triggerEvent.keycode != 53,"
+                    + " leadHasDigit: leadHasDigit)"
             ),
-            "empty boundaries feed the gap/number rule to the sentence tracker"
+            "empty boundaries feed the gap/number rule to the sentence tracker (Esc is never a gap — plan 005)"
         )
         TestRunner.assertTrue(
             source.contains("sentenceStartTracker.consumeForWord(leadHasDigit: leadHasDigit)"),

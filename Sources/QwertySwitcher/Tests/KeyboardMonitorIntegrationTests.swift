@@ -2845,4 +2845,199 @@ enum IslandRingIntegrationTests {
         }
     }
 }
+
+// MARK: - Plan 005: typing-model fixes (smart case resets, Double Shift toggle-back, own layout switch)
+enum ModelAndLearningFixesTests {
+    private final class SecureFlag { var on = false }
+
+    static func run() {
+        TestRunner.section("Plan 005: smart case resets, Double Shift toggle-back, own layout switch")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the plan 005 suite")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let enReverse = InstantCorrectionFixtures.reverseMap(for: enLayout, inputSources: inputSources)
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+        let environment = KeyboardMonitorTestEnvironment(inputSources: inputSources)
+        defer { environment.restore() }
+
+        guard let privet = InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse),
+              let mir = InstantCorrectionFixtures.keystrokes(for: "мир", reverse: ruReverse),
+              let hello = InstantCorrectionFixtures.keystrokes(for: "hello", reverse: enReverse),
+              let world = InstantCorrectionFixtures.keystrokes(for: "world", reverse: enReverse),
+              let cd = InstantCorrectionFixtures.keystrokes(for: "cd", reverse: enReverse),
+              let ls = InstantCorrectionFixtures.keystrokes(for: "ls", reverse: enReverse),
+              let ghbdtn = InstantCorrectionFixtures.keystrokes(for: "ghbdtn", reverse: enReverse) else {
+            TestRunner.assertTrue(false, "plan 005 fixtures must type every character")
+            return
+        }
+        let space: UInt16 = 49
+        let esc: UInt16 = 53
+        let leftArrow: UInt16 = 123
+        let periodEN: UInt16 = 47 // "." on QWERTY, "ю" on ЙЦУКЕН
+        let periodRU: UInt16 = 44 // "." on ЙЦУКЕН
+        // Smart case is gated by `finishReplacement`'s 0.2 s cooldown after any replacement.
+        let pastCooldown: () -> Void = { Thread.sleep(forTimeInterval: 0.25) }
+
+        func harness(secure: SecureFlag? = nil, autoSwitch: Bool = true) -> KeyboardMonitorHarness {
+            let detector = SecureInputDetector(secureCheck: { secure?.on ?? false }, axProbe: { false })
+            let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources, secureInputDetector: detector)
+            h.prefs.isAutoSwitchEnabled = autoSwitch
+            h.prefs.isInstantCorrectionEnabled = false
+            h.prefs.isYoficatorEnabled = false
+            h.prefs.isSmartCaseEnabled = true
+            h.prefs.activeLayoutIDs = [enLayout.id, ruLayout.id]
+            h.exceptions.appExceptions = []
+            h.exceptions.wordExceptions = []
+            h.exceptions.autoLearned = [:]
+            return h
+        }
+
+        // Step 1 control: «привет.» + gap arms smart case (without it the tests below prove nothing).
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness()
+            h.type(privet); h.press(periodRU); h.press(space)
+            h.type(mir); h.press(space)
+            TestRunner.assertEqual(h.screen, "привет. Мир ", "1-control: the period + gap capitalizes the next word")
+        }
+
+        // 1a. A caret move (arrow key) between the gap and the next word disarms smart case.
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness()
+            h.type(privet); h.press(periodRU); h.press(space)
+            h.press(leftArrow)
+            h.type(mir); h.press(space)
+            // The simulated arrow key renders a private-use glyph, so judge case, not the exact string.
+            TestRunner.assertTrue(
+                h.screen.hasSuffix("мир ") && !h.screen.contains("Мир"),
+                "1a: arrow key disarms smart case — «мир» stays lowercase (got \"\(h.screen)\")"
+            )
+        }
+
+        // 1b. Secure input between the gap and the next word disarms it too.
+        inputSources.switchTo(ruLayout)
+        do {
+            let secure = SecureFlag()
+            let h = harness(secure: secure)
+            h.type(privet); h.press(periodRU); h.press(space)
+            secure.on = true
+            h.press(space) // a key typed in a secure field: the monitor only resets
+            secure.on = false
+            h.type(mir); h.press(space)
+            TestRunner.assertTrue(h.screen.lowercased().hasSuffix("мир "), "1b: sanity — the word was typed (got \"\(h.screen)\")")
+            TestRunner.assertTrue(!h.screen.contains("Мир"), "1b: secure input disarms smart case (got \"\(h.screen)\")")
+        }
+
+        // 1c. Esc after the period types nothing — it is not a gap.
+        inputSources.switchTo(ruLayout)
+        do {
+            let h = harness()
+            h.type(privet); h.press(periodRU)
+            h.press(esc)
+            h.type(mir); h.press(space)
+            TestRunner.assertTrue(!h.screen.contains("Мир"), "1c: Esc is not a gap — «мир» stays lowercase (got \"\(h.screen)\")")
+        }
+
+        // 1d. English layout, ordinary app: an unshifted "." (kc47) + Space arms smart case.
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness()
+            h.type(hello); h.press(periodEN); h.press(space)
+            h.type(world); h.press(space)
+            TestRunner.assertEqual(h.screen, "hello. World ", "1d: EN \".\" + Space capitalizes the next word")
+        }
+
+        // 1e. English layout in a terminal: «cd ..» must not arm it.
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness()
+            h.monitor.setActiveAppBundleIDForTesting("com.apple.Terminal")
+            h.type(cd); h.press(space)
+            h.press(periodEN); h.press(periodEN); h.press(space)
+            h.type(ls); h.press(space)
+            h.monitor.setActiveAppBundleIDForTesting(nil)
+            TestRunner.assertEqual(h.screen, "cd .. ls ", "1e: terminal \"..\" does not capitalize «ls»")
+        }
+
+        // 1f. English: a SHIFTED kc47 is "Ю"/">" — not a period, no arming.
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness()
+            h.type(hello); h.press(periodEN, flags: .maskShift); h.press(space)
+            h.type(world); h.press(space)
+            TestRunner.assertTrue(!h.screen.contains("World"), "1f: Shift+kc47 is not a period (got \"\(h.screen)\")")
+        }
+
+        // Step 2: Double Shift → Space → Double Shift toggles back.
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: false)
+            h.type(ghbdtn)
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "2: first Double Shift converts the buffered word")
+            TestRunner.assertEqual(h.screen, "привет", "2: setup — converted to «привет»")
+            h.press(space)
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "2: second Double Shift (after the Space) finds the history")
+            TestRunner.assertEqual(h.screen, "ghbdtn ", "2: toggled back, the Space kept")
+        }
+        // 2b. Anything else typed after the Space still clears the history.
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness(autoSwitch: false)
+            h.type(ghbdtn)
+            _ = h.monitor.swapLastWordInBuffer()
+            h.press(space)
+            h.press(space)
+            TestRunner.assertTrue(!h.monitor.swapLastWordInBuffer(), "2b: a second Space clears the history as before")
+        }
+
+        // Step 3: the app's own Single Shift / CapsLock switch is a USER switch.
+        do {
+            let url = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Core/HotkeyManager.swift")
+            if let text = try? String(contentsOf: url, encoding: .utf8) {
+                func body(of marker: String) -> String? {
+                    guard let r = text.range(of: marker) else { return nil }
+                    let tail = String(text[r.upperBound...])
+                    return tail.range(of: "\n    }\n").map { String(tail[..<$0.lowerBound]) } ?? tail
+                }
+                let single = body(of: "private func handleSingleShift()")
+                let success = body(of: "private func recordDoubleShiftSuccess(")
+                TestRunner.assertTrue(
+                    single?.contains("switchToAndVerify(target, selfInitiated: false)") == true,
+                    "3: handleSingleShift's switch is not self-initiated (the half-typed word is wiped)"
+                )
+                TestRunner.assertTrue(
+                    success != nil && success?.contains("selfInitiated: false") == false,
+                    "3: the Double Shift success switch stays self-initiated"
+                )
+            } else {
+                TestRunner.skip("HotkeyManager.swift not readable from \(url.path)")
+            }
+            TestRunner.assertEqual(
+                InputSourceManager.classifyChange(previousLayoutID: "a", newLayoutID: "b", pendingSelfSwitchID: nil),
+                .changed(selfInitiated: false),
+                "3: with no pending self-switch id the change is classified external"
+            )
+        }
+        // 3b. Monitor side: Shift event + external change right after one letter → wiped, never retyped.
+        inputSources.switchTo(enLayout)
+        do {
+            let h = harness()
+            h.activateApp() // inside the first-burst window — a retype WOULD be eligible without the Shift event
+            h.press(privet[0])
+            h.shiftDown(); h.shiftUp()
+            h.externalLayoutChange(to: ruLayout)
+            TestRunner.assertEqual(h.invocationCount, 0, "3b: the own Shift switch never retypes the first burst")
+            TestRunner.assertTrue(!h.monitor.swapLastWordInBuffer(), "3b: the stale half-typed word was wiped")
+        }
+    }
+}
 #endif
