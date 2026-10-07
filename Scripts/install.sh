@@ -19,9 +19,9 @@
 #
 #   3. The stored csreq names the SIGNING IDENTITY (`identifier "..." and
 #      certificate leaf = H"..."`). A build signed with a different identity —
-#      most often the ad-hoc fallback build.sh silently drops to when
-#      "SashaSwitcher Developer" is missing from the Keychain — no longer
-#      matches that csreq, so the grants are gone even though the directory and
+#      e.g. an ad-hoc one (build.sh now refuses that with exit 3 when
+#      "SashaSwitcher Developer" is missing, but a hand-run codesign can still
+#      produce one) — no longer matches that csreq, so the grants are gone even though the directory and
 #      its inode survived. `codesign --verify` cannot catch this: it checks the
 #      bundle against the DR embedded in its own signature, so an ad-hoc build
 #      happily "satisfies its Designated Requirement".
