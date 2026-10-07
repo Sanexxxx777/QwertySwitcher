@@ -87,6 +87,7 @@ enum TestRunner {
         QueueReplacementActiveTests.run()
         ReplayBurstAndFailureTests.run()
         ChordCommaRepairTests.run()
+        FirstBurstRetypeTests.run()
         AvalancheGuardWiringTests.run()
         HotPathStructuralGuardTests.run()
         ReplacementAtomicityGuardTests.run()

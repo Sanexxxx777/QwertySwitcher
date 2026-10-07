@@ -240,6 +240,19 @@ final class KeyboardMonitorHarness {
     func press(_ stroke: BufferedKeystroke) { press(stroke.keycode, flags: stroke.flags) }
     func type(_ strokes: [BufferedKeystroke]) { strokes.forEach { press($0) } }
 
+    /// An EXTERNAL layout change as the monitor sees it: macOS (not us) flipped the layout —
+    /// the simulated active source moves, then the same `.layoutChanged` notification
+    /// `InputSourceManager` posts in production (`selfInitiated: false`). Posting it twice
+    /// models the duplicate macOS sends (production filters it in `classifyChange`; the
+    /// monitor must still survive one that reaches it).
+    func externalLayoutChange(to layout: KeyboardLayout, selfInitiated: Bool = false) {
+        inputSources.switchTo(layout)
+        NotificationCenter.default.post(
+            name: .layoutChanged, object: nil,
+            userInfo: [InputSourceManager.selfInitiatedKey: selfInitiated]
+        )
+    }
+
     /// Completes a replacement the test put on hold via `replacer.mode =
     /// .deferred` — the harness's hand-crank for what happens automatically,
     /// later, in production. The queued keys drain inside the completion's
@@ -2028,6 +2041,179 @@ enum ChordCommaRepairTests {
                 "7: the repaired Shift does not count as a tap — no Double Shift (got \(actions))"
             )
             h.monitor.hotkeyManager = nil
+        }
+    }
+}
+
+
+// MARK: - Plan 013 step C: letters typed just before macOS switched the layout
+//
+// Field log: with macOS per-document input sources, entering a field flips the layout 25-32 ms
+// AFTER the first key. That first letter lands in the OLD layout; the external-change handler
+// used to just wipe the buffer, leaving one stray letter of the wrong alphabet. A one-or-two
+// letter burst that is the very last thing the tap saw is retyped in the NEW layout instead.
+enum FirstBurstRetypeTests {
+    static func run() {
+        TestRunner.section("First-burst retype — letters typed just before an external layout change (plan 013 C)")
+
+        let inputSources = InputSourceManager()
+        guard let enLayout = inputSources.supportedLayouts.first(where: { $0.isEnglish }),
+              let ruLayout = inputSources.supportedLayouts.first(where: { $0.isRussian }) else {
+            TestRunner.skip("EN + RU layouts are required for the first-burst retype fixtures")
+            return
+        }
+        let dictionary = WordDictionary()
+        dictionary.waitUntilPrefixIndexReady()
+        let ruReverse = InstantCorrectionFixtures.reverseMap(for: ruLayout, inputSources: inputSources)
+
+        let environment = KeyboardMonitorTestEnvironment(inputSources: inputSources)
+        defer { environment.restore() }
+
+        func harness() -> KeyboardMonitorHarness {
+            inputSources.switchTo(enLayout)
+            let h = KeyboardMonitorHarness(dictionary: dictionary, inputSources: inputSources)
+            h.prefs.isAutoSwitchEnabled = true
+            h.prefs.isInstantCorrectionEnabled = false // isolate the layout-change path
+            h.prefs.isYoficatorEnabled = false
+            h.prefs.isSmartCaseEnabled = false
+            h.prefs.activeLayoutIDs = [enLayout.id, ruLayout.id]
+            h.exceptions.appExceptions = []
+            h.exceptions.wordExceptions = []
+            h.exceptions.autoLearned = [:]
+            return h
+        }
+
+        // Synthetic Russian word typed on the Russian keys: its first key(s) reach the app while
+        // the layout is still EN ("g" for «п»), the rest after macOS flipped it.
+        guard let privet = InstantCorrectionFixtures.keystrokes(for: "привет", reverse: ruReverse),
+              privet.count == 6 else {
+            TestRunner.assertTrue(false, "first-burst fixture must type every character")
+            return
+        }
+
+        // 1. One letter in EN, external change to RU inside the window → one replacement with
+        //    the RU letter, buffer kept; the word is then judged as RU.
+        do {
+            let h = harness()
+            h.press(privet[0])
+            TestRunner.assertEqual(h.screen, "g", "1: setup — the first key landed in the old layout")
+            h.externalLayoutChange(to: ruLayout)
+            TestRunner.assertEqual(h.invocationCount, 1, "1: exactly one retype")
+            TestRunner.assertEqual(h.screen, "п", "1: the letter is retyped in the new layout")
+            h.type(Array(privet[1...]))
+            TestRunner.assertEqual(h.screen, "привет", "1: typing continues in RU")
+            TestRunner.assertEqual(h.invocationCount, 1, "1: nothing else was replaced")
+            // The buffer survived: Double Shift sees all six letters, so no stray «п»/"g" is left.
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "1: the kept buffer is a convertible word")
+            TestRunner.assertEqual(
+                h.screen, "ghbdtn",
+                "1: the word is judged as RU typed in full — erase count covers the retyped first letter"
+            )
+        }
+        do {
+            // Boundary view of the same scenario: a correct RU word is left alone.
+            let h = harness()
+            h.press(privet[0])
+            h.externalLayoutChange(to: ruLayout)
+            h.type(Array(privet[1...]))
+            h.press(49)
+            TestRunner.assertEqual(h.screen, "привет ", "1b: the RU word with its space stays as typed")
+            TestRunner.assertEqual(h.invocationCount, 1, "1b: boundary logic did not correct a RU word")
+        }
+
+        // 2. The change arrives 150 ms later → wiped as today.
+        do {
+            let h = harness()
+            h.press(privet[0])
+            Thread.sleep(forTimeInterval: 0.15)
+            h.externalLayoutChange(to: ruLayout)
+            TestRunner.assertEqual(h.invocationCount, 0, "2: a late change is not a first-burst retype")
+            TestRunner.assertEqual(h.screen, "g", "2: screen untouched")
+            TestRunner.assertTrue(!h.monitor.swapLastWordInBuffer(), "2: the buffer was wiped as today")
+        }
+
+        // 3. Three letters → wiped as today.
+        do {
+            let h = harness()
+            h.type(Array(privet[0..<3]))
+            h.externalLayoutChange(to: ruLayout)
+            TestRunner.assertEqual(h.invocationCount, 0, "3: three letters are not a first burst")
+            TestRunner.assertEqual(h.screen, "ghb", "3: screen untouched")
+            TestRunner.assertTrue(!h.monitor.swapLastWordInBuffer(), "3: the buffer was wiped as today")
+        }
+
+        // 4. A flagsChanged between the letter and the change → wiped as today.
+        do {
+            let h = harness()
+            h.press(privet[0])
+            h.shiftDown()
+            h.shiftUp()
+            h.externalLayoutChange(to: ruLayout)
+            TestRunner.assertEqual(h.invocationCount, 0, "4: a Shift event after the letter disqualifies the retype")
+            TestRunner.assertTrue(!h.monitor.swapLastWordInBuffer(), "4: the buffer was wiped as today")
+        }
+
+        // 5. Duplicate notification → exactly one retype, buffer not wiped by the duplicate.
+        do {
+            let h = harness()
+            h.press(privet[0])
+            h.externalLayoutChange(to: ruLayout)
+            h.externalLayoutChange(to: ruLayout)
+            TestRunner.assertEqual(h.invocationCount, 1, "5: the duplicate notification does not retype again")
+            TestRunner.assertEqual(h.screen, "п", "5: screen holds the single retyped letter")
+            h.type(Array(privet[1...]))
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "5: the duplicate did not wipe the retyped buffer")
+            TestRunner.assertEqual(h.screen, "ghbdtn", "5: the word is still whole after the duplicate")
+        }
+
+        // 6. Self-initiated change → untouched as today (buffer kept, nothing retyped).
+        do {
+            let h = harness()
+            h.press(privet[0])
+            h.externalLayoutChange(to: ruLayout, selfInitiated: true)
+            TestRunner.assertEqual(h.invocationCount, 0, "6: our own switch triggers no retype")
+            TestRunner.assertEqual(h.screen, "g", "6: screen untouched")
+            h.type(Array(privet[1...]))
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "6: the buffer survived the self-initiated change")
+            TestRunner.assertEqual(h.screen, "ghbdtn", "6: erase count covers the whole word as today")
+        }
+
+        // 7. A key typed while the retype is in flight is queued, then analysed by the drain:
+        //    the buffer ends up holding the whole word.
+        do {
+            let h = harness()
+            h.replacer.mode = .deferred
+            h.press(privet[0])
+            h.externalLayoutChange(to: ruLayout)
+            TestRunner.assertTrue(h.monitor.isPaused, "7: setup — the retype is in flight")
+            h.press(privet[1]) // queued
+            h.completePendingReplacement()
+            TestRunner.assertEqual(h.screen, "пр", "7: the queued key is delivered after the retype, in the new layout")
+            h.replacer.mode = .immediate(.success)
+            h.type(Array(privet[2...]))
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "7: the buffer holds the word")
+            TestRunner.assertEqual(
+                h.screen, "ghbdtn",
+                "7: the replayed key was analysed — erase count covers the retyped letter and the queued one"
+            )
+        }
+
+        // 8. The retype fails (layout verification) → the buffer is wiped as today, the queued key
+        //    starts a fresh one.
+        do {
+            let h = harness()
+            h.replacer.mode = .deferred
+            h.press(privet[0])
+            h.externalLayoutChange(to: ruLayout)
+            h.press(privet[1]) // queued
+            h.completePendingReplacement(with: .layoutSwitchFailed)
+            TestRunner.assertEqual(h.screen, "gр", "8: nothing was retyped; the queued key still reaches the app")
+            h.replacer.mode = .immediate(.success)
+            TestRunner.assertTrue(h.monitor.swapLastWordInBuffer(), "8: the queued key alone is in the buffer")
+            TestRunner.assertEqual(
+                h.screen, "gh",
+                "8: the failed retype wiped the first letter; only the queued key was converted"
+            )
         }
     }
 }

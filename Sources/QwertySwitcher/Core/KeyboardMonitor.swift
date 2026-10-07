@@ -169,6 +169,26 @@ final class KeyboardMonitor {
     }
     private var chordComma: ChordCommaCandidate?
 
+    // MARK: - First-burst retype (plan 013, step C)
+
+    /// A one-or-two letter burst whose last letter is at most this old when macOS reports an
+    /// external layout change is treated as typed just before the flip. Field: the flip lands
+    /// 25-32 ms after the first key (3 of 3 external changes in 24 h); 80 ms leaves margin without
+    /// reaching ordinary typing rhythm (a second key, or any Shift, voids it anyway).
+    private let firstBurstRetypeWindow: CFAbsoluteTime = 0.080
+
+    /// Layout every letter currently in `buffer` was typed in, read from `currentLayout` at each
+    /// append (set when the buffer was empty, `nil` as soon as one letter came from a different
+    /// layout). Nothing else in the monitor remembers this: the live layout is read at use time
+    /// and a notification can be 25+ ms late. Doubles as the duplicate-notification guard: a
+    /// "change" to the layout the buffer was typed in changed nothing for that text.
+    private var bufferTypedLayoutID: String?
+
+    /// True while the last keyDown/flagsChanged the tap saw was the append of a buffered letter
+    /// (keyUps do not count). Answers "was the letter the very last event before the layout
+    /// notification" — `lastKeyTime` then is that letter's arrival time.
+    private var lastEventWasLetter = false
+
     /// Count of `.tapDisabledByTimeout` events seen this run — a live-log
     /// counter (task: "защита от повторения") so a regression shows up as a
     /// rising number, not just individual log lines a human has to notice.
@@ -470,7 +490,24 @@ final class KeyboardMonitor {
         let selfInitiated = (notification.userInfo?[InputSourceManager.selfInitiatedKey] as? Bool) ?? false
         // Plan 013 B: a chord candidate belongs to ONE layout — any change, ours or not, voids it.
         chordComma = nil
-        guard !selfInitiated else { return }
+        let newLayout = languageDetector.inputSourceManager.currentLayout
+        guard !selfInitiated else {
+            // Our own switch moved the layout away from where the buffered letters were typed.
+            if bufferTypedLayoutID != newLayout?.id { bufferTypedLayoutID = nil }
+            return
+        }
+        // Plan 013 C: a "change" to the layout the buffered letters were typed in is the
+        // duplicate notification (or our own first-burst retype settling) — the text is already
+        // in that layout, so there is nothing to retype and nothing to wipe.
+        if !buffer.isEmpty, let id = newLayout?.id, bufferTypedLayoutID == id {
+            DebugLog.shared.log("KM", "layout change ignored: buffer already typed in it", level: .verbose)
+            return
+        }
+        if retypeFirstBurstIfEligible(newLayout: newLayout) { return }
+        wipeContextAfterExternalLayoutChange()
+    }
+
+    private func wipeContextAfterExternalLayoutChange() {
         logContextWipe("layout-changed-externally")
         buffer.clear()
         pendingLeadingSymbols.removeAll()
@@ -484,6 +521,67 @@ final class KeyboardMonitor {
         feedbackTracker.reset()
         pendingIslandRestore = false
         pendingIslandTarget = nil
+    }
+
+    /// Auto correction is allowed for the frontmost app right now: auto switch on, the app
+    /// profile does not block it, no game mode, no secure input. Same conditions as
+    /// `canAutoCorrect` in `handle` (which also needs the profile for other gates, so it keeps
+    /// its own copy), plus secure input (which `handle` checks earlier, before buffering).
+    private func autoCorrectionAllowedNow() -> Bool {
+        let appProfile = activeAppBundleID.flatMap { exceptionsService.profile(for: $0) }
+        return prefsService.isAutoSwitchEnabled
+            && appProfile?.blockAutoSwitch != true
+            && !gameMode.isActive(bundleID: activeAppBundleID)
+            && !secureInputDetector.isSecureInput
+    }
+
+    /// macOS per-document input source flips the layout ~30 ms AFTER the first key when a field
+    /// gets focus: the letter(s) already on screen are in the old alphabet. If the buffer is a
+    /// 1-2 letter burst that was the very last thing the tap saw, retype it in the NEW layout
+    /// through the ordinary pause/queue machinery (keys typed meanwhile queue, then drain through
+    /// `drainPendingUserEvents`) and KEEP the buffer — the same keycodes, now read in the layout
+    /// that is active. Returns true when the retype started (the caller must not wipe); on any
+    /// other outcome the caller wipes exactly as before. A failed or cancelled retype wipes in
+    /// its own completion, before the queued keys drain.
+    private func retypeFirstBurstIfEligible(newLayout: KeyboardLayout?) -> Bool {
+        let sources = languageDetector.inputSourceManager
+        guard let newLayout, !isPaused, lastEventWasLetter,
+              !buffer.isEmpty, buffer.count <= 2,
+              pendingLeadingSymbols.isEmpty, runKeystrokes.count == buffer.count,
+              let typedID = bufferTypedLayoutID, typedID != newLayout.id,
+              let typedLayout = sources.layout(withID: typedID),
+              autoCorrectionAllowedNow() else { return false }
+        let age = CFAbsoluteTimeGetCurrent() - lastKeyTime
+        guard age <= firstBurstRetypeWindow else { return false }
+        let active = languageDetector.activeLayouts
+        guard active.contains(where: { $0.id == typedID }),
+              active.contains(where: { $0.id == newLayout.id }) else { return false }
+        let keystrokes = buffer.currentWord()
+        let onScreen = sources.convertKeystrokes(keystrokes, toLayout: typedLayout)
+        let retyped = sources.convertKeystrokes(keystrokes, toLayout: newLayout)
+        // Both layouts must render every key, and the text must actually differ.
+        guard onScreen.count == keystrokes.count, retyped.count == keystrokes.count,
+              onScreen != retyped else { return false }
+
+        let dtMs = Int((age * 1000).rounded())
+        let count = keystrokes.count
+        lastEventWasLetter = false
+        isPaused = true
+        textReplacer.replaceCurrentWord(
+            length: count, replacement: retyped, targetLayout: newLayout,
+            trailing: nil, trailingAlreadyOnScreen: false
+        ) { [weak self] result in
+            guard let self else { return }
+            if result == .success {
+                self.bufferTypedLayoutID = newLayout.id
+                DebugLog.shared.log("KM", "first-burst retype: n=\(count) dt=\(dtMs)ms")
+            } else {
+                DebugLog.shared.log("KM", "first-burst retype: not applied (\(result)) n=\(count) dt=\(dtMs)ms")
+                self.wipeContextAfterExternalLayoutChange()
+            }
+            self.finishReplacement()
+        }
+        return true
     }
 
     func start() {
@@ -700,6 +798,7 @@ final class KeyboardMonitor {
         }
 
         if event.type == .flagsChanged {
+            lastEventWasLetter = false // plan 013 C: a modifier event after the letter voids the first-burst retype
             hotkeyManager?.handleFlagsChanged(keycode: UInt16(event.keycode), flags: event.flags)
             // AFTER the hotkey manager: its Shift-down resets `anyKeyBetweenShifts`, so the
             // "this Shift is not a bare tap" mark must come last (plan 013 B).
@@ -708,6 +807,7 @@ final class KeyboardMonitor {
         }
 
         guard event.type == .keyDown else { return }
+        lastEventWasLetter = false // plan 013 C: set again only by the buffered-letter append below
         // Any keyDown voids a pending chord candidate (a later key means the "." was a period).
         // This single line covers backspace, navigation keys, secure input and every ordinary
         // key; `kc44` re-arms it at the end of its own branch below.
@@ -971,8 +1071,12 @@ final class KeyboardMonitor {
                 lastAmbiguousKeyIndex = nil
                 lastLoggedInstantSilence = nil
                 instantCorrectionGate.startNewWord()
+                bufferTypedLayoutID = currentLayout?.id
+            } else if bufferTypedLayoutID != currentLayout?.id {
+                bufferTypedLayoutID = nil // letters from two layouts: no first-burst retype
             }
             buffer.append(keycode, flags: flags)
+            lastEventWasLetter = true
             // Game mode `heldKeys` evidence (spec §5 table): counts letters
             // that landed with the OS autorepeat flag set — a game control
             // held down, not a human typing. Reset alongside `runKeystrokes`/
