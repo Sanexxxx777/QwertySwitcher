@@ -25,7 +25,7 @@ final class UpdateFeedClient {
             completion(.failure(.badFeedURL))
             return
         }
-        let client = UpdateHTTPClient(maxBytes: 262_144, userAgent: userAgent)
+        let client = makeHTTPClient()
         client.fetch(url) { result in
             switch result {
             case .failure(let error):
@@ -41,5 +41,11 @@ final class UpdateFeedClient {
                 }
             }
         }
+    }
+
+    /// The feed is ~1 KB (cap 256 KB): a short whole-fetch budget keeps a
+    /// check from hanging on a host that trickles bytes forever.
+    func makeHTTPClient() -> UpdateHTTPClient {
+        UpdateHTTPClient(maxBytes: 262_144, totalTimeout: 15, userAgent: userAgent)
     }
 }

@@ -56,7 +56,7 @@ final class UpdateStager {
             completion(.failure(.network(.badStatus(0))))
             return
         }
-        let client = UpdateHTTPClient(maxBytes: maxDownloadBytes, userAgent: userAgent)
+        let client = makeDownloadClient()
         // Strong capture on purpose (field e2e 10.09.2026): the controller
         // creates the stager as a local and drops it right after this call,
         // so a `[weak self]` here was nil by the time the 4 MB zip had
@@ -73,6 +73,13 @@ final class UpdateStager {
                 self.validateAndUnpack(data: data, manifest: manifest, installedBundle: installedBundle, completion: completion)
             }
         }
+    }
+
+    /// The client's defaults are archive-sized: 15 s of silence = dead link,
+    /// 30 min for the whole zip. Never the feed's 15 s total (09.10.2026: that
+    /// failed the ~4.8 MB zip on every link under ~2.6 Mbit/s).
+    func makeDownloadClient() -> UpdateHTTPClient {
+        UpdateHTTPClient(maxBytes: maxDownloadBytes, userAgent: userAgent)
     }
 
     // MARK: - Pure limit evaluation (unit-testable without touching disk)

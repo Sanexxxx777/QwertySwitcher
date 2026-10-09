@@ -1,11 +1,17 @@
 import Foundation
 
 /// Every network call the updater makes goes through here: ephemeral
-/// session (no cookies/cache), a fixed timeout, a declared User-Agent, and a
+/// session (no cookies/cache), two timeouts, a declared User-Agent, and a
 /// hard cap on both the advertised `Content-Length` and the bytes actually
 /// received — a compromised or misconfigured feed host does not get to hand
 /// this process an unbounded download. One `UpdateHTTPClient` handles one
 /// fetch at a time; callers create a fresh instance per request.
+///
+/// `timeout` = longest silence (no bytes) before giving up: a dead link.
+/// `totalTimeout` = budget for the whole transfer, sized per caller to the
+/// slowest link it should still serve. They were one value (15 s) until
+/// 09.10.2026, which failed the ~4.8 MB archive on every link under
+/// ~2.6 Mbit/s while bytes were still arriving.
 final class UpdateHTTPClient: NSObject, URLSessionDataDelegate {
     enum ClientError: Error, Equatable {
         case tooLarge
@@ -15,16 +21,22 @@ final class UpdateHTTPClient: NSObject, URLSessionDataDelegate {
     }
 
     private let maxBytes: Int
-    private let timeout: TimeInterval
+    let timeout: TimeInterval
+    let totalTimeout: TimeInterval
     private let userAgent: String
     private var session: URLSession?
     private var buffer = Data()
     private var completion: ((Result<Data, ClientError>) -> Void)?
     private var finished = false
 
-    init(maxBytes: Int = 40_000_000, timeout: TimeInterval = 15, userAgent: String) {
+    /// The defaults fit the biggest thing this client fetches, the update
+    /// archive (`maxBytes` is its 40 MB cap): 30 min lets the current
+    /// ~4.8 MB zip finish at ~21 kbit/s. A small fetch passes a short
+    /// `totalTimeout` of its own (the feed: 15 s).
+    init(maxBytes: Int = 40_000_000, timeout: TimeInterval = 15, totalTimeout: TimeInterval = 30 * 60, userAgent: String) {
         self.maxBytes = maxBytes
         self.timeout = timeout
+        self.totalTimeout = totalTimeout
         self.userAgent = userAgent
     }
 
@@ -35,7 +47,7 @@ final class UpdateHTTPClient: NSObject, URLSessionDataDelegate {
 
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = timeout
-        config.timeoutIntervalForResource = timeout
+        config.timeoutIntervalForResource = totalTimeout
         config.httpCookieAcceptPolicy = .never
         config.httpShouldSetCookies = false
         config.urlCache = nil
