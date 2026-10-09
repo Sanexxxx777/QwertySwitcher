@@ -5,3 +5,6 @@ build.noindex/
 xcuserdata/
 .DS_Store
 .env
+CLAUDE.md
+AGENTS.md
+docs/agents/
