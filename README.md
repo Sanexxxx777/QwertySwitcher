@@ -125,3 +125,7 @@ raw event taps, keyboard layout APIs, a hand-rolled binary cache format for
 the dictionary — with no framework doing the hard part for you.
 
 — [Aleksandr Shulgin](https://github.com/Sanexxxx777) (@Aleksandr_NFA)
+
+## License
+
+MIT, see [`LICENSE`](LICENSE).
