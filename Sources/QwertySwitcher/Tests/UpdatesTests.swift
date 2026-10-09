@@ -878,60 +878,75 @@ enum UpdatesTests {
     private static func httpClientTimeouts() {
         TestRunner.section("Updates — HTTP client: idle timeout vs whole-transfer cap")
 
-        guard let alive = LoopbackHTTPServer(bodySize: 65_536, chunkSize: 4096, gap: 0.12) else {
-            TestRunner.skip("could not bind a loopback port for the slow-link test")
-            return
-        }
-        let slow = fetchSync(UpdateHTTPClient(maxBytes: 1_000_000, timeout: 1, userAgent: "qsw-tests"), alive.url)
-        alive.stop()
-        TestRunner.assertEqual(
-            (try? slow.result?.get())?.count ?? -1, 65_536,
-            "a slow but alive download (bytes every 0.12 s for ~1.9 s) outlives a 1 s idle timeout — got \(String(describing: slow.result)) after \(String(format: "%.1f", slow.elapsed)) s"
-        )
-        TestRunner.assertTrue(slow.elapsed > 1.5, "the slow-link transfer really took longer than the idle timeout")
-
-        guard let dead = LoopbackHTTPServer(bodySize: 65_536, chunkSize: 4096, gap: 0, stallAfterFirstChunk: 3) else {
-            TestRunner.skip("could not bind a loopback port for the stalled-link test")
-            return
-        }
-        let stalled = fetchSync(UpdateHTTPClient(maxBytes: 1_000_000, timeout: 1, userAgent: "qsw-tests"), dead.url)
-        dead.stop()
-        TestRunner.assertTrue(isTransportFailure(stalled.result) && stalled.elapsed < 2.5,
-                              "a link that goes silent mid-body still fails on the 1 s idle timeout, not when the server hangs up — got \(String(describing: stalled.result)) after \(String(format: "%.1f", stalled.elapsed)) s")
-
-        guard let capped = LoopbackHTTPServer(bodySize: 65_536, chunkSize: 4096, gap: 0.12) else {
-            TestRunner.skip("could not bind a loopback port for the whole-transfer cap test")
-            return
-        }
-        let overBudget = fetchSync(UpdateHTTPClient(maxBytes: 1_000_000, timeout: 5, totalTimeout: 1, userAgent: "qsw-tests"), capped.url)
-        capped.stop()
-        TestRunner.assertTrue(isTransportFailure(overBudget.result) && overBudget.elapsed < 1.8,
-                              "totalTimeout still caps an alive transfer that outruns it — got \(String(describing: overBudget.result)) after \(String(format: "%.1f", overBudget.elapsed)) s")
-
-        // Per-caller budgets, read off the exact client each caller fetches with.
+        // Per-caller budgets, read off the exact client each caller fetches
+        // with. First, so a loopback failure below can never hide them.
         let archive = UpdateStager(userAgent: "qsw-tests").makeDownloadClient()
         TestRunner.assertEqual(archive.timeout, 15, "archive download: 15 s of silence is still a dead link")
         TestRunner.assertTrue(archive.totalTimeout >= 5_000_000 / 8_000,
                               "archive download: a 5 MB zip finishes on a 64 kbit/s link (total \(archive.totalTimeout) s ≥ 625 s)")
         let feed = UpdateFeedClient(feedURLProvider: { "" }, userAgent: "qsw-tests").makeHTTPClient()
         TestRunner.assertEqual(feed.totalTimeout, 15, "feed fetch keeps its short 15 s whole-fetch budget")
+
+        // A failure case passes only between 0.9 s and its ceiling: an
+        // immediate reset or refused connection is a different failure and
+        // lands far below the 1 s timer. URLSession fires the whole-transfer
+        // timer late, anywhere in 1.0–1.9 s (measured 09.10.2026), so each
+        // ceiling keeps ≥1.5 s of slack and stays below the moment the server
+        // itself would finish or hang up.
+        if let alive = requireServer(LoopbackHTTPServer(bodySize: 65_536, chunkSize: 4096, gap: 0.12), "slow-link") {
+            let slow = fetchSync(UpdateHTTPClient(maxBytes: 1_000_000, timeout: 1, userAgent: "qsw-tests"), alive.url)
+            alive.stop()
+            TestRunner.assertEqual(
+                (try? slow.result?.get())?.count ?? -1, 65_536,
+                "a slow but alive download (bytes every 0.12 s for ~1.9 s) outlives a 1 s idle timeout — got \(describe(slow))"
+            )
+            TestRunner.assertTrue(slow.elapsed > 1.5, "the slow-link transfer really took longer than the idle timeout")
+        }
+
+        if let dead = requireServer(LoopbackHTTPServer(bodySize: 65_536, chunkSize: 4096, gap: 0, stallAfterFirstChunk: 5), "stalled-link") {
+            let stalled = fetchSync(UpdateHTTPClient(maxBytes: 1_000_000, timeout: 1, userAgent: "qsw-tests"), dead.url)
+            dead.stop()
+            TestRunner.assertTrue(isTimeoutShaped(stalled, ceiling: 3.5),
+                                  "a link that goes silent mid-body still fails on the 1 s idle timeout, not when the server hangs up at 5 s — got \(describe(stalled))")
+        }
+
+        if let capped = requireServer(LoopbackHTTPServer(bodySize: 131_072, chunkSize: 4096, gap: 0.15), "whole-transfer cap") {
+            let overBudget = fetchSync(UpdateHTTPClient(maxBytes: 1_000_000, timeout: 5, totalTimeout: 1, userAgent: "qsw-tests"), capped.url)
+            capped.stop()
+            TestRunner.assertTrue(isTimeoutShaped(overBudget, ceiling: 3.5),
+                                  "totalTimeout still caps an alive transfer (~4.8 s) that outruns it — got \(describe(overBudget))")
+        }
     }
 
-    private static func fetchSync(_ client: UpdateHTTPClient, _ url: URL) -> (result: Result<Data, UpdateHTTPClient.ClientError>?, elapsed: TimeInterval) {
+    /// A bind failure FAILS the case instead of skipping it: a skip leaves
+    /// the run green with the regression check silently gone.
+    private static func requireServer(_ server: LoopbackHTTPServer?, _ name: String) -> LoopbackHTTPServer? {
+        TestRunner.assertTrue(server != nil, "loopback server for the \(name) case is listening")
+        return server
+    }
+
+    private typealias FetchOutcome = (result: Result<Data, UpdateHTTPClient.ClientError>?, elapsed: TimeInterval)
+
+    /// Elapsed time on the monotonic clock (`systemUptime`), not `Date`.
+    private static func fetchSync(_ client: UpdateHTTPClient, _ url: URL) -> FetchOutcome {
         let done = DispatchSemaphore(value: 0)
         var outcome: Result<Data, UpdateHTTPClient.ClientError>?
-        let start = Date()
+        let start = ProcessInfo.processInfo.systemUptime
         client.fetch(url) { result in
             outcome = result
             done.signal()
         }
         _ = done.wait(timeout: .now() + 10)
-        return (outcome, Date().timeIntervalSince(start))
+        return (outcome, ProcessInfo.processInfo.systemUptime - start)
     }
 
-    private static func isTransportFailure(_ result: Result<Data, UpdateHTTPClient.ClientError>?) -> Bool {
-        if case .failure(.transport) = result { return true }
-        return false
+    private static func isTimeoutShaped(_ outcome: FetchOutcome, ceiling: TimeInterval) -> Bool {
+        guard case .failure(.transport) = outcome.result else { return false }
+        return outcome.elapsed >= 0.9 && outcome.elapsed < ceiling
+    }
+
+    private static func describe(_ outcome: FetchOutcome) -> String {
+        "\(String(describing: outcome.result)) after \(String(format: "%.1f", outcome.elapsed)) s"
     }
 
     /// Drops `//`-comment lines (including `///` doc comments) — this file's
